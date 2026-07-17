@@ -2,7 +2,7 @@
 name: plan-deliverables
 preamble-tier: 3
 interactive: true
-version: 1.0.0
+version: 1.1.0
 description: Turn an approved design/plan into per-milestone acceptance criteria, each measurable and paired with the specific check that validates it (the deliverable). (gstack)
 benefits-from: [office-hours]
 allowed-tools:
@@ -1106,10 +1106,36 @@ ACDATA
 if [ ! -s "$GAP_PROMPT_FILE" ] || grep -q '<PASTE THE DRAFTED AC LIST VERBATIM>' "$GAP_PROMPT_FILE"; then
   echo "GAP_PROMPT not populated — skip cross-model check for this piece (do NOT send placeholders)."
 else
-  # Run available models in PARALLEL (not sequentially); each bounded to 300s.
-  [ "$CODEX_OK" = "on" ] && ( _gstack_codex_timeout_wrapper 300 codex exec "$(cat "$GAP_PROMPT_FILE")" -C "$_REPO_ROOT" -s read-only -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="ultra"' < /dev/null > "$CODEX_GAP" 2>"$TMPERR"; echo "codex_rc=$?" >> "$CODEX_GAP" ) &
+  # Run available models in PARALLEL (not sequentially). Each walks an effort ladder inside its
+  # own subshell: `high` first (300s), then ONE retry at `medium` (180s) if it times out — a slow
+  # model steps down to a cheaper rung instead of dropping out of the check entirely.
+  # `high`, not `ultra` — ultra is codex's heaviest tier and cannot reliably finish inside a
+  # 300s (or even 600-900s) wrapper; see autobuilder-loop's forum recipe for the measured
+  # bisection (high: 470s on a milestone diff; ultra: two proven 600s timeouts, 0 bytes).
+  [ "$CODEX_OK" = "on" ] && (
+    for _e in high medium; do
+      _t=300; [ "$_e" = "medium" ] && _t=180
+      _gstack_codex_timeout_wrapper "$_t" codex exec "$(cat "$GAP_PROMPT_FILE")" -C "$_REPO_ROOT" -s read-only \
+        -c 'model="gpt-5.6-sol"' -c "model_reasoning_effort=\"$_e\"" < /dev/null > "$CODEX_GAP" 2>"$TMPERR"
+      _r=$?; [ "$_r" != "124" ] && break
+    done
+    echo "codex_rc=$_r effort=$_e" >> "$CODEX_GAP"
+  ) &
   CPID=$!
-  [ "$GROK_OK" = "on" ] && ( _gstack_codex_timeout_wrapper 300 grok -p "$(cat "$GAP_PROMPT_FILE")" -m grok-build --sandbox read-only --always-approve --output-format json < /dev/null > "$GROK_GAP" 2>"$TMPERR_GROK"; echo "grok_rc=$?" >> "$GROK_GAP" ) &
+  # No -m pin for grok: a pinned id silently breaks this gate on upstream deprecation, which
+  # already happened once (`grok-build` -> "unknown model id" between 2026-07-15 and 07-16).
+  # The CLI's own current default IS the latest (grok-4.5 as of 2026-07-17), so "no pin" ==
+  # "latest" and it survives the next rename. That default DOES accept --effort high|medium|low
+  # (verified 2026-07-17) — the older "default has no effort flag" note applied to grok-build.
+  [ "$GROK_OK" = "on" ] && (
+    for _e in high medium; do
+      _t=300; [ "$_e" = "medium" ] && _t=180
+      _gstack_codex_timeout_wrapper "$_t" grok -p "$(cat "$GAP_PROMPT_FILE")" --effort "$_e" \
+        --sandbox read-only --always-approve --output-format json < /dev/null > "$GROK_GAP" 2>"$TMPERR_GROK"
+      _r=$?; [ "$_r" != "124" ] && break
+    done
+    echo "grok_rc=$_r effort=$_e" >> "$GROK_GAP"
+  ) &
   GPID=$!
   wait $CPID 2>/dev/null; wait $GPID 2>/dev/null
   echo "=== CODEX ==="; cat "$CODEX_GAP" 2>/dev/null; echo "=== GROK ==="; cat "$GROK_GAP" 2>/dev/null
@@ -1117,11 +1143,12 @@ fi
 rm -f "$GAP_PROMPT_FILE" "$CODEX_GAP" "$GROK_GAP" "$TMPERR" "$TMPERR_GROK"   # these hold plan content — always clean up
 ```
 
-**Error handling (both models):** all failures are non-blocking. A run ending in
-`_rc=124` = timeout → treat that model as ABSENT for this piece and continue. Any other
-non-zero `_rc` (auth, empty, crash) → note the one-line reason and continue. If neither
-model produced usable output, note "cross-model gap-check unavailable — proceeding on
-in-distribution knowledge only" and carry on. **Never block the loop on a CLI model.**
+**Error handling (both models):** all failures are non-blocking. `_rc=124` means the model timed
+out at BOTH rungs (`high`, then the `medium` retry) → treat it as ABSENT for this piece and
+continue; the reported `effort=` tells you which rung actually produced the output. Any other
+non-zero `_rc` (auth, empty, crash) → note the one-line reason and continue. If neither model
+produced usable output, note "cross-model gap-check unavailable — proceeding on in-distribution
+knowledge only" and carry on. **Never block the loop on a CLI model.**
 
 > Note: `codex exec` will stall (to the 300s timeout) if the user's `codex` has a
 > broken/unauthenticated MCP server configured. That degrades to ABSENT gracefully, but

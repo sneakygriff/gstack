@@ -1,7 +1,7 @@
 ---
 name: autobuilder-loop
 preamble-tier: 3
-version: 1.3.0
+version: 1.4.0
 description: |
   Use when asked to "autobuilder", "build loop", "auto-build", "keep building
   automatically", "drive the plan to completion", or "run the build loop" on an
@@ -103,7 +103,7 @@ tier when available; Opus-max is its floor fallback.
 | Task | Route to | Dispatch recipe |
 |---|---|---|
 | Milestone orchestration + code-review synthesis | **Fable** if the loop-start probe confirmed it, else **Opus-max** | Agent tool, `model: fable` (or `model: opus`). Report the fallback in the envelope. |
-| Adversarial / independent second-opinion review | **Codex (`gpt-5.6-sol`, ultra) + Grok (`grok-build`)** via CLI — a cross-model forum | Each CLI runs inside its OWN Sonnet-low subagent's Bash — NOT emulated by a Claude subagent, and never a Task/Agent that role-plays them. See the adversarial-forum recipe in Quick reference. |
+| Adversarial / independent second-opinion review | **Codex (`gpt-5.6-sol`) + Grok (CLI default = latest)** via CLI — a cross-model forum, each on a `high` → `medium`-on-timeout effort ladder | Each CLI runs inside its OWN Sonnet-low subagent's Bash — NOT emulated by a Claude subagent, and never a Task/Agent that role-plays them. See the adversarial-forum recipe in Quick reference. |
 | Basic / mechanical (boilerplate, renames, file moves, config, docs, run a known command) | **Sonnet (lower effort)** | Agent tool, `model: sonnet`, lower effort. |
 | Coding — hard / complex / architectural | **Opus-max** | Agent tool, `model: opus`, `effort: max` (or `high` where max/xhigh is not exposed). |
 | Coding — moderate / localized | **Sonnet** | Agent tool, `model: sonnet`, higher effort. |
@@ -251,7 +251,9 @@ own fix/commit flows are skipped).
    comment resolution, and the review-log persist. It returns findings-only in the envelope.
 3. **Adversarial cross-model forum (Codex + Grok)** on the diff — two independent external-CLI
    reviews, each run inside its OWN Sonnet-low subagent's Bash, boundary-prefixed, read-only (Quick
-   reference). Codex runs `gpt-5.6-sol` at `ultra` effort; Grok runs `grok-build`. Cross-model gate
+   reference). Codex runs `gpt-5.6-sol` and Grok runs the CLI's own current default (= latest), each at
+   `high` effort with ONE `medium`-effort retry if it times out — a slow model steps down instead of
+   dropping out of the forum. Cross-model gate
    on `[P1]` — a `[P1]` from EITHER model FAILs the gate. If one member is unavailable/disabled,
    note it and continue on the other's cross-model coverage; if BOTH are unavailable, this becomes a
    single Claude adversarial subagent with findings tagged `[single-model]` and a printed notice —
@@ -436,7 +438,7 @@ or hang the loop. Each member's subagent runs its recipe and returns the envelop
 `{model, gate: PASS|FAIL, p1_findings[], p2_count, tokens}`, writing the verbatim CLI output to a
 report file. The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]`.
 
-*Codex member — `gpt-5.6-sol` at `ultra` effort:*
+*Codex member — `gpt-5.6-sol`, effort ladder `high` → `medium` on timeout:*
 
 ```bash
 source ~/.claude/skills/gstack/bin/gstack-codex-probe 2>/dev/null || true
@@ -445,22 +447,38 @@ source ~/.claude/skills/gstack/bin/gstack-codex-probe 2>/dev/null || true
 # the gate on that alone).
 _CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo on)
 
-TMPERR=$(mktemp "${TMP_ROOT:-/tmp}/codex-err-XXXXXX.txt")
-# 600s wrapper: `ultra` is codex's heaviest tier (max reasoning + automatic task delegation) and
-# needs more headroom than the canonical 330s review gate; timeouts are a known hang class (#1327).
-_gstack_codex_timeout_wrapper 600 codex review "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.
+TMPERR=$(mktemp "${TMP_ROOT:-/tmp}/codex-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
+CODEX_PROMPT=$(cat <<'EOF'
+IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.
 
-Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="ultra"' --enable web_search_cached < /dev/null 2>"$TMPERR"
-_CODEX_EXIT=$?
+Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes.
+EOF
+)
+# Effort ladder: `high` first (900s), then ONE retry at `medium` (420s) if it times out — a slow
+# model degrades to a cheaper rung instead of vanishing from the forum. NOT `ultra`: it is codex's
+# heaviest tier, heavier than `xhigh`, which this project's own codex/SKILL.md documents as causing
+# 50+ minute hangs on large-context tasks; `high` completed this same review class in 470s in a live
+# bisection (2026-07-16). `ultra` would need a tens-of-minutes wrapper and should be opt-in (e.g. a
+# `--xhigh`-style flag), never the mandatory gate's default. Never escalate here — only step down.
+for _eff in high medium; do
+  _to=900; [ "$_eff" = "medium" ] && _to=420
+  _gstack_codex_timeout_wrapper "$_to" codex review "$CODEX_PROMPT" -c 'model="gpt-5.6-sol"' -c "model_reasoning_effort=\"$_eff\"" --enable web_search_cached < /dev/null 2>"$TMPERR"
+  _CODEX_EXIT=$?
+  [ "$_CODEX_EXIT" != "124" ] && break
+  [ "$_eff" = "high" ] && echo "Codex timed out at high effort (${_to}s) — retrying ONCE at medium so the member is not lost…"
+done
 if [ "$_CODEX_EXIT" = "124" ]; then
-  echo "Codex stalled past 10 minutes — treat as UNABLE TO REVIEW (Codex member ABSENT; re-run or fall back)."
+  echo "Codex timed out at medium too — treat as UNABLE TO REVIEW (Codex member ABSENT; re-run or fall back)."
 elif [ "$_CODEX_EXIT" != "0" ]; then
   echo "[codex exit $_CODEX_EXIT] $(head -1 "$TMPERR" 2>/dev/null || echo "no stderr")"
 fi
 ```
 
-*Grok member — `grok-build`, read-only sandbox. Grok has no `review` subcommand, so the diff
-scope lives in the prompt:*
+*Grok member — read-only sandbox, effort ladder `high` → `medium` on timeout, no `-m` pin (let the
+CLI use its own current default rather than hardcoding a model id that can silently deprecate —
+`grok-build` did exactly that between 2026-07-15 and 2026-07-16, turning into an instant "unknown
+model id" error and losing this forum member; the current default IS the latest, grok-4.5 as of
+2026-07-17). Grok has no `review` subcommand, so the diff scope lives in the prompt:*
 
 ```bash
 # Honor config + availability. If grok is missing or grok_reviews is disabled, mark the Grok
@@ -468,17 +486,29 @@ scope lives in the prompt:*
 _GROK_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get grok_reviews 2>/dev/null || echo on)
 command -v grok >/dev/null 2>&1 || _GROK_ENABLED=absent
 
-TMPERR_GROK=$(mktemp "${TMP_ROOT:-/tmp}/grok-err-XXXXXX.txt")
+TMPERR_GROK=$(mktemp "${TMP_ROOT:-/tmp}/grok-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
+GROK_PROMPT=$(cat <<'EOF'
+IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify any files. Stay focused on the repository code only.
+
+You are an adversarial code reviewer. Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review ONLY those changes. Think like an attacker and a chaos engineer: edge cases, race conditions, security holes, resource leaks, failure modes, silent data-corruption paths. Tag every finding [P1] (ship-blocker) or [P2] (lower severity). No compliments — only problems. If there are no [P1] issues, say so explicitly.
+EOF
+)
 # Reuse codex's command-agnostic timeout wrapper (gtimeout -> timeout -> unwrapped; exit 124 =
 # timeout). --sandbox read-only is grok's OS-level guardrail (reads anywhere, cannot write repo
 # files, child network blocked — its own inference still works); --always-approve stops headless
-# from hanging on an approval prompt. grok-build does not support reasoning effort, so no --effort.
-_gstack_codex_timeout_wrapper 600 grok -p "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify any files. Stay focused on the repository code only.
-
-You are an adversarial code reviewer. Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review ONLY those changes. Think like an attacker and a chaos engineer: edge cases, race conditions, security holes, resource leaks, failure modes, silent data-corruption paths. Tag every finding [P1] (ship-blocker) or [P2] (lower severity). No compliments — only problems. If there are no [P1] issues, say so explicitly." -m grok-build --sandbox read-only --always-approve --output-format json < /dev/null 2>"$TMPERR_GROK"
-_GROK_EXIT=$?
+# from hanging on an approval prompt. Still no -m pin (see above). The CLI's current default
+# (grok-4.5) DOES accept --effort high|medium|low — verified 2026-07-17; the older "the default
+# model has no reasoning-effort flag" note applied to grok-build and is obsolete.
+# Effort ladder: `high` first (600s), then ONE retry at `medium` (300s) on timeout.
+for _eff in high medium; do
+  _to=600; [ "$_eff" = "medium" ] && _to=300
+  _gstack_codex_timeout_wrapper "$_to" grok -p "$GROK_PROMPT" --effort "$_eff" --sandbox read-only --always-approve --output-format json < /dev/null 2>"$TMPERR_GROK"
+  _GROK_EXIT=$?
+  [ "$_GROK_EXIT" != "124" ] && break
+  [ "$_eff" = "high" ] && echo "Grok timed out at high effort (${_to}s) — retrying ONCE at medium so the member is not lost…"
+done
 if [ "$_GROK_EXIT" = "124" ]; then
-  echo "Grok stalled past 10 minutes — treat as UNABLE TO REVIEW (Grok member ABSENT; re-run or fall back)."
+  echo "Grok timed out at medium too — treat as UNABLE TO REVIEW (Grok member ABSENT; re-run or fall back)."
 elif [ "$_GROK_EXIT" != "0" ]; then
   echo "[grok exit $_GROK_EXIT] $(head -1 "$TMPERR_GROK" 2>/dev/null || echo "no stderr")"
 fi
