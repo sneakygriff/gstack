@@ -1,7 +1,7 @@
 ---
 name: autobuilder-loop
 preamble-tier: 3
-version: 1.4.0
+version: 1.5.0
 description: |
   Use when asked to "autobuilder", "build loop", "auto-build", "keep building
   automatically", "drive the plan to completion", or "run the build loop" on an
@@ -438,13 +438,14 @@ or hang the loop. Each member's subagent runs its recipe and returns the envelop
 `{model, gate: PASS|FAIL, p1_findings[], p2_count, tokens}`, writing the verbatim CLI output to a
 report file. The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]`.
 
-*Codex member — `gpt-5.6-sol`, effort ladder `high` → `medium` on timeout:*
+*Codex member — `gpt-5.6-sol`, error-class-aware retry (timeout → step down effort; capacity/overload → back off + retry; quota → ABSENT this gate only):*
 
 ```bash
 source ~/.claude/skills/gstack/bin/gstack-codex-probe 2>/dev/null || true
 # Honor config + availability. If codex is not_installed / not_authed, or the user has
 # codex_reviews disabled, mark the Codex member ABSENT (see Forum fallback below — do NOT fail
-# the gate on that alone).
+# the gate on that alone). codex_reviews=off is the ONLY run-durable disable: a quota / capacity /
+# timeout failure in a PRIOR gate must NEVER carry forward — run this full recipe at EVERY gate.
 _CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo on)
 
 TMPERR=$(mktemp "${TMP_ROOT:-/tmp}/codex-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
@@ -454,24 +455,46 @@ IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definitio
 Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes.
 EOF
 )
-# Effort ladder: `high` first (900s), then ONE retry at `medium` (420s) if it times out — a slow
-# model degrades to a cheaper rung instead of vanishing from the forum. NOT `ultra`: it is codex's
-# heaviest tier, heavier than `xhigh`, which this project's own codex/SKILL.md documents as causing
-# 50+ minute hangs on large-context tasks; `high` completed this same review class in 470s in a live
-# bisection (2026-07-16). `ultra` would need a tens-of-minutes wrapper and should be opt-in (e.g. a
-# `--xhigh`-style flag), never the mandatory gate's default. Never escalate here — only step down.
-for _eff in high medium; do
-  _to=900; [ "$_eff" = "medium" ] && _to=420
+# Retry that branches on FAILURE CLASS, not just exit code — the exit code alone conflates three
+# very different failures (a July run proved this: exit-1 quota AND exit-1 capacity both looked
+# like "Codex gone"):
+#   * TIMEOUT (exit 124)  -> step DOWN effort once (high@900s -> medium@420s), then give up this gate.
+#                            NOT `ultra`: codex's heaviest tier; this project's codex/SKILL.md docs
+#                            it causing 50+min hangs, and `high` finished this review class in 470s
+#                            (live bisection 2026-07-16). Only ever step down, never escalate.
+#   * TRANSIENT (exit !=0, stderr "at capacity"/"overloaded"/"rate limit"/5xx/network) -> short
+#                            backoff + retry at the SAME effort (an immediate retry of a "model at
+#                            capacity" error succeeded in a live gate). Backend load, not our budget.
+#   * QUOTA (exit !=0, stderr "usage limit"/"try again at"/"quota") -> do NOT retry now (won't help
+#                            until reset); mark ABSENT for THIS gate only. The NEXT gate re-attempts
+#                            and it self-heals at the reset time — NEVER latch Codex off for the run.
+# Max 4 attempts so a hard failure can't spin. `sleep` here runs on the user's machine at gate time.
+_eff=high; _to=900; _CODEX_EXIT=1; _CODEX_STATUS=""; _try=0
+while [ "$_try" -lt 4 ]; do
+  _try=$((_try + 1))
   _gstack_codex_timeout_wrapper "$_to" codex review "$CODEX_PROMPT" -c 'model="gpt-5.6-sol"' -c "model_reasoning_effort=\"$_eff\"" --enable web_search_cached < /dev/null 2>"$TMPERR"
   _CODEX_EXIT=$?
-  [ "$_CODEX_EXIT" != "124" ] && break
-  [ "$_eff" = "high" ] && echo "Codex timed out at high effort (${_to}s) — retrying ONCE at medium so the member is not lost…"
+  [ "$_CODEX_EXIT" = "0" ] && { _CODEX_STATUS=ok; break; }
+  _elc=$(tr 'A-Z' 'a-z' < "$TMPERR" 2>/dev/null)
+  case "$_elc" in *"usage limit"*|*"try again at"*|*"quota"*|*"exceeded your"*) _CODEX_STATUS=quota; break ;; esac
+  [ "$_CODEX_STATUS" = "quota" ] && break
+  if [ "$_CODEX_EXIT" = "124" ]; then
+    if [ "$_eff" = "high" ]; then echo "Codex timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=420; continue; fi
+    _CODEX_STATUS=timeout; break
+  fi
+  case "$_elc" in
+    *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
+      echo "Codex transient error (exit $_CODEX_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); continue ;;
+    *) _CODEX_STATUS=error; break ;;
+  esac
 done
-if [ "$_CODEX_EXIT" = "124" ]; then
-  echo "Codex timed out at medium too — treat as UNABLE TO REVIEW (Codex member ABSENT; re-run or fall back)."
-elif [ "$_CODEX_EXIT" != "0" ]; then
-  echo "[codex exit $_CODEX_EXIT] $(head -1 "$TMPERR" 2>/dev/null || echo "no stderr")"
-fi
+[ -z "$_CODEX_STATUS" ] && _CODEX_STATUS=error   # retries exhausted
+case "$_CODEX_STATUS" in
+  ok) : ;;                                        # completed review is on stdout
+  quota)   echo "Codex QUOTA-limited ($(grep -iEo 'try again at[^\"}]*' "$TMPERR" | head -1 || echo 'usage limit hit')). ABSENT for THIS gate ONLY — the next milestone's gate re-attempts; do NOT carry this forward as a run-wide skip." ;;
+  timeout) echo "Codex timed out at high AND medium — ABSENT for this gate; the next gate re-attempts." ;;
+  error)   echo "[codex exit $_CODEX_EXIT] $(head -1 "$TMPERR" 2>/dev/null || echo 'no stderr') — ABSENT for this gate; the next gate re-attempts." ;;
+esac
 ```
 
 *Grok member — read-only sandbox, effort ladder `high` → `medium` on timeout, no `-m` pin (let the
@@ -499,19 +522,36 @@ EOF
 # from hanging on an approval prompt. Still no -m pin (see above). The CLI's current default
 # (grok-4.5) DOES accept --effort high|medium|low — verified 2026-07-17; the older "the default
 # model has no reasoning-effort flag" note applied to grok-build and is obsolete.
-# Effort ladder: `high` first (600s), then ONE retry at `medium` (300s) on timeout.
-for _eff in high medium; do
-  _to=600; [ "$_eff" = "medium" ] && _to=300
+# Same error-class-aware retry as the Codex member (grok can also hit quota / capacity / rate
+# limits, all exit !=0): TIMEOUT (124) -> step down high@600s -> medium@300s; TRANSIENT (capacity/
+# overload/rate/5xx/network) -> backoff + retry same effort; QUOTA -> ABSENT this gate only, next
+# gate re-attempts. Max 4 attempts. grok_reviews=off is the only run-durable disable.
+_eff=high; _to=600; _GROK_EXIT=1; _GROK_STATUS=""; _try=0
+while [ "$_try" -lt 4 ]; do
+  _try=$((_try + 1))
   _gstack_codex_timeout_wrapper "$_to" grok -p "$GROK_PROMPT" --effort "$_eff" --sandbox read-only --always-approve --output-format json < /dev/null 2>"$TMPERR_GROK"
   _GROK_EXIT=$?
-  [ "$_GROK_EXIT" != "124" ] && break
-  [ "$_eff" = "high" ] && echo "Grok timed out at high effort (${_to}s) — retrying ONCE at medium so the member is not lost…"
+  [ "$_GROK_EXIT" = "0" ] && { _GROK_STATUS=ok; break; }
+  _glc=$(tr 'A-Z' 'a-z' < "$TMPERR_GROK" 2>/dev/null)
+  case "$_glc" in *"usage limit"*|*"try again at"*|*quota*|*"exceeded your"*) _GROK_STATUS=quota; break ;; esac
+  [ "$_GROK_STATUS" = "quota" ] && break
+  if [ "$_GROK_EXIT" = "124" ]; then
+    if [ "$_eff" = "high" ]; then echo "Grok timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=300; continue; fi
+    _GROK_STATUS=timeout; break
+  fi
+  case "$_glc" in
+    *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
+      echo "Grok transient error (exit $_GROK_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); continue ;;
+    *) _GROK_STATUS=error; break ;;
+  esac
 done
-if [ "$_GROK_EXIT" = "124" ]; then
-  echo "Grok timed out at medium too — treat as UNABLE TO REVIEW (Grok member ABSENT; re-run or fall back)."
-elif [ "$_GROK_EXIT" != "0" ]; then
-  echo "[grok exit $_GROK_EXIT] $(head -1 "$TMPERR_GROK" 2>/dev/null || echo "no stderr")"
-fi
+[ -z "$_GROK_STATUS" ] && _GROK_STATUS=error
+case "$_GROK_STATUS" in
+  ok) : ;;
+  quota)   echo "Grok QUOTA-limited — ABSENT for THIS gate ONLY; the next milestone's gate re-attempts. Do NOT carry forward." ;;
+  timeout) echo "Grok timed out at high AND medium — ABSENT for this gate; the next gate re-attempts." ;;
+  error)   echo "[grok exit $_GROK_EXIT] $(head -1 "$TMPERR_GROK" 2>/dev/null || echo 'no stderr') — ABSENT for this gate; the next gate re-attempts." ;;
+esac
 ```
 
 **Forum fallback (the station must stay satisfiable).** Run BOTH members; each independently
@@ -520,6 +560,15 @@ unable-to-review / timed-out). If at least ONE member is PRESENT, the forum stan
 coverage — note any ABSENT member in the envelope and continue. If BOTH are ABSENT, fall back to a
 SINGLE Claude adversarial subagent (fresh context, findings tagged `[single-model]`) and print one
 line: `"Codex + Grok both unavailable/disabled; ran a single-model Claude adversarial pass ([single-model])."`
+
+**ABSENT is PER-GATE, never per-run (this is not optional).** A member that was ABSENT in one
+milestone's gate — for ANY reason: quota, capacity, timeout, transient error — MUST be re-attempted
+by running its full recipe above at the NEXT milestone's gate. Do NOT cache "Codex/Grok
+unavailable" and skip it for the rest of the run: quota self-heals at its reset time, and
+capacity/timeout/network are per-attempt conditions. Dispatch the member's recipe fresh every gate.
+The ONLY run-durable disable is the `codex_reviews` / `grok_reviews` config being off (a user
+choice). If a member is ABSENT, the audit-trail/review-log entry states the class (quota / timeout /
+transient / disabled) so the skip is visible and the reader knows it will be retried, not abandoned.
 
 **Gate verdict (fail-closed — absence of a positive success signal is a FAIL):** PASS only when
 every PRESENT member returned an explicit completed review whose max severity is `[P2]` or none.
@@ -570,6 +619,10 @@ never block the loop.
   until clean. There is no major/minor distinction and no "it's small" skip — the only carve-out is a plan-labeled
   docs-only milestone. The deferral valve batches at most one small, non-sensitive milestone
   forward, marks it "built — gate pending", and never applies to the final milestone.
+- **Re-attempt the forum members every gate.** A Codex/Grok ABSENT from a prior gate (quota,
+  capacity, timeout, transient) is NEVER carried forward — run each member's full recipe fresh at
+  every milestone's gate; quota self-heals at reset and capacity/timeout are per-attempt. Only the
+  `codex_reviews`/`grok_reviews` config being off is a durable skip.
 - **Docker-verify before done.** App reachable (2xx/3xx) on its port, zero console/network
   errors, every acceptance path PASS, tests+build green on fresh evidence. `NO_SERVER` = fail;
   4xx/5xx = fail. No Docker setup → AskUserQuestion (fix / waive / stop), never a silent skip.

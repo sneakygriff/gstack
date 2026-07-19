@@ -2,7 +2,7 @@
 name: plan-deliverables
 preamble-tier: 3
 interactive: true
-version: 1.1.0
+version: 1.2.0
 description: Turn an approved design/plan into per-milestone acceptance criteria, each measurable and paired with the specific check that validates it (the deliverable). (gstack)
 benefits-from: [office-hours]
 allowed-tools:
@@ -1113,11 +1113,19 @@ else
   # 300s (or even 600-900s) wrapper; see autobuilder-loop's forum recipe for the measured
   # bisection (high: 470s on a milestone diff; ultra: two proven 600s timeouts, 0 bytes).
   [ "$CODEX_OK" = "on" ] && (
-    for _e in high medium; do
-      _t=300; [ "$_e" = "medium" ] && _t=180
+    # Retry by failure class (exit code alone conflates timeout vs quota vs capacity):
+    # 124 -> step down high@300s -> medium@180s; capacity/overload/5xx -> backoff + retry same
+    # effort; quota -> stop (won't help now). Max 4 tries; this is advisory, never blocks the loop.
+    _e=high; _t=300; _r=1; _n=0
+    while [ "$_n" -lt 4 ]; do
+      _n=$((_n + 1))
       _gstack_codex_timeout_wrapper "$_t" codex exec "$(cat "$GAP_PROMPT_FILE")" -C "$_REPO_ROOT" -s read-only \
         -c 'model="gpt-5.6-sol"' -c "model_reasoning_effort=\"$_e\"" < /dev/null > "$CODEX_GAP" 2>"$TMPERR"
-      _r=$?; [ "$_r" != "124" ] && break
+      _r=$?; [ "$_r" = "0" ] && break
+      _lc=$(tr 'A-Z' 'a-z' < "$TMPERR" 2>/dev/null)
+      case "$_lc" in *"usage limit"*|*"try again at"*|*quota*|*"exceeded your"*) break ;; esac
+      if [ "$_r" = "124" ]; then [ "$_e" = "high" ] && { _e=medium; _t=180; continue; }; break; fi
+      case "$_lc" in *capacity*|*overloaded*|*"rate limit"*|*429*|*500*|*502*|*503*|*504*) sleep $((_n * 5)); continue ;; *) break ;; esac
     done
     echo "codex_rc=$_r effort=$_e" >> "$CODEX_GAP"
   ) &
@@ -1128,11 +1136,17 @@ else
   # "latest" and it survives the next rename. That default DOES accept --effort high|medium|low
   # (verified 2026-07-17) — the older "default has no effort flag" note applied to grok-build.
   [ "$GROK_OK" = "on" ] && (
-    for _e in high medium; do
-      _t=300; [ "$_e" = "medium" ] && _t=180
+    # Same failure-class retry as codex above.
+    _e=high; _t=300; _r=1; _n=0
+    while [ "$_n" -lt 4 ]; do
+      _n=$((_n + 1))
       _gstack_codex_timeout_wrapper "$_t" grok -p "$(cat "$GAP_PROMPT_FILE")" --effort "$_e" \
         --sandbox read-only --always-approve --output-format json < /dev/null > "$GROK_GAP" 2>"$TMPERR_GROK"
-      _r=$?; [ "$_r" != "124" ] && break
+      _r=$?; [ "$_r" = "0" ] && break
+      _lc=$(tr 'A-Z' 'a-z' < "$TMPERR_GROK" 2>/dev/null)
+      case "$_lc" in *"usage limit"*|*"try again at"*|*quota*|*"exceeded your"*) break ;; esac
+      if [ "$_r" = "124" ]; then [ "$_e" = "high" ] && { _e=medium; _t=180; continue; }; break; fi
+      case "$_lc" in *capacity*|*overloaded*|*"rate limit"*|*429*|*500*|*502*|*503*|*504*) sleep $((_n * 5)); continue ;; *) break ;; esac
     done
     echo "grok_rc=$_r effort=$_e" >> "$GROK_GAP"
   ) &
