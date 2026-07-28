@@ -1,7 +1,7 @@
 ---
 name: autobuilder-loop
 preamble-tier: 3
-version: 1.6.0
+version: 1.6.1
 description: |
   Use when asked to "autobuilder", "build loop", "auto-build", "keep building
   automatically", "drive the plan to completion", or "run the build loop" on an
@@ -232,11 +232,18 @@ base to disk — shell variables do NOT survive across Bash invocations, so the 
 live in a file, and a resume must reuse it rather than silently re-zeroing accumulated LOC:
 
 ```bash
-# Resume-safe: only initialize if absent. A re-invocation after an interruption keeps the
-# existing base, so LOC accumulated-but-unshipped still counts toward the cap.
-[ -s "$RUN_DIR/ship-base" ] || git rev-parse HEAD > "$RUN_DIR/ship-base"
-echo "SHIP_BASE=$(cat "$RUN_DIR/ship-base")"
+# Resume-safe FOR REAL: the base lives at the project level, branch-scoped — NOT inside
+# $RUN_DIR. Every invocation mints a fresh timestamped RUN_DIR, so a run-scoped base would
+# pass the [ -s ] guard never and silently re-zero unshipped LOC on every resume.
+SHIP_BASE_FILE="$HOME/.gstack/projects/$SLUG/autobuilder/${BRANCH}-ship-base"
+mkdir -p "$(dirname "$SHIP_BASE_FILE")"
+[ -s "$SHIP_BASE_FILE" ] || git rev-parse HEAD > "$SHIP_BASE_FILE"
+echo "SHIP_BASE=$(cat "$SHIP_BASE_FILE") (file: $SHIP_BASE_FILE)"
 ```
+
+A leftover base from a PRIOR completed run would inflate the meter — completion (below)
+deletes the file, and if the recorded base predates the plan's approval commit, tell the
+user and re-init with their confirmation.
 
 **Freeze the milestone set.** The ordered milestone list (with any resolution-time splits
 applied) is the frozen contract for this run. Completion (step 2) is defined over this frozen
@@ -269,7 +276,10 @@ routed subagent (per the table). Each subagent implements + writes/updates tests
 self-verifies + returns the envelope:
 `{status, requested_model, actual_model, fallback_reason, files_touched, change_summary,
 tests_run, test_result, follow_ups}`. Independent tasks → dispatch in parallel (multiple Agent
-calls in ONE turn, or `run_in_background: true`). Dependent tasks → sequence them. After any
+calls in ONE turn, or `run_in_background: true`) — "independent" means DISJOINT FILE SETS, not
+just logical independence; two subagents editing one worktree's shared file corrupt each other,
+so tasks whose `files_touched` may overlap are sequenced even when logically unrelated.
+Dependent tasks → sequence them. After any
 task returns a failing `test_result`, re-query ground truth via a fresh subagent before
 re-dispatching — never blindly re-run the same failing task.
 
@@ -284,8 +294,13 @@ checkpoint (step f).
 **c. MILESTONE GATE (MANDATORY — run on EVERY milestone before it can be marked complete).**
 There is no major/minor distinction and no "it's trivial" skip. The ONLY carve-out is a
 milestone the plan explicitly labels non-code (docs-only) — judged from the plan's label, never
-decided on the fly. Run every review in the gate — eng-review, /review, and the Codex + Grok
-adversarial forum — then dispatch model-routed fix subagents until CLEAN.
+decided on the fly. **First, commit the milestone's work**: dispatch the step-e marker subagent
+to `git add -A && git commit` a WIP commit on the feature branch — every reviewer below diffs
+`<base>...HEAD`, which sees ONLY committed state; uncommitted or untracked work would sail
+through the gate unreviewed. Then run every review in the gate — eng-review, /review, and the
+Codex + Grok adversarial forum — then dispatch model-routed fix subagents until CLEAN (CLEAN =
+zero `[P1]`; surviving `[P2]`s are recorded as follow-ups, per the Gate verdict). Fix commits
+land the same way before any re-review.
 
 Every review runs in a subagent that reads its own skill file from disk and follows ONLY the
 review-specific methodology — the orchestrator never reads source, diffs, or logs. Each returns
@@ -335,7 +350,9 @@ into the NEXT milestone's gate under strict bounds, all four of which hold:
 3. The FINAL milestone's gate is never deferrable.
 4. A batched milestone is marked **"built — gate pending"** in the plan (set its status marker
    to `<!-- status: built-gate-pending -->` when the plan carries one), NOT complete, until its
-   covering gate runs clean.
+   covering gate runs clean. The covering gate reviews the UNION: both milestones' full diff
+   range AND both sets of acceptance criteria in its brief — a gate that only looks at the
+   newer milestone has not covered the deferred one.
 Say so explicitly when you batch. If you cannot satisfy all four, gate the milestone now.
 
 **d. LOCAL DOCKER VERIFICATION (MANDATORY — before a milestone counts as done).**
@@ -354,8 +371,9 @@ Say so explicitly when you batch. If you cannot satisfy all four, gate the miles
   Absent a recorded user waiver, "no Docker setup found" is `BLOCKED`, never an implicit waiver.
 - **Bring it up:** a subagent runs the project's own wrapper first (`make up`), else
   `docker compose up -d --wait`. Reachability gate: `curl -s -o /dev/null -w '%{http_code}'
-  http://localhost:PORT` against the app root or a declared health endpoint, polled until it
-  returns. **A 2xx/3xx is up; a 4xx/5xx is a FAIL** (a crashed app returning 500 or a 404
+  http://localhost:PORT` against the app root or a declared health endpoint, polled with a hard
+  deadline (default 120s overall, `--connect-timeout 5 --max-time 10` per probe; deadline
+  expiry = FAIL, never an indefinite wait). **A 2xx/3xx is up; a 4xx/5xx is a FAIL** (a crashed app returning 500 or a 404
   catch-all is not "up") — unless the plan explicitly declares that status expected for the
   probed path. Also confirm `docker compose ps` shows services healthy with no restart loop in
   logs. `NO_SERVER` is a FAIL of "functional", never a pass or skip.
@@ -369,6 +387,9 @@ Say so explicitly when you batch. If you cannot satisfy all four, gate the miles
   acceptance-criterion path PASS.
 - Fix via routed subagents until green. Never mark a milestone done on a red or untested build.
   The subagent returns the compact verdict + pasted evidence lines; you do NOT ingest raw logs.
+- **Docker-fix changes re-enter the gate.** Config-only fixes (env, compose, ports) → note them
+  in the audit trail. CODE fixes made during this step happened AFTER the gate reviewed the
+  diff — re-run step c on the fix delta before step e. Post-gate code is ungated code.
 
 **e. Mark complete.** A **Haiku (or Sonnet-low)** subagent marks the milestone complete in the plan/
 TODOS.md (or **"built — gate pending"** if its gate was batched per the deferral valve) and
@@ -390,15 +411,22 @@ snapshots, test snapshots — they inflate the count meaninglessly):
 # unquoted $VAR (zsh does not word-split unquoted variables, so a $EXCL bundle silently
 # collapses into one garbage pathspec and the exclusions no-op; proven live 2026-07-29).
 # `*dist/*`-style patterns use git's default wildmatch where `*` crosses `/`, so they catch
-# monorepo-nested dist/build too.
-SHIP_BASE=$(cat "$RUN_DIR/ship-base" 2>/dev/null)
-if [ -z "$SHIP_BASE" ]; then
-  echo "SHIP_METER ERROR: $RUN_DIR/ship-base missing — re-init from step 0 before trusting any reading. Do NOT treat this as 0 LOC."
+# monorepo-nested dist/build too. LC_ALL=C pins git's English "insertions/deletions" words
+# for the awk parse (localized git would otherwise zero the count). Untracked lines are
+# counted via `cat | wc -l` in ONE stream — `xargs wc -l | tail -1` keeps only the LAST
+# xargs batch's total and silently undercounts large new-file sets.
+# The base lives at the PROJECT level (branch-scoped), NOT inside $RUN_DIR: every invocation
+# mints a fresh timestamped RUN_DIR, so a run-scoped base re-zeroes unshipped LOC on resume.
+eval "$(~/.claude/skills/gstack/bin/gstack-slug)" 2>/dev/null || true
+SHIP_BASE_FILE="$HOME/.gstack/projects/$SLUG/autobuilder/${BRANCH}-ship-base"
+SHIP_BASE=$(cat "$SHIP_BASE_FILE" 2>/dev/null)
+if [ -z "$SHIP_BASE" ] || ! git rev-parse -q --verify "${SHIP_BASE}^{commit}" >/dev/null 2>&1; then
+  echo "SHIP_METER STOP: meter base missing/invalid ($SHIP_BASE_FILE). Re-establish it (step 0 init) BEFORE dispatching any further coding task. A broken meter is a stop condition, never a 0-LOC reading."
 else
-  _TRACKED=$(git diff --shortstat "$SHIP_BASE" -- . ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap' 2>/dev/null \
+  _TRACKED=$(LC_ALL=C git diff --shortstat "$SHIP_BASE" -- . ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap' 2>/dev/null \
     | awk '{i=0; d=0; for(n=1;n<=NF;n++){if($(n+1)~/^insertion/){i=$n}; if($(n+1)~/^deletion/){d=$n}} print i+d+0}')
   _UNTRACKED=$(git ls-files --others --exclude-standard -z -- . ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap' 2>/dev/null \
-    | xargs -0 wc -l 2>/dev/null | tail -1 | awk '{print $1+0}')
+    | xargs -0 cat 2>/dev/null | wc -l | awk '{print $1+0}')
   _LOC=$(( ${_TRACKED:-0} + ${_UNTRACKED:-0} ))
   echo "SHIP_METER: $_LOC LOC since last checkpoint (${_TRACKED:-0} tracked + ${_UNTRACKED:-0} new-file)"
 fi
@@ -450,9 +478,15 @@ under one VERSION/CHANGELOG entry. So AskUserQuestion ONCE per checkpoint:
   scope, and version entry.
 - **B) Stack onto the same PR** — legal, but say plainly: the ≤5k discipline then applies
   per-checkpoint, NOT to the final PR, which will grow to the full run.
-Then reset the meter base — `git rev-parse HEAD > "$RUN_DIR/ship-base"` — append an
-audit-trail row (`ship-checkpoint N: <LOC> LOC, <milestones>, <PR/commit ref>, <landed|stacked>`),
-and continue with the next ship-unit.
+Then reset the meter base ATOMICALLY — capture first, write only on success, so a git
+failure can never truncate the previous base:
+`_NB=$(git rev-parse HEAD) && printf '%s\n' "$_NB" > "$SHIP_BASE_FILE"` — and append an
+audit-trail row (`ship-checkpoint N: <LOC> LOC, <milestones>, <PR/commit ref>, <landed|stacked>,
+base <old>-><new>`) BEFORE building anything on the new unit, so the base→checkpoint mapping
+survives an interruption. If the user LANDED the unit, first re-sync the working branch onto
+the updated remote base (a subagent fetches and rebases/re-branches, and verifies the new
+`SHIP_BASE` is an ancestor of HEAD) — continuing on a stale branch updates a closed PR and
+meters against the wrong history. Then continue with the next ship-unit.
 
 **g. Report.** Emit a one-line milestone summary to the user (what shipped, gate status,
 Docker status, `SHIP_METER: <n> LOC`). Continue to the next milestone.
@@ -470,9 +504,11 @@ rather than spinning.
 
 ## Completion & hand-off
 
-When the whole plan is done + Docker-verified + review-clean: STOP the loop. Present a
-concise completion report (fixed-vocabulary verdict + boxed summary), then write the
-machine-readable artifact and suggest — do NOT run — the business skills.
+When the whole plan is done + Docker-verified + review-clean + every ship-unit checkpointed:
+STOP the loop. Delete the meter base file (`rm -f "$SHIP_BASE_FILE"` — a leftover base would
+inflate the next run's meter with this run's history). Present a concise completion report
+(fixed-vocabulary verdict + boxed summary), then write the machine-readable artifact and
+suggest — do NOT run — the business skills.
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
@@ -480,7 +516,9 @@ machine-readable artifact and suggest — do NOT run — the business skills.
 ╠══════════════════════════════════════════════════════════════╣
 ║  Milestones:   N/N built                                     ║
 ║  Ship units:   K/K via /ship — max unit <M> LOC (target ≤5k) ║
-║  Review gate:  CLEAN (eng-review + /review + codex + grok)   ║
+║  Review gate:  CLEAN (eng-review + /review + <actual forum   ║
+║                members that were PRESENT — never list an     ║
+║                ABSENT member as if it reviewed>              ║
 ║  Docker:       VERIFIED FUNCTIONAL (port PORT, 0 console err) ║
 ║  Residual risk: <one line, or "none">                        ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -488,7 +526,9 @@ machine-readable artifact and suggest — do NOT run — the business skills.
 
 Verdict is one of `COMPLETE_VERIFIED` / `COMPLETE_UNVERIFIED` / `BLOCKED`:
 
-- `COMPLETE_VERIFIED` — every milestone gated clean and Docker-verified functional.
+- `COMPLETE_VERIFIED` — every milestone gated clean and Docker-verified functional, AND every
+  ship-unit checkpointed through /ship. Unshipped checkpoints block this verdict — completed
+  work that never hit its checkpoint is unshipped risk, not a verified plan.
 - `COMPLETE_UNVERIFIED` — legal ONLY with a recorded user Docker-verify waiver (step d, option
   B) captured in the audit trail (`waived_by_user`, timestamp, reason, residual risk). Absent
   that recorded waiver, the only legal verdicts are `COMPLETE_VERIFIED` or `BLOCKED`.
@@ -613,32 +653,46 @@ EOF
 #                            until reset); mark ABSENT for THIS gate only. The NEXT gate re-attempts
 #                            and it self-heals at the reset time — NEVER latch Codex off for the run.
 # Max 4 attempts so a hard failure can't spin. `sleep` here runs on the user's machine at gate time.
-_eff=high; _to=900; _CODEX_EXIT=1; _CODEX_STATUS=""; _try=0
-while [ "$_try" -lt 4 ]; do
-  _try=$((_try + 1))
-  _gstack_codex_timeout_wrapper "$_to" codex review "$CODEX_PROMPT" -c 'model="gpt-5.6-sol"' -c "model_reasoning_effort=\"$_eff\"" --enable web_search_cached < /dev/null 2>"$TMPERR"
-  _CODEX_EXIT=$?
-  [ "$_CODEX_EXIT" = "0" ] && { _CODEX_STATUS=ok; break; }
-  _elc=$(tr 'A-Z' 'a-z' < "$TMPERR" 2>/dev/null)
-  case "$_elc" in *"usage limit"*|*"try again at"*|*"quota"*|*"exceeded your"*) _CODEX_STATUS=quota; break ;; esac
-  [ "$_CODEX_STATUS" = "quota" ] && break
-  if [ "$_CODEX_EXIT" = "124" ]; then
-    if [ "$_eff" = "high" ]; then echo "Codex timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=420; continue; fi
-    _CODEX_STATUS=timeout; break
-  fi
-  case "$_elc" in
-    *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
-      echo "Codex transient error (exit $_CODEX_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); continue ;;
-    *) _CODEX_STATUS=error; break ;;
-  esac
-done
-[ -z "$_CODEX_STATUS" ] && _CODEX_STATUS=error   # retries exhausted
+if [ "$_CODEX_ENABLED" != "on" ]; then
+  _CODEX_STATUS=disabled   # the config gate must actually GATE — a computed-but-untested flag is dead code
+  echo "Codex member disabled (codex_reviews=$_CODEX_ENABLED) — ABSENT by user config (the one run-durable skip)."
+else
+  # If the probe source failed, run unwrapped rather than dying on a missing function.
+  if ! command -v _gstack_codex_timeout_wrapper >/dev/null 2>&1; then _gstack_codex_timeout_wrapper() { shift; "$@"; }; fi
+  # Substitute <base> in $CODEX_PROMPT with the detected base branch BEFORE running.
+  _eff=high; _to=900; _CODEX_EXIT=1; _CODEX_STATUS=""; _try=0
+  while [ "$_try" -lt 4 ]; do
+    _try=$((_try + 1))
+    _gstack_codex_timeout_wrapper "$_to" codex review "$CODEX_PROMPT" -c 'model="gpt-5.6-sol"' -c "model_reasoning_effort=\"$_eff\"" < /dev/null 2>"$TMPERR"
+    _CODEX_EXIT=$?
+    [ "$_CODEX_EXIT" = "0" ] && { _CODEX_STATUS=ok; break; }
+    _elc=$(tr 'A-Z' 'a-z' < "$TMPERR" 2>/dev/null)
+    case "$_elc" in *"usage limit"*|*"try again at"*|*"quota"*|*"exceeded your"*) _CODEX_STATUS=quota; break ;; esac
+    if [ "$_CODEX_EXIT" = "124" ]; then
+      if [ "$_eff" = "high" ]; then
+        # Step-down never consumes an attempt — the medium rung is GUARANTEED even if
+        # transient retries already spent the budget at high.
+        echo "Codex timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=420; _try=$((_try - 1)); continue
+      fi
+      _CODEX_STATUS=timeout; break
+    fi
+    case "$_elc" in
+      *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
+        if [ "$_try" -lt 4 ]; then echo "Codex transient error (exit $_CODEX_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); fi
+        continue ;;
+      *) _CODEX_STATUS=error; break ;;
+    esac
+  done
+  [ -z "$_CODEX_STATUS" ] && _CODEX_STATUS=error   # retries exhausted
+fi
 case "$_CODEX_STATUS" in
   ok) : ;;                                        # completed review is on stdout
+  disabled) : ;;                                  # already reported above
   quota)   echo "Codex QUOTA-limited ($(grep -iEo 'try again at[^\"}]*' "$TMPERR" | head -1 || echo 'usage limit hit')). ABSENT for THIS gate ONLY — the next milestone's gate re-attempts; do NOT carry this forward as a run-wide skip." ;;
   timeout) echo "Codex timed out at high AND medium — ABSENT for this gate; the next gate re-attempts." ;;
   error)   echo "[codex exit $_CODEX_EXIT] $(head -1 "$TMPERR" 2>/dev/null || echo 'no stderr') — ABSENT for this gate; the next gate re-attempts." ;;
 esac
+rm -f "$TMPERR"
 ```
 
 *Grok member — read-only sandbox, effort ladder `high` → `medium` on timeout, no `-m` pin (let the
@@ -670,32 +724,43 @@ EOF
 # limits, all exit !=0): TIMEOUT (124) -> step down high@600s -> medium@300s; TRANSIENT (capacity/
 # overload/rate/5xx/network) -> backoff + retry same effort; QUOTA -> ABSENT this gate only, next
 # gate re-attempts. Max 4 attempts. grok_reviews=off is the only run-durable disable.
-_eff=high; _to=600; _GROK_EXIT=1; _GROK_STATUS=""; _try=0
-while [ "$_try" -lt 4 ]; do
-  _try=$((_try + 1))
-  _gstack_codex_timeout_wrapper "$_to" grok -p "$GROK_PROMPT" --effort "$_eff" --sandbox read-only --always-approve --output-format json < /dev/null 2>"$TMPERR_GROK"
-  _GROK_EXIT=$?
-  [ "$_GROK_EXIT" = "0" ] && { _GROK_STATUS=ok; break; }
-  _glc=$(tr 'A-Z' 'a-z' < "$TMPERR_GROK" 2>/dev/null)
-  case "$_glc" in *"usage limit"*|*"try again at"*|*quota*|*"exceeded your"*) _GROK_STATUS=quota; break ;; esac
-  [ "$_GROK_STATUS" = "quota" ] && break
-  if [ "$_GROK_EXIT" = "124" ]; then
-    if [ "$_eff" = "high" ]; then echo "Grok timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=300; continue; fi
-    _GROK_STATUS=timeout; break
-  fi
-  case "$_glc" in
-    *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
-      echo "Grok transient error (exit $_GROK_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); continue ;;
-    *) _GROK_STATUS=error; break ;;
-  esac
-done
-[ -z "$_GROK_STATUS" ] && _GROK_STATUS=error
+if [ "$_GROK_ENABLED" != "on" ]; then
+  _GROK_STATUS=disabled   # gate on the flag for real — absent/off must skip the invocation
+  echo "Grok member disabled/absent (grok_reviews=$_GROK_ENABLED) — ABSENT ($([ "$_GROK_ENABLED" = "absent" ] && echo 'CLI not installed' || echo 'user config'))."
+else
+  if ! command -v _gstack_codex_timeout_wrapper >/dev/null 2>&1; then _gstack_codex_timeout_wrapper() { shift; "$@"; }; fi
+  # Substitute <base> in $GROK_PROMPT with the detected base branch BEFORE running.
+  _eff=high; _to=600; _GROK_EXIT=1; _GROK_STATUS=""; _try=0
+  while [ "$_try" -lt 4 ]; do
+    _try=$((_try + 1))
+    _gstack_codex_timeout_wrapper "$_to" grok -p "$GROK_PROMPT" --effort "$_eff" --sandbox read-only --always-approve --output-format json < /dev/null 2>"$TMPERR_GROK"
+    _GROK_EXIT=$?
+    [ "$_GROK_EXIT" = "0" ] && { _GROK_STATUS=ok; break; }
+    _glc=$(tr 'A-Z' 'a-z' < "$TMPERR_GROK" 2>/dev/null)
+    case "$_glc" in *"usage limit"*|*"try again at"*|*quota*|*"exceeded your"*) _GROK_STATUS=quota; break ;; esac
+    if [ "$_GROK_EXIT" = "124" ]; then
+      if [ "$_eff" = "high" ]; then
+        echo "Grok timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=300; _try=$((_try - 1)); continue   # step-down never consumes an attempt
+      fi
+      _GROK_STATUS=timeout; break
+    fi
+    case "$_glc" in
+      *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
+        if [ "$_try" -lt 4 ]; then echo "Grok transient error (exit $_GROK_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); fi
+        continue ;;
+      *) _GROK_STATUS=error; break ;;
+    esac
+  done
+  [ -z "$_GROK_STATUS" ] && _GROK_STATUS=error
+fi
 case "$_GROK_STATUS" in
   ok) : ;;
+  disabled) : ;;
   quota)   echo "Grok QUOTA-limited — ABSENT for THIS gate ONLY; the next milestone's gate re-attempts. Do NOT carry forward." ;;
   timeout) echo "Grok timed out at high AND medium — ABSENT for this gate; the next gate re-attempts." ;;
   error)   echo "[grok exit $_GROK_EXIT] $(head -1 "$TMPERR_GROK" 2>/dev/null || echo 'no stderr') — ABSENT for this gate; the next gate re-attempts." ;;
 esac
+rm -f "$TMPERR_GROK"
 ```
 
 **Forum fallback (the station must stay satisfiable).** Run BOTH members; each independently
@@ -718,9 +783,11 @@ transient / disabled) so the skip is visible and the reader knows it will be ret
 
 **Gate verdict (fail-closed — absence of a positive success signal is a FAIL):** PASS only when
 every PRESENT member returned an explicit completed review whose max severity is `[P2]` or none.
-FAIL on any `[P1]`/P0 from EITHER model, on "unable to review" / "no diff" / empty output, or on a
-non-zero / `124` (timeout) exit / malformed output from a member that was expected to run. A member
-being ABSENT is not by itself a PASS or a FAIL — but if BOTH are ABSENT and even the `[single-model]`
+FAIL on any `[P1]`/P0 from EITHER model, or on "unable to review" / "no diff" / empty or
+malformed output from a member that RAN (exit 0 but unusable = FAIL, not ABSENT). A member whose
+recipe classified it ABSENT (disabled / quota / timeout after both rungs / transient-exhausted /
+CLI missing) is ABSENT — those exits were already adjudicated by the recipe and are NOT
+re-counted as FAILs here. A member being ABSENT is not by itself a PASS or a FAIL — but if BOTH are ABSENT and even the `[single-model]`
 fallback did not complete, the station FAILs. Never read a silent no-op as clean. Log EACH member's
 verdict to the review-log so a skipped/failed review is visible.
 
@@ -756,8 +823,10 @@ never block the loop.
 
 - **Orchestrator only.** Never write/edit code, never read source/diffs/logs into your
   context, never run the build yourself. Your tools are `Agent`, `Bash`, `AskUserQuestion` —
-  top-level Bash is only for the Codex + Grok adversarial gate and review-log/telemetry.
-  Everything real happens in a subagent that returns a compact envelope.
+  top-level Bash is only for the Codex + Grok adversarial gate, review-log/telemetry, step 0
+  workspace setup, and the SHIP_METER (number-emitting git commands only — same list as Core
+  principles; the two lists are one rule). Everything real happens in a subagent that returns
+  a compact envelope.
 - **Route every dispatch.** Classify complexity first; emit `model:` every time. Probe Fable
   once at loop start; on unavailability route orchestration/synthesis to Opus 4.8-max
   (explicit `claude-opus-4-8`) and say so. **Opus 5 codes, it never orchestrates**; Fable/
@@ -783,6 +852,10 @@ never block the loop.
   set at resolution; re-read the next milestone each iteration; never reorder/merge/drop items
   from memory; follow-ups never silently become milestones or get dropped.
 - **Never auto-run business or plan skills.** Suggest /design-review, /plan-ceo-review,
-  /plan-design-review — the user owns those. Never auto-invoke /autoplan or any review skill.
+  /plan-design-review — the user owns those. Never auto-invoke /autoplan, and never run a
+  review skill OUTSIDE the milestone gate. (The gate's subagent reviews in step c — reading
+  eng-review//review methodology from disk — and the step-f /ship checkpoint are this loop's
+  own contract, not exceptions to it; this rule bans review/business skills as standalone
+  side quests, not the gate.)
 - **Evidence, not confidence.** No "done" without verification output tied to each
   acceptance criterion and a live Docker run.
