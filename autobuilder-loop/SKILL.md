@@ -1,7 +1,7 @@
 ---
 name: autobuilder-loop
 preamble-tier: 3
-version: 1.5.0
+version: 1.6.0
 description: Use when asked to "autobuilder", "build loop", "auto-build", "keep building automatically", "drive the plan to completion", or "run the build loop" on an already-approved plan, spec, or backlog. (gstack)
 triggers:
   - autobuilder loop
@@ -876,10 +876,12 @@ Read/Write/Edit/Glob/Grep because you are physically not the worker. So:
 - **You NEVER read source, diffs, or logs into your own context.** To inspect anything,
   dispatch a subagent that returns a distilled summary. Not the file — the summary.
 - **You NEVER run the build yourself.** A subagent brings the stack up and reports back.
-- **Top-level `Bash` is limited to the mandatory adversarial-forum review invocations (Codex +
-  Grok) and to `gstack-review-log` / telemetry.** Every repo read, build, and file mutation happens
-  inside a subagent. You do not `cat`, `grep`, `git diff`, or edit files from the main
-  session.
+- **Top-level `Bash` is limited to: the mandatory adversarial-forum review invocations (Codex +
+  Grok), `gstack-review-log` / telemetry, step 0's run-workspace setup, and the SHIP_METER
+  measurement (`git rev-parse` / `git diff --shortstat` / `git ls-files` — number-emitting
+  commands that carry no file content).** Every repo read, build, and file mutation happens
+  inside a subagent. You do not `cat`, `grep`, content-level `git diff`, or edit files from the
+  main session.
 - **Subagents return a COMPACT ENVELOPE, never raw output.** Requirements go OUT as an
   absolute brief-file path (authored by a scribe subagent, never by you); full reports come
   back written to an absolute report-file path; only a tiny envelope returns to you. See the
@@ -902,17 +904,21 @@ Classify every unit of work BEFORE dispatch, then route it. Emit `model:` on EVE
 dispatch — an omitted model silently inherits this session's most-expensive model and
 defeats routing entirely.
 
-Shorthand used below: **"Opus-max"** = `model: opus` at maximum effort (`effort: max`/`xhigh`
-where the runtime exposes it, else `high`). Fable is the preferred orchestration/synthesis
-tier when available; Opus-max is its floor fallback.
+Shorthand used below: **"Opus 4.8-max"** = `claude-opus-4-8` at maximum effort (`effort:
+max`/`xhigh` where the runtime exposes it, else `high`) — the ORCHESTRATION floor.
+**"Opus 5-max"** = `claude-opus-5` at maximum effort — the COMPLEX-IMPLEMENTATION tier.
+These are two different models with two different jobs and they never swap: Fable (else
+Opus 4.8-max) orchestrates, synthesizes, and consolidates; **Opus 5 NEVER orchestrates** —
+it is the heavy coding workhorse only. Where a host only exposes the bare `opus` alias,
+resolve which model it maps to (see the probe below) before using it for orchestration.
 
 | Task | Route to | Dispatch recipe |
 |---|---|---|
-| Milestone orchestration + code-review synthesis | **Fable** if the loop-start probe confirmed it, else **Opus-max** | Agent tool, `model: fable` (or `model: opus`). Report the fallback in the envelope. |
-| Adversarial / independent second-opinion review | **Codex (`gpt-5.6-sol`) + Grok (CLI default = latest)** via CLI — a cross-model forum, each on a `high` → `medium`-on-timeout effort ladder | Each CLI runs inside its OWN Sonnet-low subagent's Bash — NOT emulated by a Claude subagent, and never a Task/Agent that role-plays them. See the adversarial-forum recipe in Quick reference. |
-| Basic / mechanical (boilerplate, renames, file moves, config, docs, run a known command) | **Sonnet (lower effort)** | Agent tool, `model: sonnet`, lower effort. |
-| Coding — hard / complex / architectural | **Opus-max** | Agent tool, `model: opus`, `effort: max` (or `high` where max/xhigh is not exposed). |
-| Coding — moderate / localized | **Sonnet** | Agent tool, `model: sonnet`, higher effort. |
+| Milestone orchestration + code-review synthesis + forum-findings consolidation | **Fable** if the loop-start probe confirmed it, else **Opus 4.8-max** — NEVER Opus 5 | Agent tool, `model: fable` (or explicit `claude-opus-4-8`). Report the fallback in the envelope. |
+| Adversarial / independent second-opinion review | **Codex (`gpt-5.6-sol`) + Grok (CLI default = latest)** via CLI — a cross-model forum, each on a `high` → `medium`-on-timeout effort ladder. Findings loop BACK to the Fable/Opus 4.8 synthesis tier for consolidation — the forum never self-consolidates. | Each CLI runs inside its OWN Haiku (or Sonnet-low) subagent's Bash — NOT emulated by a Claude subagent, and never a Task/Agent that role-plays them. See the adversarial-forum recipe in Quick reference. |
+| Basic / mechanical (boilerplate, renames, file moves, config, docs, run a known command) + utility subagents (scribe, parse, mark-complete, CLI wrappers) | **Haiku** (latest), else Sonnet-low where the host has no Haiku | Agent tool, `model: haiku` (fallback `model: sonnet`, lower effort). |
+| Coding — hard / complex / architectural | **Opus 5-max** | Agent tool, explicit `claude-opus-5` (or `model: opus` ONLY where the probe confirmed the alias maps to Opus 5), `effort: max` (or `high` where max/xhigh is not exposed). |
+| Coding — moderate / localized | **Sonnet (latest)** | Agent tool, `model: sonnet`, higher effort. |
 
 `effort:` is not a documented gstack dispatch parameter on every host — if the runtime does
 not accept it, drop the key and put the effort instruction ("work at maximum reasoning
@@ -920,9 +926,10 @@ effort") in the prompt text instead.
 
 **Complexity classification (do this before every coding dispatch):** hard = new
 architecture, cross-cutting change, subtle concurrency/security, ambiguous requirements →
-Opus-max. Moderate = single module, clear spec, localized blast radius → Sonnet. Mechanical
-= the plan already contains the answer (transcription, rename, config) → Sonnet low. When
-unsure between two tiers, pick the higher one — but still name it.
+Opus 5-max. Moderate = single module, clear spec, localized blast radius → Sonnet. Mechanical
+= the plan already contains the answer (transcription, rename, config) → Haiku (Sonnet low
+where Haiku is unavailable). When unsure between two tiers, pick the higher one — but still
+name it.
 
 **Fable availability — probe once at loop start, do not attempt-and-catch per dispatch.**
 Silent model coercion is common: many hosts accept an unknown `model:` string and quietly
@@ -934,20 +941,43 @@ model id you are running as, nothing else." Inspect the returned id:
 - Envelope names a Fable model → cache "Fable available" for the whole run; route
   orchestration/synthesis to Fable.
 - Envelope names any other model (coercion) or the dispatch errors → cache "Fable
-  unavailable", route those tasks to **Opus-max**, and print one line: "Fable unavailable in
-  this runtime (probe returned <id>); routing orchestration/synthesis to Opus 4.8 at max
-  effort."
+  unavailable", route those tasks to **Opus 4.8-max** (explicit `claude-opus-4-8`), and print
+  one line: "Fable unavailable in this runtime (probe returned <id>); routing
+  orchestration/synthesis to Opus 4.8 at max effort."
 
-**Fallback floor.** Hard / architectural / security-sensitive coding work may fall back only
-WITHIN the Opus class (`fable → opus`). It may NEVER silently degrade to Sonnet — model
-choice matters most for exactly this work. Sonnet is a legal target for hard work only with
-an explicit user waiver. Every dispatch envelope MUST report `{requested_model,
-actual_model, fallback_reason}` so any downgrade is visible and auditable rather than
-silent.
+**Resolve the bare `opus` alias in the same probe step** (one extra trivial probe, `model:
+opus`, same "return your literal model id" instruction) when you intend to use the alias at
+all: if it resolves to an Opus 5 model, the alias is legal ONLY for the complex-coding tier
+and NEVER for orchestration; if it resolves to Opus 4.8, the alias may serve as the
+orchestration floor AND as the coding tier's in-class fallback string (on alias-only hosts
+the post-probe alias IS the legal way to express `claude-opus-4-8` — for orchestration and
+coding-fallback alike). If the host accepts explicit model ids, skip the ambiguity entirely
+and pass `claude-opus-4-8` / `claude-opus-5` per the table. If neither Fable nor an Opus 4.8
+route exists for orchestration, STOP and surface it (`BLOCKED` / `NEEDS_CONTEXT`) — never
+quietly orchestrate on Opus 5 or drop below the Opus class.
+
+**Check YOURSELF too — the top-level session is the primary orchestrator.** The probes above
+govern subagent dispatches, but every routing, gating, and consolidation decision in this
+loop is made by YOU, the main session. At loop start, state the model you are running as (you
+know your own model id). Fable or Opus 4.8 → proceed. An Opus 5 model → STOP: tell the user
+"this session runs <id>; the loop's orchestration contract is Fable/Opus 4.8 — relaunch under
+one of those (or explicitly waive this check to proceed anyway)" and wait. Any other model →
+same stop-and-ask. Never silently orchestrate a run from a model the routing table forbids
+for orchestration.
+
+**Fallback floor.** Orchestration/synthesis falls back only `fable → claude-opus-4-8`.
+Hard / architectural / security-sensitive coding falls back only WITHIN the Opus class
+(`claude-opus-5 → claude-opus-4-8`) — and that fallback is legal ONLY when Opus 5 is actually
+unavailable: the dispatch errored, or the envelope's `actual_model` shows coercion away from
+`claude-opus-5`. Never invoke it for cost or speed. Neither tier may EVER silently degrade to
+Sonnet — model choice matters most for exactly this work. Sonnet is a legal target for hard
+work only with an explicit user waiver. Every dispatch envelope MUST report
+`{requested_model, actual_model, fallback_reason}` so any downgrade is visible and auditable
+rather than silent.
 
 **The adversarial reviewers are CLIs, never Claude subagents.** Cross-model independence comes
 from running the actual GPT/codex and xAI/grok CLIs — not from where you invoke them. Run each
-CLI inside its OWN Sonnet-low subagent's Bash (so its verbatim output never lands in your
+CLI inside its OWN Haiku (or Sonnet-low) subagent's Bash (so its verbatim output never lands in your
 context). "Never a Task subagent" means: never spin up a Claude subagent and instruct it to "act
 as codex" or "act as grok" — that is same-model theater, not an independent second model. When
 BOTH external CLIs are genuinely unavailable, the gate falls back to a single Claude adversarial
@@ -974,14 +1004,14 @@ mkdir -p "$RUN_DIR/briefs" "$RUN_DIR/reports"
 echo "RUN_DIR=$RUN_DIR"
 ```
 
-A **Sonnet resolver/scribe** subagent authors every brief into `$RUN_DIR/briefs/` and returns
+A **Haiku-or-Sonnet resolver/scribe** subagent authors every brief into `$RUN_DIR/briefs/` and returns
 only its path; every subagent writes its full report into `$RUN_DIR/reports/`. You never author
 briefs and never inline repo/source content into prompts. Reference `$RUN_DIR` from the dispatch
 recipe.
 
 **Probe Fable** now (per Model routing) and cache the routing decision for the whole run.
 
-**Resolve the plan source.** Dispatch the Sonnet resolver. Precedence:
+**Resolve the plan source.** Dispatch the Haiku-or-Sonnet resolver. Precedence:
 explicit arg path > newest approved plan under the gstack plans dir > `SPEC.md` / `PLAN.md`
 bearing an approval marker > root `TODOS.md`. The resolver returns
 `{path, approval_evidence, milestone_count}` and writes the full parse to a report file. Do
@@ -993,14 +1023,37 @@ NOT read the plan into your own context.
   building an unapproved (possibly stale) spec. This skill's premise is that the plan is
   already approved.
 
-**Freeze the milestone set.** The ordered milestone list returned here is the frozen contract
-for this run. Completion (step 2) is defined over this frozen set only. New milestones require
-explicit user approval; they are never created silently from follow-ups (see the follow-ups
-contract in Quick reference).
+**Chunk into ship-units (BEFORE the freeze — this is a hard requirement, not a preference).**
+Unchunked runs balloon: past runs ended at 10-20k lines of diff in one deploy, where nobody —
+model or human — still holds full context, and quality collapses. So: have the resolver
+estimate a rough diff size per milestone (from the plan's scope hints; estimates are coarse —
+the runtime meter below is the enforcement). Then group consecutive milestones into
+**ship-units of ≤5,000 projected LOC each**. Any SINGLE milestone projected >5k must be split
+into sub-milestones here, at resolution, with the split shown to the user — never split
+silently, and never split after the freeze. Each ship-unit ends in an intermediary **/ship
+checkpoint** of verified work (see step f).
+
+Record the ship-unit boundaries AND the meter base commit in the audit trail, and persist the
+base to disk — shell variables do NOT survive across Bash invocations, so the meter base must
+live in a file, and a resume must reuse it rather than silently re-zeroing accumulated LOC:
+
+```bash
+# Resume-safe: only initialize if absent. A re-invocation after an interruption keeps the
+# existing base, so LOC accumulated-but-unshipped still counts toward the cap.
+[ -s "$RUN_DIR/ship-base" ] || git rev-parse HEAD > "$RUN_DIR/ship-base"
+echo "SHIP_BASE=$(cat "$RUN_DIR/ship-base")"
+```
+
+**Freeze the milestone set.** The ordered milestone list (with any resolution-time splits
+applied) is the frozen contract for this run. Completion (step 2) is defined over this frozen
+set only. New milestones require explicit user approval; they are never created silently from
+follow-ups (see the follow-ups contract in Quick reference). Ship-unit boundaries freeze as a
+CEILING: the runtime meter may end a unit early (move a ship boundary forward), but never
+skips a planned checkpoint or merges two units.
 
 ### 1. Build the next milestone
 
-**1.0. Re-parse from disk.** Each iteration, dispatch the **Sonnet-low** parse subagent to
+**1.0. Re-parse from disk.** Each iteration, dispatch the **Haiku (or Sonnet-low)** parse subagent to
 re-extract `{next_milestone, acceptance_criteria}` from the frozen plan on disk. This catches
 in-place edits to a milestone's criteria and keeps you honest — never work the next milestone
 from memory. When the plan carries per-milestone status markers
@@ -1009,7 +1062,11 @@ from memory. When the plan carries per-milestone status markers
 survives re-parsing instead of inferring "next" from unchecked criteria. Plans without markers
 fall back to the first milestone with unmet acceptance criteria.
 
-**a. Decompose.** A **Fable-or-Opus-max** orchestrator subagent decomposes the milestone into
+**Pre-dispatch SHIP_METER check (the 4k rule's home).** Before dispatching this milestone,
+run the step-f meter. At ≥ 4,000 LOC: checkpoint FIRST (step f), then start the milestone
+against the fresh base. Never begin a milestone that cannot plausibly finish inside the cap.
+
+**a. Decompose.** A **Fable-or-Opus-4.8-max** orchestrator subagent decomposes the milestone into
 tasks, classifies each by complexity (hard / moderate / mechanical), and returns the compact
 task plan: `{tasks[]: {id, summary, complexity, deps}}`.
 
@@ -1025,6 +1082,11 @@ re-dispatching — never blindly re-run the same failing task.
 **Task-level retry cap.** After 2 failed re-dispatches of the SAME task, stop and surface
 `BLOCKED` with the specific task and its last envelope. Do not spin.
 
+**Mid-milestone SHIP_METER check.** For any milestone projected > 2k LOC, re-run the step-f
+meter after each task batch returns. At ≥ 5,000 mid-milestone: stop dispatching feature
+tasks — only what is required to reach a coherent, verifiable state — then gate and
+checkpoint (step f).
+
 **c. MILESTONE GATE (MANDATORY — run on EVERY milestone before it can be marked complete).**
 There is no major/minor distinction and no "it's trivial" skip. The ONLY carve-out is a
 milestone the plan explicitly labels non-code (docs-only) — judged from the plan's label, never
@@ -1036,7 +1098,7 @@ review-specific methodology — the orchestrator never reads source, diffs, or l
 findings-only in its envelope; all fixes remain YOUR routed fix dispatches (the review skills'
 own fix/commit flows are skipped).
 
-1. **/plan-eng-review** on the milestone design/diff — a Fable-or-Opus-max subagent READS
+1. **/plan-eng-review** on the milestone design/diff — a Fable-or-Opus-4.8-max subagent READS
    `~/.claude/skills/gstack/plan-eng-review/SKILL.md` from disk and follows the review
    methodology only. It must SKIP, in addition to the sections below, the **Scope gate** (its
    mandated first-tool-call AskUserQuestion — a subagent has no user channel and would halt),
@@ -1048,7 +1110,7 @@ own fix/commit flows are skipped).
    in the brief file. Auto-decision policy for anything the skill would ask the user: apply the
    recommended option; list genuine taste decisions in the envelope's `follow_ups` (do NOT
    block on them). It returns findings compact.
-2. **/review** (code review) on the diff — an Opus-or-Fable subagent reads
+2. **/review** (code review) on the diff — a Fable-or-Opus-4.8-max subagent (never Opus 5 — this is synthesis-tier work) reads
    `~/.claude/skills/gstack/review/SKILL.md` from disk and runs the checklist passes against
    the diff. It must SKIP: the Preamble, Step 1 / branch + base-branch detect, the **Review
    Army dispatch** (`## Step 4.5: Review Army — Specialist Dispatch
@@ -1258,7 +1320,7 @@ If the Red Team subagent fails or times out, skip silently and continue.` — su
    **Fix-First / Step 5 flow and any commit** (fixes are the orchestrator's job), the Greptile
    comment resolution, and the review-log persist. It returns findings-only in the envelope.
 3. **Adversarial cross-model forum (Codex + Grok)** on the diff — two independent external-CLI
-   reviews, each run inside its OWN Sonnet-low subagent's Bash, boundary-prefixed, read-only (Quick
+   reviews, each run inside its OWN Haiku (or Sonnet-low) subagent's Bash, boundary-prefixed, read-only (Quick
    reference). Codex runs `gpt-5.6-sol` and Grok runs the CLI's own current default (= latest), each at
    `high` effort with ONE `medium`-effort retry if it times out — a slow model steps down instead of
    dropping out of the forum. Cross-model gate
@@ -1267,8 +1329,11 @@ If the Red Team subagent fails or times out, skip silently and continue.` — su
    single Claude adversarial subagent with findings tagged `[single-model]` and a printed notice —
    the gate stays satisfiable.
 
-Collect findings into a compact list. Dispatch fix subagents (routed by complexity) until the
-gate is clean, then re-run the gate. Log one review-log entry PER review (see Quick reference).
+Collect findings into a compact list — this consolidation is synthesis-tier work and happens
+on Fable/Opus 4.8 (that is YOU, whose model the loop-start self-check already verified; the
+forum members never self-consolidate, and Opus 5 never consolidates). Dispatch fix subagents
+(routed by complexity) until the gate is clean, then re-run the gate. Log one review-log entry
+PER review (see Quick reference).
 
 **Bounded deferral valve (not a free skip).** A genuinely small milestone's gate may be batched
 into the NEXT milestone's gate under strict bounds, all four of which hold:
@@ -1313,7 +1378,7 @@ Say so explicitly when you batch. If you cannot satisfy all four, gate the miles
 - Fix via routed subagents until green. Never mark a milestone done on a red or untested build.
   The subagent returns the compact verdict + pasted evidence lines; you do NOT ingest raw logs.
 
-**e. Mark complete.** A **Sonnet-low** subagent marks the milestone complete in the plan/
+**e. Mark complete.** A **Haiku (or Sonnet-low)** subagent marks the milestone complete in the plan/
 TODOS.md (or **"built — gate pending"** if its gate was batched per the deferral valve) and
 returns confirmation. When the milestone carries a `/plan-deliverables` status marker, update it
 in place — set `<!-- status: complete -->` on a gated-clean milestone, or
@@ -1321,14 +1386,91 @@ in place — set `<!-- status: complete -->` on a gated-clean milestone, or
 advances past it. Append a row to the Build Audit Trail (`$RUN_DIR/audit-trail.md`) via a
 subagent — not in your context.
 
-**f. Report.** Emit a one-line milestone summary to the user (what shipped, gate status,
-Docker status). Continue to the next milestone.
+**f. LOC meter + ship checkpoint (the anti-balloon gate).** Measure everything accumulated
+since the last checkpoint. Two components, because `git diff` against a commit sees ONLY
+tracked files — brand-new untracked files (the bulk of greenfield milestones) are invisible
+to it, and a meter that misses them re-creates the exact balloon this gate exists to prevent.
+Noise is excluded on both sides (lockfiles, build output, committed codegen, migration
+snapshots, test snapshots — they inflate the count meaninglessly):
+
+```bash
+# Exclude pathspecs are written INLINE and individually quoted on each command — never via an
+# unquoted $VAR (zsh does not word-split unquoted variables, so a $EXCL bundle silently
+# collapses into one garbage pathspec and the exclusions no-op; proven live 2026-07-29).
+# `*dist/*`-style patterns use git's default wildmatch where `*` crosses `/`, so they catch
+# monorepo-nested dist/build too.
+SHIP_BASE=$(cat "$RUN_DIR/ship-base" 2>/dev/null)
+if [ -z "$SHIP_BASE" ]; then
+  echo "SHIP_METER ERROR: $RUN_DIR/ship-base missing — re-init from step 0 before trusting any reading. Do NOT treat this as 0 LOC."
+else
+  _TRACKED=$(git diff --shortstat "$SHIP_BASE" -- . ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap' 2>/dev/null \
+    | awk '{i=0; d=0; for(n=1;n<=NF;n++){if($(n+1)~/^insertion/){i=$n}; if($(n+1)~/^deletion/){d=$n}} print i+d+0}')
+  _UNTRACKED=$(git ls-files --others --exclude-standard -z -- . ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap' 2>/dev/null \
+    | xargs -0 wc -l 2>/dev/null | tail -1 | awk '{print $1+0}')
+  _LOC=$(( ${_TRACKED:-0} + ${_UNTRACKED:-0} ))
+  echo "SHIP_METER: $_LOC LOC since last checkpoint (${_TRACKED:-0} tracked + ${_UNTRACKED:-0} new-file)"
+fi
+```
+
+- **`_LOC` ≥ 5,000 — HARD STOP.** Do not dispatch a single further coding task. The
+  ship-unit is over whether or not its planned milestones are all built.
+- **`_LOC` ≥ 4,000 — WARNING.** Print `"SHIP_METER WARNING: ${_LOC} LOC — approaching the
+  5k cap."` and checkpoint after THIS milestone. The warning's real home is the PRE-dispatch
+  check below — never start a new milestone at ≥ 4,000.
+- **Ship-unit boundary reached** (planned in step 0) — checkpoint now even if the meter is
+  low. Planned boundaries are a ceiling the meter may tighten (end a unit early), never
+  loosen — the freeze fixes the milestone SET; the meter may only move a SHIP boundary
+  earlier, never skip one.
+
+**The meter runs at THREE points, not one** — a single post-milestone reading lets a
+milestone balloon mid-flight past the cap unnoticed:
+1. **Step 1.0, BEFORE dispatching a milestone** — at ≥ 4,000, checkpoint FIRST, then start
+   the milestone against a fresh base. This is where the 4k rule bites.
+2. **Step b, after each task batch returns** (mandatory for any milestone projected > 2k
+   LOC) — at ≥ 5,000 mid-milestone: no new feature tasks; dispatch only what is required to
+   reach a coherent, verifiable state, then gate and checkpoint. The completion banner
+   reports the ACTUAL max unit size — if a unit lands over 5k despite this, the banner says
+   so; never claim ≤5k the mechanism didn't enforce.
+3. **Here at step f** — the authoritative end-of-milestone reading.
+
+**The checkpoint itself:** everything in the increment must be gate-clean and
+Docker-verified — or covered by the recorded user Docker-waiver from step d option B (a
+waived run checkpoints on gate-clean alone; the waiver, already in the audit trail, covers
+its checkpoints and the final `COMPLETE_UNVERIFIED` verdict stays reachable). A milestone
+still "built — gate pending" per the deferral valve gets its covering gate run NOW —
+**never ship ungated code** — and when that covering gate runs clean, re-mark the batched
+milestone complete (flip its `<!-- status: built-gate-pending -->` marker to `complete`)
+via the step-e subagent so it stops blocking step 2's completion check.
+
+**Run /ship the same way the gate runs its reviews:** dispatch a **Fable-or-Opus-4.8-max**
+subagent that READS `~/.claude/skills/gstack/ship/SKILL.md` from disk and executes the ship
+flow for this increment (ship's own checks and confirmations apply — this loop does not
+bypass them), returning `{commit, pr_url, version}` in the envelope. The /ship checkpoint is
+part of THIS loop's contract — an operational step, not one of the human-owned business
+skills the loop must never auto-run.
+
+**After /ship returns, resolve the PR before building on top of it.** /ship updates the SAME
+PR on re-invocation — stack N checkpoints on one branch and the final PR is the full-run
+diff again, plus every later /ship re-reviews all earlier units and the whole run lands
+under one VERSION/CHANGELOG entry. So AskUserQuestion ONCE per checkpoint:
+- **A) Land it now (recommended)** — the user merges (or /land-and-deploy runs); the loop
+  then continues from the updated base, and the next unit gets its own clean PR, review
+  scope, and version entry.
+- **B) Stack onto the same PR** — legal, but say plainly: the ≤5k discipline then applies
+  per-checkpoint, NOT to the final PR, which will grow to the full run.
+Then reset the meter base — `git rev-parse HEAD > "$RUN_DIR/ship-base"` — append an
+audit-trail row (`ship-checkpoint N: <LOC> LOC, <milestones>, <PR/commit ref>, <landed|stacked>`),
+and continue with the next ship-unit.
+
+**g. Report.** Emit a one-line milestone summary to the user (what shipped, gate status,
+Docker status, `SHIP_METER: <n> LOC`). Continue to the next milestone.
 
 ### 2. Repeat
 
-Loop steps 1.0–1f until the plan is COMPLETE: every milestone built, locally Docker-verified
-functional, and review-gated clean over the frozen milestone set. A milestone left
-"built — gate pending" is NOT complete. If a single milestone's fix cycle exceeds 3 gate/fix
+Loop steps 1.0–1g until the plan is COMPLETE: every milestone built, locally Docker-verified
+functional, review-gated clean over the frozen milestone set, and **every ship-unit
+checkpointed through /ship** — completed work that never hit a checkpoint is unshipped risk,
+not progress. A milestone left "built — gate pending" is NOT complete. If a single milestone's fix cycle exceeds 3 gate/fix
 rounds without going clean, STOP and surface a `BLOCKED` status with the specific blocker,
 rather than spinning.
 
@@ -1345,6 +1487,7 @@ machine-readable artifact and suggest — do NOT run — the business skills.
 ║  AUTOBUILDER-LOOP — COMPLETE                                  ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Milestones:   N/N built                                     ║
+║  Ship units:   K/K via /ship — max unit <M> LOC (target ≤5k) ║
 ║  Review gate:  CLEAN (eng-review + /review + codex + grok)   ║
 ║  Docker:       VERIFIED FUNCTIONAL (port PORT, 0 console err) ║
 ║  Residual risk: <one line, or "none">                        ║
@@ -1390,6 +1533,7 @@ the moment — and each is wrong.
 | "I'm already Opus and perfectly capable — routing is a nice-to-have." | "I can do it all myself" is the exact centralizing instinct the user forbade; it's slower/pricier for bulk work and wastes the specialized tiers. | Classify, then emit `model:` on every dispatch. |
 | "Tests are green and it looks clean — I'll batch one eng-review at the end." | Deferring the gate lets defects compound across milestones and become expensive to unwind; a self-check by the plan's author is not independent review. | Gate every milestone (eng-review + /review + codex + grok). Batch at most ONE small, non-sensitive milestone forward and say so. |
 | "Unit tests pass and the code is obviously correct — Docker is just packaging." | Unit tests don't prove the composed system runs; wiring, env vars, networking, migrations, and startup are exactly what only a real bring-up catches. | Bring the stack up in Docker and exercise it; "should work" ≠ verified. |
+| "Shipping mid-run breaks my flow — I'll ship everything together at the end." | That is exactly how runs balloon to 10-20k lines nobody can hold in context; unshipped verified work is accumulating risk, not progress, and a giant final deploy is where clean delivery dies. | Hard checkpoint: /ship each ≤5k-LOC unit (warn at 4k), reset the meter, then continue. |
 | "I'm right here with context — I'll run the business reviews too and hand back a complete package." | The user explicitly reserved office-hours / design-review / ceo-review for themselves; running them crosses a clear hand-off line. | Suggest them. Never auto-run. |
 | "Let the subagent report the full diff and logs so I can trust it — summaries might hide problems." | Context pollution comes back through the return channel; you drown in detail and lose the thread across milestones. | Require the compact envelope; the full report stays in a file on disk. |
 | "I've internalized the plan; re-reading TODOS.md every step is wasteful." | Working from memory lets scope silently drift, drop milestones, and skip gates — "drive to completion" becomes unverifiable. | Re-read the next milestone from disk (via subagent) each iteration. |
@@ -1414,7 +1558,7 @@ Docker run, or the user.
 ```
 Agent (subagent_type: general-purpose):
   description: "<one-line task>"
-  model: <fable|opus|sonnet>      # REQUIRED — never omit
+  model: <fable|claude-opus-4-8|claude-opus-5|sonnet|haiku>   # REQUIRED — never omit; bare `opus` only after the alias probe
   run_in_background: <true|false> # true = parallel / long work
   prompt: |
     Read your brief first: <ABS_BRIEF_PATH>   # requirements live here, verbatim
@@ -1439,7 +1583,7 @@ prevent termination) and NEVER silently dropped (that would fake completion). Ne
 require explicit user approval.
 
 **Adversarial cross-model forum (Codex + Grok) — two independent external CLIs, each run inside
-its OWN Sonnet-low subagent's Bash, boundary-prefixed, read-only, gate on `[P1]`.** The forum is
+its OWN Haiku (or Sonnet-low) subagent's Bash, boundary-prefixed, read-only, gate on `[P1]`.** The forum is
 what makes the gate cross-model: Codex is OpenAI, Grok is xAI — two vendors, two model families,
 so neither's blind spots decide the gate alone. The gate is mandatory, so it must never hard-fail
 or hang the loop. Each member's subagent runs its recipe and returns the envelope
@@ -1566,8 +1710,10 @@ esac
 resolves to PRESENT (ran and returned a completed review) or ABSENT (missing / disabled /
 unable-to-review / timed-out). If at least ONE member is PRESENT, the forum stands on cross-model
 coverage — note any ABSENT member in the envelope and continue. If BOTH are ABSENT, fall back to a
-SINGLE Claude adversarial subagent (fresh context, findings tagged `[single-model]`) and print one
-line: `"Codex + Grok both unavailable/disabled; ran a single-model Claude adversarial pass ([single-model])."`
+SINGLE Claude adversarial subagent — dispatched at **Opus 4.8-max** (`claude-opus-4-8`), fresh
+context, findings tagged `[single-model]`; like every dispatch it names its `model:` explicitly
+rather than inheriting the session default — and print one line:
+`"Codex + Grok both unavailable/disabled; ran a single-model Claude adversarial pass ([single-model])."`
 
 **ABSENT is PER-GATE, never per-run (this is not optional).** A member that was ABSENT in one
 milestone's gate — for ANY reason: quota, capacity, timeout, transient error — MUST be re-attempted
@@ -1621,8 +1767,15 @@ never block the loop.
   top-level Bash is only for the Codex + Grok adversarial gate and review-log/telemetry.
   Everything real happens in a subagent that returns a compact envelope.
 - **Route every dispatch.** Classify complexity first; emit `model:` every time. Probe Fable
-  once at loop start; on unavailability route orchestration/synthesis to Opus-max and say so.
-  Hard work never silently degrades below the Opus class.
+  once at loop start; on unavailability route orchestration/synthesis to Opus 4.8-max
+  (explicit `claude-opus-4-8`) and say so. **Opus 5 codes, it never orchestrates**; Fable/
+  Opus 4.8 orchestrate and consolidate; Sonnet takes moderate work, Haiku the mechanical
+  and utility work. Hard work never silently degrades below the Opus class.
+- **Ship in chunks — the 5k/4k rule.** Chunk the plan into ship-units of ≤5,000 LOC at
+  resolution; meter the diff after every milestone (`SHIP_METER`); warn at 4,000 (current
+  milestone becomes the unit's last) and HARD-STOP at 5,000 — gate, Docker-verify, /ship the
+  increment, reset the meter, continue. Never start a new milestone with the meter ≥4k, and
+  never ship ungated code at a checkpoint.
 - **Gate EVERY milestone.** eng-review + /review + Codex + Grok (the adversarial forum), fix
   until clean. There is no major/minor distinction and no "it's small" skip — the only carve-out is a plan-labeled
   docs-only milestone. The deferral valve batches at most one small, non-sensitive milestone
