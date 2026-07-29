@@ -1,7 +1,7 @@
 ---
 name: ship
 preamble-tier: 4
-version: 1.0.0
+version: 1.1.0
 description: "Ship workflow: detect + merge base branch, run tests, review diff, bump VERSION, update CHANGELOG, commit, push, create PR. (gstack)"
 allowed-tools:
   - Bash
@@ -1244,9 +1244,11 @@ Before pushing, re-verify if code changed during Steps 4-6:
 
 1. **Test verification:** If ANY code changed after Step 5's test run (fixes from review findings, CHANGELOG edits don't count), re-run the test suite. Paste fresh output. Stale output from Step 5 is NOT acceptable.
 
-2. **Build verification:** If the project has a build step, run it. Paste output.
+2. **Lint + typecheck verification:** If any code changed after Step 5, re-run the Step 5 lint and typecheck commands too — a review-fix that breaks the types must not push. Paste the fresh one-line results.
 
-3. **Rationalization prevention:**
+3. **Build verification:** If the project has a build step, run it. Paste output.
+
+4. **Rationalization prevention:**
    - "Should work now" → RUN IT.
    - "I'm confident" → Confidence is not evidence.
    - "I already tested earlier" → Code changed since then. Test again.

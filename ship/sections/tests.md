@@ -164,15 +164,33 @@ Only commit if there are changes. Stage all bootstrap files (config, test direct
 `db:test:prepare` internally, which loads the schema into the correct lane database.
 Running bare test migrations without INSTANCE hits an orphan DB and corrupts structure.sql.
 
-Run both test suites in parallel:
+Run both test suites in parallel — and, in the same batch, **lint + typecheck** (detected
+below; ship gates on all four, not tests alone — a type error tests never touch must not
+reach the PR):
 
 ```bash
 bin/test-lane 2>&1 | tee /tmp/ship_tests.txt &
 npm run test 2>&1 | tee /tmp/ship_vitest.txt &
+# Lint — first match wins: the project's own script, else a detected tool, else skip.
+{ if grep -q '"lint"' package.json 2>/dev/null; then (npm run lint || bun run lint) ; \
+  elif [ -f biome.json ] || [ -f biome.jsonc ]; then bunx @biomejs/biome check . ; \
+  elif ls .eslintrc* eslint.config.* >/dev/null 2>&1; then bunx eslint . ; \
+  else echo "LINT: no lint script/config detected — skipped"; fi; } 2>&1 | tee /tmp/ship_lint.txt &
+# (bunx @biomejs/biome, never bare "bunx biome" — the bare name is an unrelated squatted
+# package that exits 0 on anything, turning the lint gate into a silent false-clean.)
+# Typecheck — project's own script, else tsc when a tsconfig exists, else skip.
+{ if grep -q '"typecheck"' package.json 2>/dev/null; then (npm run typecheck || bun run typecheck) ; \
+  elif [ -f tsconfig.json ]; then bunx tsc --noEmit ; \
+  else echo "TYPECHECK: no typecheck script/tsconfig — skipped"; fi; } 2>&1 | tee /tmp/ship_typecheck.txt &
 wait
 ```
 
-After both complete, read the output files and check pass/fail.
+After all complete, read the output files and check pass/fail.
+
+**If lint or typecheck fails:** fix in-branch findings now (or STOP if they can't be fixed
+cleanly). Never skip lint — a detected linter that errors is a gate failure, not a warning.
+Pre-existing violations untouched by this branch's diff may be TODOed rather than fixed, but
+say so explicitly.
 
 **If any test fails:** Do NOT immediately stop. Apply the Test Failure Ownership Triage:
 
@@ -282,7 +300,7 @@ Use AskUserQuestion:
 
 **After triage:** If any in-branch failures remain unfixed, **STOP**. Do not proceed. If all failures were pre-existing and handled (fixed, TODOed, assigned, or skipped), continue to Step 6.
 
-**If all pass:** Continue silently — just note the counts briefly.
+**If all pass:** Continue silently — just note the counts briefly (tests, lint, typecheck).
 
 ---
 
