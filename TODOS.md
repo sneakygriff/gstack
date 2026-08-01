@@ -135,7 +135,66 @@ SKILL.md untouched). `bun test` is green again.
 
 ## Token-reduction follow-ups (Phase B, filed via /plan-eng-review on the plan-ceo-review carve)
 
-### P3: Carve the always-loaded `{{PREAMBLE}}` reference blocks into an on-demand doc
+### ✅ DONE (v1.61.0.0): Carve the always-loaded `{{PREAMBLE}}` reference blocks into an on-demand doc
+
+Shipped as issue #48. The runtime-conditional preamble mass (full AskUserQuestion
+spec, onboarding chain, artifacts-sync rare paths) now lives once under
+`preamble/sections/` behind a compact per-skill index, Claude-host only. Suite
+3.50 MB → 2.60 MB (−26%), ~18 KB off every tier-≥2 skill. Union-parity + freshness
+guards applied (`test/parity-suite`, `carve-guards`, golden fixtures). The compact
+always-loaded AskUserQuestion contract keeps the hot path inline.
+
+### P2: #48 fix 5 — repo hygiene (deferred from the v1.61.0.0 carve)
+
+**What:** gstack's own oversized tracked files: `CHANGELOG.md` (~912 KB), `TODOS.md`
+(~144 KB), `CLAUDE.md` (~60 KB, ~15k tokens loaded at every session start when working
+on gstack itself). Issue #48 fix 5. Deliberately excluded from the v1.61.0.0 carve PR to
+keep that diff reviewable; a 900 KB CHANGELOG rewrite would have buried the carve.
+
+**Why:** `CLAUDE.md` is loaded every session; the CHANGELOG/TODOS size is contributor-
+facing friction. Severable from the carve — belongs in its own small PR.
+
+**Effort estimate:** M (human) → S (CC+gstack)
+**Priority:** P2
+
+### P3: #48 — wire the per-edit lint hook install (`bin/gstack-lint-touched`)
+
+**What:** The hook ships hardened (repo-local binaries only, fail-open, time-bounded)
+but nothing registers it as a PostToolUse hook — it's dormant. Design the opt-in install
+(e.g. `gstack-settings-hook add-event --event PostToolUse --matcher 'Edit|Write'
+--command ~/.claude/skills/gstack/bin/gstack-lint-touched --source ship-gate`,
+rollback-able) and gate it behind explicit consent, since it changes the edit loop
+globally. Add a test asserting the install reference exists once wired.
+
+**Why:** Left dormant deliberately in v1.61.0.0 (a global edit-time hook is a standing-
+config change, not a silent side effect of an unrelated ship).
+
+**Priority:** P3
+
+### P3: #48 — regression tests for brain-cache F10 and skill-check host-aware branch
+
+**What:** Two v1.61.0.0 fixes lack dedicated tests (the coverage-gen subagents hit the
+monthly spend limit before writing them): (1) `bin/gstack-brain-cache`
+`fetchLocalDecisionsLedger` + null-on-failure semantics (assert a gbrain-unreachable
+failure is never cached as a fabricated-empty digest); (2) `scripts/skill-check.ts`
+host-aware external-output branch. The two security-critical fixes (arithmetic-injection
+guard, lint-hook hardening) DID get regression tests (`test/artifacts-preamble.test.ts`,
+`test/gstack-lint-touched.test.ts`).
+
+**Priority:** P3
+
+### P4: #48 — give the autobuilder-loop codex forum member an OS-level read-only sandbox
+
+**What:** `autobuilder-loop/SKILL.md.tmpl` runs `codex review "$CODEX_PROMPT"` with a
+prompt-text-only boundary; the sibling grok member gets `--sandbox read-only` and
+plan-deliverables' `codex exec` gets `-s read-only`. A prompt injection in the reviewed
+diff could theoretically steer codex to write files. Confirm whether `codex review`
+(distinct from `codex exec`) accepts a sandbox flag before applying — an unverified flag
+on a paid CLI call could break the forum member.
+
+**Priority:** P4
+
+### P3: Carve the always-loaded `{{PREAMBLE}}` reference blocks into an on-demand doc (superseded — see DONE above)
 
 **What:** The per-skill section carves (`/ship` v1.54, `/plan-ceo-review` v1.56) yield
 real but bounded wins (-42% to -59% on the carved skill) because the shared

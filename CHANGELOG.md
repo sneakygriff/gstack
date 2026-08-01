@@ -1,5 +1,55 @@
 # Changelog
 
+## [1.61.0.0] - 2026-08-01
+
+## **Every skill invocation got ~18 KB lighter — the shared preamble is now read on demand, not inlined 56 times.**
+## **`/autoplan` stopped front-loading four review skills it might never use.**
+
+gstack used to paste the same ~44 KB preamble block into all 56 generated `SKILL.md` files, so roughly three-quarters of a typical skill invocation was duplicated boilerplate before the skill's real instructions began (issue #48). The runtime-conditional mass — the full AskUserQuestion spec, the one-time onboarding chain, and the artifacts-sync rare paths — now lives once under `preamble/sections/` and is read only when its trigger actually fires. A compact always-loaded AskUserQuestion contract stays inline in every skill, so a question that fires before the full spec loads still renders a compliant decision brief. This is Claude-host only: every other harness keeps its full inlined preamble, exactly as the per-skill sections carve already worked.
+
+`/autoplan` now loads each of its four review skills at the start of its own phase instead of all four up front, and the UI/DX scope gates decide whether to *read* a skill file, not just whether to run its phase — so a plan with no UI scope never pulls the 87 KB design-review file into context.
+
+### The numbers that matter
+
+Source: measured against `origin/main` with `find . -maxdepth 2 -name SKILL.md` byte counts before and after regeneration (reproducible: `bun run gen:skill-docs --host all` then re-measure).
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Whole skill suite (all `SKILL.md`) | 3.50 MB | 2.60 MB (−26%) |
+| `spec` (largest skill) | 127 KB | 91 KB |
+| `investigate` | 60 KB | 42 KB |
+| `context-restore` | 51 KB | 33 KB |
+| `/autoplan` upfront load (skill + 4 reviews) | 421 KB | 84 KB, rest lazy per phase |
+
+The saving is fixed per invocation, so it lands hardest on small repos — a heavy skill on a few-hundred-line project used to read more instruction text than source.
+
+### Added
+
+- **`/autobuilder-loop`** — drives an approved plan, spec, or backlog to completion unattended: one model-routed subagent per milestone, a review gate before each counts as done, Docker verification, and ship-sized chunking (5k-line cap, 4k warning).
+- **`/plan-deliverables`** — turns an approved plan into per-milestone acceptance criteria, each paired with the check that validates it and stamped with a `<!-- status: pending -->` marker that `/autobuilder-loop` advances.
+- **Small-repo guidance** in the README: the per-invocation overhead is fixed and doesn't scale down with the codebase, with pointers to lighter skills and the terse rebuild.
+- **Per-edit lint hook** (`bin/gstack-lint-touched`, dormant): check-only, repo-local binaries only, fail-open, time-bounded. Ships hardened but is not yet wired into a PostToolUse install — opt-in to come.
+- **`/ship` lint + typecheck gate** in Steps 5/16: a type error tests never touch no longer reaches the PR.
+
+### Changed
+
+- `gstack-config set explain_level` now tells the truth: it prints that the flag is a runtime behavior switch (generated files and their token cost are unchanged) and shows the `gen-skill-docs --explain-level` rebuild command that actually shrinks the files. The `Completeness`, `Confusion Protocol`, and `Context Health` headings now self-describe their terse gate.
+- The `/autoplan` frontmatter and Step 3 describe lazy per-phase loading.
+- Adversarial forum (Codex + Grok) retries are now error-class-aware with effort ladders (high → medium on timeout) so a transient failure never permanently drops a reviewer.
+
+### Fixed
+
+- **Arithmetic-injection guard** in the artifacts-sync preamble: `.brain-last-pull` lives in the git-synced `~/.gstack` tree, so its value is numeric-validated before `$(( ))` evaluates it — a compromised artifacts remote can no longer plant code that runs at the next skill start. The same guard landed in the non-Claude inline source.
+- **Host-string sanitization** in the artifacts-sync status line: a crafted gbrain MCP url can no longer inject fake `ARTIFACTS_SYNC` status lines the agent is told to trust.
+- **brain-cache recent-decisions** now reads the project-local `decisions.active.json` ledger (works with no gbrain installed) and returns a true "missing" instead of caching a fabricated-empty digest when gbrain is unreachable (F10).
+- **Test-suite self-termination**: a daemon shutdown test could restore the real `process.exit` before its armed timers fired, killing the whole `bun test` run with exit 0 and no summary. The static `no-suicide-exit` guard was widened to catch every common spelling, and the `gstack-config` tests were isolated against parallel-run env pollution.
+- `toYamlInlineScalar` now quotes scalars containing `...`, so a catalog-trim-truncated description can't produce frontmatter a strict YAML parser rejects.
+- `skill:check` no longer false-alarms on the `claude/` skill (deliberately generated for external hosts only); it verifies the external outputs instead.
+
+### Removed
+
+- The dead v1.0 writing-style migration prompt: it never fired in production (its gate flag was never echoed and the migration always short-circuited). The migration is now a one-line notice with the terse opt-out.
+
 ## [1.60.1.0] - 2026-07-09
 
 ## **The /autoplan dual-voice eval is back on the board, catching real regressions.**
