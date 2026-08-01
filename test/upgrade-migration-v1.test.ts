@@ -1,10 +1,14 @@
 /**
- * gstack-upgrade/migrations/v1.0.0.0.sh — writing style migration.
+ * gstack-upgrade/migrations/v1.0.0.0.sh — writing style notice.
+ *
+ * The original pending-prompt plumbing was removed with the #48 preamble
+ * carve (the prompt never fired in production — see the migration's header
+ * comment). The migration is now a one-time printed notice.
  *
  * Coverage:
- * - Fresh state: writes the pending-prompt flag
- * - Idempotent: second run does nothing if .writing-style-prompted exists
- * - Pre-set explain_level: counts as answered (user already decided)
+ * - Fresh state: prints the notice, sets the prompted flag, cleans up any
+ *   stale pending flag from the old plumbing
+ * - Idempotent: second run is a silent no-op
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import * as fs from 'fs';
@@ -49,32 +53,26 @@ describe('v1.0.0.0 upgrade migration', () => {
     expect(stat.mode & 0o100).toBeGreaterThan(0);
   });
 
-  test('fresh state: writes pending-prompt flag', () => {
+  test('fresh state: prints the notice with the terse opt-out and sets the prompted flag', () => {
     const result = run();
     expect(result.status).toBe(0);
-    expect(fs.existsSync(path.join(tmpHome, '.writing-style-prompt-pending'))).toBe(true);
-  });
-
-  test('idempotent: second run after user answered is a no-op', () => {
-    // Simulate user answered: flag exists
-    fs.writeFileSync(path.join(tmpHome, '.writing-style-prompted'), '');
-
-    const result = run();
-    expect(result.status).toBe(0);
-    // No pending flag created
+    expect(result.stdout).toContain('gstack-config set explain_level terse');
+    expect(fs.existsSync(path.join(tmpHome, '.writing-style-prompted'))).toBe(true);
+    // The old pending-prompt plumbing is gone — the flag must never be written.
     expect(fs.existsSync(path.join(tmpHome, '.writing-style-prompt-pending'))).toBe(false);
   });
 
-  test('idempotent: pre-existing pending flag is not duplicated', () => {
-    // First run
-    run();
-    const firstStat = fs.statSync(path.join(tmpHome, '.writing-style-prompt-pending'));
-
-    // Second run — flag stays, no error
+  test('cleans up a stale pending flag left by the old plumbing', () => {
+    fs.writeFileSync(path.join(tmpHome, '.writing-style-prompt-pending'), '');
     const result = run();
     expect(result.status).toBe(0);
-    // Flag still exists; mtime may update but existence is stable
-    expect(fs.existsSync(path.join(tmpHome, '.writing-style-prompt-pending'))).toBe(true);
-    void firstStat;
+    expect(fs.existsSync(path.join(tmpHome, '.writing-style-prompt-pending'))).toBe(false);
+  });
+
+  test('idempotent: second run is a silent no-op', () => {
+    run();
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
   });
 });

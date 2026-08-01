@@ -9,7 +9,7 @@
       "voice_line": "Voice triggers (speech-to-text aliases): \"auto builder\", \"build loop\", \"auto build loop\"."
     },
     "autoplan": {
-      "lead": "Auto-review pipeline — reads the full CEO, design, eng, and DX review skills from disk and runs them sequentially with auto-decisions using 6 decision principles.",
+      "lead": "Auto-review pipeline — runs the full CEO, design, eng, and DX review skills sequentially with auto-decisions using 6 decision principles, loading each review skill at the start of its own phase.",
       "routing": "Surfaces\ntaste decisions (close approaches, borderline scope, codex disagreements) at a final\napproval gate. One command, fully reviewed plan out.\nUse when asked to \"auto review\", \"autoplan\", \"run all reviews\", \"review this plan\nautomatically\", or \"make the decisions for me\".\nProactively suggest when the user has a plan file and wants to run the full review\ngauntlet without answering 15-30 intermediate questions.",
       "voice_line": "Voice triggers (speech-to-text aliases): \"auto plan\", \"automatic review\"."
     },

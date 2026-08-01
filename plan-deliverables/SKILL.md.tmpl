@@ -355,9 +355,9 @@ _Authored by /plan-deliverables on {date}. Operationalizes `## Success Criteria`
 - The `<!-- status: pending -->` marker is an explicit, render-invisible milestone-level
   state field (`pending` | `built-gate-pending` | `complete`). plan-deliverables always
   writes `pending`. It gives /autobuilder-loop a durable "next = first `status: pending`"
-  signal instead of inferring from checkboxes. **Follow-up dependency:** the full
-  lifecycle needs a coordinated `/autobuilder-loop` change (write the status at 1e, pick
-  next at 1.0); the marker is additive and harmless until then.
+  signal instead of inferring from checkboxes. The full lifecycle is live:
+  plan-deliverables writes `pending`; `/autobuilder-loop` picks the first `pending`
+  milestone at step 1.0 and advances the marker at step 1e.
 - Leave any existing `## Success Criteria` section **intact** — this section
   operationalizes it; it does not replace it.
 

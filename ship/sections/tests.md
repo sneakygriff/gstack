@@ -172,14 +172,14 @@ reach the PR):
 bin/test-lane 2>&1 | tee /tmp/ship_tests.txt &
 npm run test 2>&1 | tee /tmp/ship_vitest.txt &
 # Lint — first match wins: the project's own script, else a detected tool, else skip.
-{ if grep -q '"lint"' package.json 2>/dev/null; then (npm run lint || bun run lint) ; \
+{ if grep -q '"lint"' package.json 2>/dev/null; then if command -v npm >/dev/null 2>&1; then npm run lint; else bun run lint; fi ; \
   elif [ -f biome.json ] || [ -f biome.jsonc ]; then bunx @biomejs/biome check . ; \
   elif ls .eslintrc* eslint.config.* >/dev/null 2>&1; then bunx eslint . ; \
   else echo "LINT: no lint script/config detected — skipped"; fi; } 2>&1 | tee /tmp/ship_lint.txt &
 # (bunx @biomejs/biome, never bare "bunx biome" — the bare name is an unrelated squatted
 # package that exits 0 on anything, turning the lint gate into a silent false-clean.)
 # Typecheck — project's own script, else tsc when a tsconfig exists, else skip.
-{ if grep -q '"typecheck"' package.json 2>/dev/null; then (npm run typecheck || bun run typecheck) ; \
+{ if grep -q '"typecheck"' package.json 2>/dev/null; then if command -v npm >/dev/null 2>&1; then npm run typecheck; else bun run typecheck; fi ; \
   elif [ -f tsconfig.json ]; then bunx tsc --noEmit ; \
   else echo "TYPECHECK: no typecheck script/tsconfig — skipped"; fi; } 2>&1 | tee /tmp/ship_typecheck.txt &
 wait

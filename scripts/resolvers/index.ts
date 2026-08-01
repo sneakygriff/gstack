@@ -35,6 +35,7 @@ import { generateQuestionPreferenceCheck, generateQuestionLog, generateInlineTun
 import { generateMakePdfSetup } from './make-pdf';
 import { generateTasksSectionEmit, generateTasksSectionAggregate } from './tasks-section';
 import { SECTION, SECTION_INDEX } from './sections';
+import { generatePreambleSection } from './preamble/carved-sections';
 import { generateRedactTaxonomyTable, generateRedactInvocationBlock } from './redact-doc';
 
 export const RESOLVERS: Record<string, ResolverValue> = {
@@ -102,4 +103,8 @@ export const RESOLVERS: Record<string, ResolverValue> = {
   TASKS_SECTION_AGGREGATE: generateTasksSectionAggregate,
   SECTION,
   SECTION_INDEX,
+  // Shared preamble sections (#48): used only by preamble/sections/*.md.tmpl,
+  // which generate Claude-only (non-Claude hosts keep the inline preamble).
+  PREAMBLE_SECTION: (ctx: TemplateContext, args?: string[]) =>
+    generatePreambleSection(ctx, args?.[0] ?? ''),
 };

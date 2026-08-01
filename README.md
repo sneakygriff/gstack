@@ -442,6 +442,25 @@ Other references: [docs/gbrain-sync.md](docs/gbrain-sync.md) (sync-specific guid
 | [Contributing](CONTRIBUTING.md) | Dev setup, testing, contributor mode, and dev mode |
 | [Changelog](CHANGELOG.md) | What's new in every version |
 
+## Token cost & small repos
+
+Every skill invocation loads its `SKILL.md` plus a shared preamble. Since the
+v1.60 carve, the always-loaded part averages roughly 25-45 KB per skill (~6-11k
+tokens); onboarding prompts, the full AskUserQuestion spec, and other
+conditional guidance live in shared `preamble/sections/` files that load only
+when actually needed. `/autoplan` loads each review skill at the start of its
+own phase, so skipped phases cost nothing.
+
+This overhead is **fixed per invocation** — it does not scale down with your
+codebase. On a large project it amortizes to noise; on a very small repo (a few
+hundred lines) a heavy skill like `/review` can still read more instruction
+text than source code. For small or throwaway projects, prefer the lighter
+skills (`/investigate`, `/qa-only`, `/context-save`) over the full pipelines
+(`/autoplan`, `/ship`), or just use your agent directly and reach for gstack
+when the loop — plan, review, ship — is worth the structure. Power users can
+additionally rebuild with `bun run gen:skill-docs --explain-level=terse` to
+strip the style-guidance sections from the generated files.
+
 ## Privacy & Telemetry
 
 gstack includes **opt-in** usage telemetry to help improve the project. Here's exactly what happens:

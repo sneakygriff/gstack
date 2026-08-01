@@ -21,6 +21,10 @@ import * as path from 'path';
 import type { TemplateContext } from '../scripts/resolvers/types';
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import { generateAskUserFormat } from '../scripts/resolvers/preamble/generate-ask-user-format';
+import {
+  generateAskUserFormatCompact,
+  generatePreambleSection,
+} from '../scripts/resolvers/preamble/carved-sections';
 
 function makeCtx(): TemplateContext {
   return {
@@ -263,5 +267,25 @@ describe('CQ2 — cross-file invariant: auto-decide prefix matches the hook', ()
     // fallback would stop recognizing the auto-decide denial as not-a-failure.
     const PREFIX = '[plan-tune auto-decide]';
     expect(hookSrc.includes(PREFIX) && out.includes(PREFIX)).toBe(true);
+  });
+});
+
+// --- #48 carve: compact contract vs full spec share ONE format block ---
+describe('carved AUQ contract stays in lockstep with the full spec', () => {
+  // Extract the first ```-fenced block from a rendered string.
+  const fenced = (s: string): string => {
+    const m = s.match(/```[\s\S]*?```/);
+    if (!m) throw new Error('no fenced block found');
+    return m[0];
+  };
+
+  test('compact floor and full spec render the IDENTICAL decision-brief template', () => {
+    const compact = fenced(generateAskUserFormatCompact(makeCtx()));
+    const full = fenced(generateAskUserFormat(makeCtx()));
+    expect(compact).toBe(full); // both import AUQ_FORMAT_BLOCK — pin against divergence
+  });
+
+  test('generatePreambleSection throws on an unknown section id', () => {
+    expect(() => generatePreambleSection(makeCtx(), 'bogus-id')).toThrow();
   });
 });

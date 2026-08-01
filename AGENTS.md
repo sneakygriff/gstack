@@ -21,6 +21,7 @@ Invoke them by name (e.g., `/office-hours`).
 | `/plan-tune` | Self-tune AskUserQuestion sensitivity per question. |
 | `/autoplan` | One command runs CEO → design → eng → DX review. |
 | `/autobuilder-loop` | Drive an approved plan to completion via model-routed subagents, review gates, and Docker verification. |
+| `/plan-deliverables` | Turn an approved plan into per-milestone acceptance criteria, each paired with the check that validates it. |
 | `/design-consultation` | Build a complete design system from scratch. |
 | `/spec` | Turn vague intent into a precise, executable spec in five phases. Files a GitHub issue, optionally spawns a Claude Code agent in a fresh worktree, and lets `/ship` close the source issue on merge. |
 

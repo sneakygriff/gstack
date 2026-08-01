@@ -27,9 +27,15 @@ import { runParityChecks, PARITY_INVARIANTS } from './helpers/parity-harness';
 import type { ParityBaseline } from './helpers/capture-parity-baseline';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '..');
-const BASELINE_PATH = path.join(REPO_ROOT, 'test', 'fixtures', 'parity-baseline-v1.57.7.0.json');
+// Baseline rebased v1.57.7.0 → v1.60.1.0: the #48 preamble carve moved the
+// onboarding chain, the full AskUserQuestion spec, and the artifacts-sync
+// prose into shared preamble/sections/ files (Claude host), deliberately
+// shrinking every tier-2+ skeleton by ~18 KB. The v1.60.1.0 baseline captures
+// post-carve sizes so the ratio ratchet keeps catching future bloat from the
+// new, smaller anchor. Historical baselines retained in test/fixtures/.
+const BASELINE_PATH = path.join(REPO_ROOT, 'test', 'fixtures', 'parity-baseline-v1.60.1.0.json');
 
-describe('parity suite vs v1.57.7.0 baseline (gate, free)', () => {
+describe('parity suite vs v1.60.1.0 baseline (gate, free)', () => {
   test('baseline exists', () => {
     expect(fs.existsSync(BASELINE_PATH)).toBe(true);
   });

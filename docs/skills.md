@@ -31,6 +31,7 @@ Detailed guides for every gstack skill — philosophy, workflow, and examples.
 | [`/setup-browser-cookies`](#setup-browser-cookies) | **Session Manager** | Import cookies from your real browser (Chrome, Arc, Brave, Edge) into the headless session. Test authenticated pages. |
 | [`/autoplan`](#autoplan) | **Review Pipeline** | One command, fully reviewed plan. Runs CEO → design → eng → DX review automatically with encoded decision principles. Surfaces only taste decisions for your approval. |
 | [`/autobuilder-loop`](#autobuilder-loop) | **Build Loop** | Drive an already-approved plan, spec, or backlog to completion unattended. Model-routed subagents per milestone, review gates, and Docker verification. |
+| [`/plan-deliverables`](#plan-deliverables) | **Acceptance Criteria** | Turn an approved design/plan into per-milestone acceptance criteria, each measurable and paired with the specific check that validates it (the deliverable). |
 | [`/plan-devex-review`](#plan-devex-review) | **DX Reviewer** | Plan-stage DX review. TTHW (time-to-hello-world), magical moments, friction points, persona traces. Three modes: Expansion, Polish, Triage. |
 | [`/devex-review`](#devex-review) | **DX Reviewer (live)** | Live developer experience audit. Walks the actual onboarding flow, measures TTHW, catches the docs lies. |
 | [`/plan-tune`](#plan-tune) | **Question Tuner** | Self-tune AskUserQuestion sensitivity per question. Mark questions as never-ask, always-ask, or only-for-one-way. |
@@ -1262,3 +1263,21 @@ Convenience wrapper. The structural Release-build guard against shipping DebugBr
 ## `/ios-sync`
 
 Run after upgrading gstack or adding new `@Observable` classes. Detects what's installed, runs gen-accessors against the latest upstream templates, refreshes any changed Swift files, verifies the app rebuilds. Cache-key invalidation handles Swift version changes, generator git rev changes, and source changes.
+
+---
+
+## `/autobuilder-loop`
+
+This is the **build autopilot** for a plan that already survived review.
+
+Point it at an approved plan, spec, or backlog and it drives the work to completion milestone by milestone: each milestone gets its own model-routed subagent (heavier models for judgment-shaped work, lighter ones for mechanical steps), a review gate before it counts as done, and Docker-based verification where the plan defines runnable checks. Work is chunked into ship-sized units (5k-line cap per unit, warning at 4k) so every landing stays reviewable and bisectable.
+
+It pairs with `/plan-deliverables`: milestones carry a render-invisible `<!-- status: pending | built-gate-pending | complete -->` marker, and the loop always picks the first `pending` milestone next — durable progress state that survives session restarts, instead of inferring position from checkboxes.
+
+## `/plan-deliverables`
+
+The bridge between "plan approved" and "build starts."
+
+It walks an approved design or plan and turns every milestone into per-milestone **acceptance criteria** — each one measurable, and each paired with the specific check that validates it (a test, a command, a visible behavior). Vague milestones like "improve onboarding" become concrete deliverables like "first-run flow completes in under N steps, verified by the e2e fixture."
+
+The output is what `/autobuilder-loop` consumes: milestones stamped `<!-- status: pending -->` with checks the build loop's review gate can actually run. Existing `## Success Criteria` sections stay intact — this operationalizes them rather than replacing them.

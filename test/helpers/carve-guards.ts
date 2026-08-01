@@ -282,7 +282,11 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
     maxSkeletonBytes: 69_000,
-    minUnionBytes: 72_000,
+    // Floor lowered 72_000 → 68_000 for the #48 preamble carve: the onboarding
+    // chain, full AUQ spec, and artifacts-sync prose moved to shared
+    // preamble/sections/ files, deliberately shrinking this union ~13 KB
+    // (84,683 → ~71,3xx B). Floor sits ~4% under the post-carve union.
+    minUnionBytes: 68_000,
     mustContain: ['Typography', 'Color', 'Aesthetic Direction'],
     // Cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB +
     // the cross-session decision-memory nudge) lands this carved skeleton just over
@@ -321,7 +325,10 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
     maxSkeletonBytes: 75_000,
-    minUnionBytes: 72_000,
+    // Floor lowered 72_000 → 67_000 for the #48 preamble carve (see
+    // design-consultation note above; cso union shrank ~13 KB, 83,808 →
+    // ~70,4xx B — floor sits ~4% under the post-carve union).
+    minUnionBytes: 67_000,
     mustContain: ['OWASP', 'STRIDE', 'daily', 'comprehensive', 'verif'],
     // cso keeps its mode-dispatch + FP-filtering phases always-loaded, so the
     // cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB + the

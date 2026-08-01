@@ -11,7 +11,7 @@ Conventions:
 ## Skills
 
 - [/autobuilder-loop](autobuilder-loop/SKILL.md): Use when asked to "autobuilder", "build loop", "auto-build", "keep building automatically", "drive the plan to completion", or "run the build loop" on an already-approved plan, spec, or backlog.
-- [/autoplan](autoplan/SKILL.md): Auto-review pipeline — reads the full CEO, design, eng, and DX review skills from disk and runs them sequentially with auto-decisions using 6 decision principles.
+- [/autoplan](autoplan/SKILL.md): Auto-review pipeline — runs the full CEO, design, eng, and DX review skills sequentially with auto-decisions using 6 decision principles, loading each review skill at the start of its own phase.
 - [/benchmark](benchmark/SKILL.md): Performance regression detection using the browse daemon.
 - [/benchmark-models](benchmark-models/SKILL.md): Cross-model benchmark for gstack skills.
 - [/browse](browse/SKILL.md): Fast headless browser for QA testing and site dogfooding.

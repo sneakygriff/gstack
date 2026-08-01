@@ -60,6 +60,10 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           # terse   = V0 prose style, no glosses, no outcome-framing layer
 #                           #           (for power users who know the terms)
 #                           # Unknown values default to "default" with a warning.
+#                           # RUNTIME switch only: skills still load the same
+#                           # SKILL.md bytes. To strip terse-gated sections from
+#                           # the generated files too, rebuild with
+#                           # `bun run gen:skill-docs --explain-level=terse`.
 #                           # See docs/designs/PLAN_TUNING_V1.md for rationale.
 #
 # ─── Artifacts sync (renamed from gbrain_sync_mode in v1.27.0.0) ─────
@@ -339,6 +343,17 @@ case "${1:-}" in
     if [ "$KEY" = "skill_prefix" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
       GSTACK_RELINK="$(dirname "$0")/gstack-relink"
       [ -x "$GSTACK_RELINK" ] && "$GSTACK_RELINK" || true
+    fi
+    # explain_level is a runtime behavior switch: the preamble echoes
+    # EXPLAIN_LEVEL and the model skips sections whose headings carry the
+    # terse gate. It does NOT shrink the generated SKILL.md files — that
+    # takes a rebuild with the matching --explain-level flag. Say so, so
+    # nobody sets the key expecting a token-cost reduction (#48).
+    if [ "$KEY" = "explain_level" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
+      echo "explain_level: $VALUE — runtime behavior switch, active on the next skill run."
+      echo "Generated SKILL.md files are unchanged (token cost is the same). To also strip"
+      echo "terse-gated sections from the files, rebuild:"
+      echo "  cd ~/.claude/skills/gstack && bun run gen:skill-docs --explain-level=$VALUE"
     fi
     ;;
   list)
