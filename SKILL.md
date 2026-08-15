@@ -566,12 +566,14 @@ quality gates that produce better results than answering inline.
 **Routing rules — when you see these patterns, INVOKE the skill via the Skill tool:**
 - User describes a new idea, asks "is this worth building", brainstorms, pitches a concept → invoke `/office-hours`
 - User asks to spec something out, file an issue, write up a ticket, "turn this into a GitHub issue", "backlog item" → invoke `/spec`
+- User asks to define acceptance criteria, deliverables, or "definition of done" for a plan, after /office-hours and before coding → invoke `/plan-deliverables`
 - User asks about strategy, scope, ambition, "think bigger", "what should we build" → invoke `/plan-ceo-review`
 - User asks to review architecture, lock in the plan, "does this design make sense" → invoke `/plan-eng-review`
 - User asks about design system, brand, visual identity, "how should this look" → invoke `/design-consultation`
 - User asks to review design of a plan → invoke `/plan-design-review`
 - User asks about developer experience of a plan, API/CLI/SDK design → invoke `/plan-devex-review`
 - User wants all reviews done automatically, "review everything" → invoke `/autoplan`
+- User asks to autonomously build out an approved plan end-to-end, drive the backlog/plan to completion via subagents, "autobuild it", "run the build loop" → invoke `/autobuilder-loop`
 - User reports a bug, error, broken behavior, "why is this broken", "this doesn't work", "wtf", "something's wrong" → invoke `/investigate`
 - User asks to test the site, find bugs, QA, "does this work", "check the deploy" → invoke `/qa`
 - User asks to just report bugs without fixing → invoke `/qa-only`

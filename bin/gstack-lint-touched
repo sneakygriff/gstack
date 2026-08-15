@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# gstack-lint-touched — PostToolUse hook (Edit|Write): lint-CHECK the touched file only.
+# Instant write-time feedback instead of round-3 review corrections.
+#
+# Contract:
+#   - CHECK ONLY, never --fix: an autofix mutates the file behind the agent's back and
+#     desyncs the harness's tracked file state (subsequent Edits fail on stale old_string).
+#   - Touched file only, JS/TS only, and only when the file's repo has a lint config.
+#     No config / non-JS file / any parse problem -> exit 0 silently (fail-OPEN: this
+#     hook must never break editing).
+#   - On findings: print them (capped) and exit 2 -> PostToolUse surfaces stderr to the
+#     agent as feedback; the write itself already happened, nothing is blocked.
+#   - Typecheck is deliberately NOT here: tsc has no single-file mode that respects the
+#     project graph; ship's Step 5/16 gate owns typecheck.
+# Installed via: gstack-settings-hook add-event --source ship-gate (rollback-able).
+set -uo pipefail
+
+INPUT=$(cat)
+
+# Extract tool_input.file_path — JSON parse first (a grep fast-path can match a
+# "file_path" literal embedded in earlier fields like Write's content and lint
+# the wrong file); grep only as fallback when python3 is unavailable.
+FILE=$(printf '%s' "$INPUT" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read()).get("tool_input",{}).get("file_path",""))' 2>/dev/null || true)
+if [ -z "$FILE" ]; then
+  FILE=$(printf '%s' "$INPUT" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*:[[:space:]]*"//;s/"$//' || true)
+fi
+[ -n "$FILE" ] && [ -f "$FILE" ] || exit 0
+
+# JS/TS surface only.
+case "$FILE" in
+  *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) : ;;
+  *) exit 0 ;;
+esac
+
+# Never lint generated/vendored output.
+case "$FILE" in
+  */node_modules/*|*/dist/*|*/build/*|*.gen.ts|*/generated/*|*.min.js) exit 0 ;;
+esac
+
+# Find the file's repo root (fall back to its directory).
+DIR=$(dirname "$FILE")
+ROOT=$(cd "$DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)
+[ -n "$ROOT" ] || ROOT="$DIR"
+
+# Detect a lint config at the repo root; no config -> silent exit (do not impose a linter).
+# REPO-LOCAL binaries ONLY — never bunx: (a) bunx auto-downloads and executes
+# packages from the registry mid-hook (network install inside the edit loop,
+# and running not-locally-vetted code); (b) a config with no locally installed
+# linter means the repo doesn't lint this way — imposing one is not this
+# hook's job. Config present but binary absent -> silent exit (fail-open).
+LINT=""
+if { [ -f "$ROOT/biome.json" ] || [ -f "$ROOT/biome.jsonc" ]; } && [ -x "$ROOT/node_modules/.bin/biome" ]; then
+  LINT="$ROOT/node_modules/.bin/biome check"
+elif ls "$ROOT"/.eslintrc* "$ROOT"/eslint.config.* >/dev/null 2>&1 && [ -x "$ROOT/node_modules/.bin/eslint" ]; then
+  LINT="$ROOT/node_modules/.bin/eslint"   # check-only is eslint's default; --fix is never passed here
+else
+  exit 0
+fi
+
+# Hard time bound: type-aware eslint configs can take 10-30s+ per file; the
+# header promises instant feedback. Slow lint = silent exit (fail-open), same
+# as every other failure here. timeout(1) may be absent on stock macOS — no
+# gtimeout, no bound, accepted (repo-local binaries only, so no network risk).
+_TIMEOUT=""
+command -v timeout >/dev/null 2>&1 && _TIMEOUT="timeout 10"
+command -v gtimeout >/dev/null 2>&1 && _TIMEOUT="gtimeout 10"
+OUT=$(cd "$ROOT" && $_TIMEOUT $LINT "$FILE" 2>&1)
+RC=$?
+# 124 = timed out (fail-open). Distinguish tool failure from findings: eslint
+# exits 2 on config/tool errors (1 = findings); biome exits 1 on findings.
+# A crashed/unrunnable linter must not present its stack trace as "lint found
+# issues" — that would violate the fail-open contract.
+[ "$RC" -eq 0 ] && exit 0
+[ "$RC" -eq 124 ] && exit 0
+case "$LINT" in
+  *eslint*) [ "$RC" -ge 2 ] && exit 0 ;;
+esac
+
+# Findings: cap the output, send to stderr, exit 2 so the agent sees it as feedback.
+{
+  echo "lint ($LINT) found issues in ${FILE#"$ROOT"/} — fix before shipping (check-only; nothing was modified):"
+  printf '%s\n' "$OUT" | head -20
+} >&2
+exit 2
