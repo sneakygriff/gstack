@@ -25,6 +25,9 @@ if [ -z "$FILE" ]; then
   FILE=$(printf '%s' "$INPUT" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*:[[:space:]]*"//;s/"$//' || true)
 fi
 [ -n "$FILE" ] && [ -f "$FILE" ] || exit 0
+# A path that parses out starting with '-' would be read as a flag by the
+# linter (flag injection via file_path) — fail open rather than pass it through.
+case "$FILE" in -*) exit 0 ;; esac
 
 # JS/TS surface only.
 case "$FILE" in
@@ -48,11 +51,16 @@ ROOT=$(cd "$DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)
 # and running not-locally-vetted code); (b) a config with no locally installed
 # linter means the repo doesn't lint this way — imposing one is not this
 # hook's job. Config present but binary absent -> silent exit (fail-open).
-LINT=""
+# Command is built as an array so a ROOT containing spaces never word-splits
+# (bash-3.2-safe expansion below — macOS stock bash runs these hooks).
+LINT_KIND=""
+LINT_CMD=()
 if { [ -f "$ROOT/biome.json" ] || [ -f "$ROOT/biome.jsonc" ]; } && [ -x "$ROOT/node_modules/.bin/biome" ]; then
-  LINT="$ROOT/node_modules/.bin/biome check"
+  LINT_KIND="biome"
+  LINT_CMD=("$ROOT/node_modules/.bin/biome" "check")
 elif ls "$ROOT"/.eslintrc* "$ROOT"/eslint.config.* >/dev/null 2>&1 && [ -x "$ROOT/node_modules/.bin/eslint" ]; then
-  LINT="$ROOT/node_modules/.bin/eslint"   # check-only is eslint's default; --fix is never passed here
+  LINT_KIND="eslint"
+  LINT_CMD=("$ROOT/node_modules/.bin/eslint")   # check-only is eslint's default; --fix is never passed here
 else
   exit 0
 fi
@@ -61,24 +69,24 @@ fi
 # header promises instant feedback. Slow lint = silent exit (fail-open), same
 # as every other failure here. timeout(1) may be absent on stock macOS — no
 # gtimeout, no bound, accepted (repo-local binaries only, so no network risk).
-_TIMEOUT=""
-command -v timeout >/dev/null 2>&1 && _TIMEOUT="timeout 10"
-command -v gtimeout >/dev/null 2>&1 && _TIMEOUT="gtimeout 10"
-OUT=$(cd "$ROOT" && $_TIMEOUT $LINT "$FILE" 2>&1)
+_TIMEOUT_CMD=()
+command -v timeout >/dev/null 2>&1 && _TIMEOUT_CMD=(timeout 10)
+command -v gtimeout >/dev/null 2>&1 && _TIMEOUT_CMD=(gtimeout 10)
+# ${arr[@]+...} expansion keeps empty arrays legal under set -u on bash 3.2.
+OUT=$(cd "$ROOT" && ${_TIMEOUT_CMD[@]+"${_TIMEOUT_CMD[@]}"} "${LINT_CMD[@]}" "$FILE" 2>&1)
 RC=$?
 # 124 = timed out (fail-open). Distinguish tool failure from findings: eslint
-# exits 2 on config/tool errors (1 = findings); biome exits 1 on findings.
-# A crashed/unrunnable linter must not present its stack trace as "lint found
-# issues" — that would violate the fail-open contract.
+# exits 2 on config/tool errors (1 = findings); biome exits 1 on findings and
+# >=2 on internal errors/crashes. A crashed/unrunnable linter must not present
+# its stack trace as "lint found issues" — that would violate the fail-open
+# contract. Both linters therefore fail open at >=2.
 [ "$RC" -eq 0 ] && exit 0
 [ "$RC" -eq 124 ] && exit 0
-case "$LINT" in
-  *eslint*) [ "$RC" -ge 2 ] && exit 0 ;;
-esac
+[ "$RC" -ge 2 ] && exit 0
 
 # Findings: cap the output, send to stderr, exit 2 so the agent sees it as feedback.
 {
-  echo "lint ($LINT) found issues in ${FILE#"$ROOT"/} — fix before shipping (check-only; nothing was modified):"
+  echo "lint ($LINT_KIND) found issues in ${FILE#"$ROOT"/} — fix before shipping (check-only; nothing was modified):"
   printf '%s\n' "$OUT" | head -20
 } >&2
 exit 2

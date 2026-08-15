@@ -322,7 +322,7 @@ own fix/commit flows are skipped).
 2. **/review** (code review) on the diff — a Fable-or-Opus-4.8-max subagent (never Opus 5 — this is synthesis-tier work) reads
    `~/.claude/skills/gstack/review/SKILL.md` from disk and runs the checklist passes against
    the diff. It must SKIP: the Preamble, Step 1 / branch + base-branch detect, the **Review
-   Army dispatch** (`{{REVIEW_ARMY}}` — subagents cannot spawn subagents, so it would error or
+   Army dispatch** (the `REVIEW_ARMY` placeholder block — subagents cannot spawn subagents, so it would error or
    no-op), the **Adversarial / Codex step** (duplicated by the Codex + Grok forum below), the entire
    **Fix-First / Step 5 flow and any commit** (fixes are the orchestrator's job), the Greptile
    comment resolution, and the review-log persist. It returns findings-only in the envelope.
@@ -628,9 +628,12 @@ report file. The station's verdict is the UNION of both members: it FAILs if EIT
 source ~/.claude/skills/gstack/bin/gstack-codex-probe 2>/dev/null || true
 # Honor config + availability. If codex is not_installed / not_authed, or the user has
 # codex_reviews disabled, mark the Codex member ABSENT (see Forum fallback below — do NOT fail
-# the gate on that alone). codex_reviews=off is the ONLY run-durable disable: a quota / capacity /
+# the gate on that alone). codex_reviews=disabled is the ONLY run-durable disable: a quota / capacity /
 # timeout failure in a PRIOR gate must NEVER carry forward — run this full recipe at EVERY gate.
-_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo on)
+# gstack-config vocabulary is enabled/disabled (default enabled). Gate on the EXPLICIT
+# negative only — an unknown or empty value must not silently drop the member (live
+# failure 2026-08-15: a literal `!= "on"` check classified enabled-as-disabled).
+_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
 
 TMPERR=$(mktemp "${TMP_ROOT:-/tmp}/codex-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
 CODEX_PROMPT=$(cat <<'EOF'
@@ -653,7 +656,7 @@ EOF
 #                            until reset); mark ABSENT for THIS gate only. The NEXT gate re-attempts
 #                            and it self-heals at the reset time — NEVER latch Codex off for the run.
 # Max 4 attempts so a hard failure can't spin. `sleep` here runs on the user's machine at gate time.
-if [ "$_CODEX_ENABLED" != "on" ]; then
+if [ "$_CODEX_ENABLED" = "disabled" ] || [ "$_CODEX_ENABLED" = "off" ]; then
   _CODEX_STATUS=disabled   # the config gate must actually GATE — a computed-but-untested flag is dead code
   echo "Codex member disabled (codex_reviews=$_CODEX_ENABLED) — ABSENT by user config (the one run-durable skip)."
 else
@@ -704,7 +707,9 @@ model id" error and losing this forum member; the current default IS the latest,
 ```bash
 # Honor config + availability. If grok is missing or grok_reviews is disabled, mark the Grok
 # member ABSENT (see Forum fallback below — do NOT fail the gate on that alone).
-_GROK_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get grok_reviews 2>/dev/null || echo on)
+# grok_reviews may be unset (gstack-config returns EMPTY, exit 0 — the || fallback does
+# NOT fire). Empty/unknown means enabled; gate on the explicit negative only.
+_GROK_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get grok_reviews 2>/dev/null || echo enabled)
 command -v grok >/dev/null 2>&1 || _GROK_ENABLED=absent
 
 TMPERR_GROK=$(mktemp "${TMP_ROOT:-/tmp}/grok-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
@@ -723,8 +728,8 @@ EOF
 # Same error-class-aware retry as the Codex member (grok can also hit quota / capacity / rate
 # limits, all exit !=0): TIMEOUT (124) -> step down high@600s -> medium@300s; TRANSIENT (capacity/
 # overload/rate/5xx/network) -> backoff + retry same effort; QUOTA -> ABSENT this gate only, next
-# gate re-attempts. Max 4 attempts. grok_reviews=off is the only run-durable disable.
-if [ "$_GROK_ENABLED" != "on" ]; then
+# gate re-attempts. Max 4 attempts. grok_reviews=disabled is the only run-durable disable.
+if [ "$_GROK_ENABLED" = "absent" ] || [ "$_GROK_ENABLED" = "disabled" ] || [ "$_GROK_ENABLED" = "off" ]; then
   _GROK_STATUS=disabled   # gate on the flag for real — absent/off must skip the invocation
   echo "Grok member disabled/absent (grok_reviews=$_GROK_ENABLED) — ABSENT ($([ "$_GROK_ENABLED" = "absent" ] && echo 'CLI not installed' || echo 'user config'))."
 else

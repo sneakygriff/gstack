@@ -1136,209 +1136,7 @@ own fix/commit flows are skipped).
 2. **/review** (code review) on the diff — a Fable-or-Opus-4.8-max subagent (never Opus 5 — this is synthesis-tier work) reads
    `~/.claude/skills/gstack/review/SKILL.md` from disk and runs the checklist passes against
    the diff. It must SKIP: the Preamble, Step 1 / branch + base-branch detect, the **Review
-   Army dispatch** (`## Step 4.5: Review Army — Specialist Dispatch
-
-### Detect stack and scope
-
-```bash
-source <(~/.claude/skills/gstack/bin/gstack-diff-scope <base> 2>/dev/null) || true
-# Detect stack for specialist context
-STACK=""
-[ -f Gemfile ] && STACK="${STACK}ruby "
-[ -f package.json ] && STACK="${STACK}node "
-[ -f requirements.txt ] || [ -f pyproject.toml ] && STACK="${STACK}python "
-[ -f go.mod ] && STACK="${STACK}go "
-[ -f Cargo.toml ] && STACK="${STACK}rust "
-echo "STACK: ${STACK:-unknown}"
-DIFF_BASE=$(git merge-base origin/<base> HEAD)
-DIFF_INS=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-DIFF_DEL=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
-DIFF_LINES=$((DIFF_INS + DIFF_DEL))
-echo "DIFF_LINES: $DIFF_LINES"
-# Detect test framework for specialist test stub generation
-TEST_FW=""
-{ [ -f jest.config.ts ] || [ -f jest.config.js ]; } && TEST_FW="jest"
-[ -f vitest.config.ts ] && TEST_FW="vitest"
-{ [ -f spec/spec_helper.rb ] || [ -f .rspec ]; } && TEST_FW="rspec"
-{ [ -f pytest.ini ] || [ -f conftest.py ]; } && TEST_FW="pytest"
-[ -f go.mod ] && TEST_FW="go-test"
-echo "TEST_FW: ${TEST_FW:-unknown}"
-```
-
-### Read specialist hit rates (adaptive gating)
-
-```bash
-~/.claude/skills/gstack/bin/gstack-specialist-stats 2>/dev/null || true
-```
-
-### Select specialists
-
-Based on the scope signals above, select which specialists to dispatch.
-
-**Always-on (dispatch on every review with 50+ changed lines):**
-1. **Testing** — read `~/.claude/skills/gstack/review/specialists/testing.md`
-2. **Maintainability** — read `~/.claude/skills/gstack/review/specialists/maintainability.md`
-
-**If DIFF_LINES < 50:** Skip all specialists. Print: "Small diff ($DIFF_LINES lines) — specialists skipped." Continue to Step 5.
-
-**Conditional (dispatch if the matching scope signal is true):**
-3. **Security** — if SCOPE_AUTH=true, OR if SCOPE_BACKEND=true AND DIFF_LINES > 100. Read `~/.claude/skills/gstack/review/specialists/security.md`
-4. **Performance** — if SCOPE_BACKEND=true OR SCOPE_FRONTEND=true. Read `~/.claude/skills/gstack/review/specialists/performance.md`
-5. **Data Migration** — if SCOPE_MIGRATIONS=true. Read `~/.claude/skills/gstack/review/specialists/data-migration.md`
-6. **API Contract** — if SCOPE_API=true. Read `~/.claude/skills/gstack/review/specialists/api-contract.md`
-7. **Design** — if SCOPE_FRONTEND=true. Use the existing design review checklist at `~/.claude/skills/gstack/review/design-checklist.md`
-
-### Adaptive gating
-
-After scope-based selection, apply adaptive gating based on specialist hit rates:
-
-For each conditional specialist that passed scope gating, check the `gstack-specialist-stats` output above:
-- If tagged `[GATE_CANDIDATE]` (0 findings in 10+ dispatches): skip it. Print: "[specialist] auto-gated (0 findings in N reviews)."
-- If tagged `[NEVER_GATE]`: always dispatch regardless of hit rate. Security and data-migration are insurance policy specialists — they should run even when silent.
-
-**Force flags:** If the user's prompt includes `--security`, `--performance`, `--testing`, `--maintainability`, `--data-migration`, `--api-contract`, `--design`, or `--all-specialists`, force-include that specialist regardless of gating.
-
-Note which specialists were selected, gated, and skipped. Print the selection:
-"Dispatching N specialists: [names]. Skipped: [names] (scope not detected). Gated: [names] (0 findings in N+ reviews)."
-
----
-
-### Dispatch specialists in parallel
-
-For each selected specialist, launch an independent subagent via the Agent tool.
-**Launch ALL selected specialists in a single message** (multiple Agent tool calls)
-so they run in parallel. Each subagent has fresh context — no prior review bias.
-
-**Each specialist subagent prompt:**
-
-Construct the prompt for each specialist. The prompt includes:
-
-1. The specialist's checklist content (you already read the file above)
-2. Stack context: "This is a {STACK} project."
-3. Past learnings for this domain (if any exist):
-
-```bash
-~/.claude/skills/gstack/bin/gstack-learnings-search --type pitfall --query "{specialist domain}" --limit 5 2>/dev/null || true
-```
-
-If learnings are found, include them: "Past learnings for this domain: {learnings}"
-
-4. Instructions:
-
-"You are a specialist code reviewer. Read the checklist below, then run
-`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"` to get the full diff. Apply the checklist against the diff.
-
-For each finding, output a JSON object on its own line:
-{\"severity\":\"CRITICAL|INFORMATIONAL\",\"confidence\":N,\"path\":\"file\",\"line\":N,\"category\":\"category\",\"summary\":\"description\",\"fix\":\"recommended fix\",\"fingerprint\":\"path:line:category\",\"specialist\":\"name\"}
-
-Required fields: severity, confidence, path, category, summary, specialist.
-Optional: line, fix, fingerprint, evidence, test_stub.
-
-If you can write a test that would catch this issue, include it in the `test_stub` field.
-Use the detected test framework ({TEST_FW}). Write a minimal skeleton — describe/it/test
-blocks with clear intent. Skip test_stub for architectural or design-only findings.
-
-If no findings: output `NO FINDINGS` and nothing else.
-Do not output anything else — no preamble, no summary, no commentary.
-
-Stack context: {STACK}
-Past learnings: {learnings or 'none'}
-
-CHECKLIST:
-{checklist content}"
-
-**Subagent configuration:**
-- Use `subagent_type: "general-purpose"`
-- Pass `run_in_background: false` on every specialist Agent call — subagents run in the BACKGROUND by default since Claude Code v2.1.198, and all specialists must complete before merge. (Merely omitting the flag no longer produces a foreground run; it must be explicitly false.)
-- If any specialist subagent fails or times out, log the failure and continue with results from successful specialists. Specialists are additive — partial results are better than no results.
-
----
-
-### Step 4.6: Collect and merge findings
-
-After all specialist subagents complete, collect their outputs.
-
-**Parse findings:**
-For each specialist's output:
-1. If output is "NO FINDINGS" — skip, this specialist found nothing
-2. Otherwise, parse each line as a JSON object. Skip lines that are not valid JSON.
-3. Collect all parsed findings into a single list, tagged with their specialist name.
-
-**Fingerprint and deduplicate:**
-For each finding, compute its fingerprint:
-- If `fingerprint` field is present, use it
-- Otherwise: `{path}:{line}:{category}` (if line is present) or `{path}:{category}`
-
-Group findings by fingerprint. For findings sharing the same fingerprint:
-- Keep the finding with the highest confidence score
-- Tag it: "MULTI-SPECIALIST CONFIRMED ({specialist1} + {specialist2})"
-- Boost confidence by +1 (cap at 10)
-- Note the confirming specialists in the output
-
-**Apply confidence gates:**
-- Confidence 7+: show normally in the findings output
-- Confidence 5-6: show with caveat "Medium confidence — verify this is actually an issue"
-- Confidence 3-4: move to appendix (suppress from main findings)
-- Confidence 1-2: suppress entirely
-
-**Compute PR Quality Score:**
-After merging, compute the quality score:
-`quality_score = max(0, 10 - (critical_count * 2 + informational_count * 0.5))`
-Cap at 10. Log this in the review result at the end.
-
-**Output merged findings:**
-Present the merged findings in the same format as the current review:
-
-```
-SPECIALIST REVIEW: N findings (X critical, Y informational) from Z specialists
-
-[For each finding, in order: CRITICAL first, then INFORMATIONAL, sorted by confidence descending]
-[SEVERITY] (confidence: N/10, specialist: name) path:line — summary
-  Fix: recommended fix
-  [If MULTI-SPECIALIST CONFIRMED: show confirmation note]
-
-PR Quality Score: X/10
-```
-
-These findings flow into Step 5 Fix-First alongside the CRITICAL pass findings from Step 4.
-The Fix-First heuristic applies identically — specialist findings follow the same AUTO-FIX vs ASK classification.
-
-**Compile per-specialist stats:**
-After merging findings, compile a `specialists` object for the review-log entry in Step 5.8.
-For each specialist (testing, maintainability, security, performance, data-migration, api-contract, design, red-team):
-- If dispatched: `{"dispatched": true, "findings": N, "critical": N, "informational": N}`
-- If skipped by scope: `{"dispatched": false, "reason": "scope"}`
-- If skipped by gating: `{"dispatched": false, "reason": "gated"}`
-- If not applicable (e.g., red-team not activated): omit from the object
-
-Include the Design specialist even though it uses `design-checklist.md` instead of the specialist schema files.
-Remember these stats — you will need them for the review-log entry in Step 5.8.
-
----
-
-### Red Team dispatch (conditional)
-
-**Activation:** Only if DIFF_LINES > 200 OR any specialist produced a CRITICAL finding.
-
-If activated, dispatch one more subagent via the Agent tool (foreground, not background).
-
-The Red Team subagent receives:
-1. The red-team checklist from `~/.claude/skills/gstack/review/specialists/red-team.md`
-2. The merged specialist findings from Step 4.6 (so it knows what was already caught)
-3. The git diff command
-
-Prompt: "You are a red team reviewer. The code has already been reviewed by N specialists
-who found the following issues: {merged findings summary}. Your job is to find what they
-MISSED. Read the checklist, run `DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"`, and look for gaps.
-Output findings as JSON objects (same schema as the specialists). Focus on cross-cutting
-concerns, integration boundary issues, and failure modes that specialist checklists
-don't cover."
-
-If the Red Team finds additional issues, merge them into the findings list before
-Step 5 Fix-First. Red Team findings are tagged with `"specialist":"red-team"`.
-
-If the Red Team returns NO FINDINGS, note: "Red Team review: no additional issues found."
-If the Red Team subagent fails or times out, skip silently and continue.` — subagents cannot spawn subagents, so it would error or
+   Army dispatch** (the `REVIEW_ARMY` placeholder block — subagents cannot spawn subagents, so it would error or
    no-op), the **Adversarial / Codex step** (duplicated by the Codex + Grok forum below), the entire
    **Fix-First / Step 5 flow and any commit** (fixes are the orchestrator's job), the Greptile
    comment resolution, and the review-log persist. It returns findings-only in the envelope.
@@ -1644,9 +1442,12 @@ report file. The station's verdict is the UNION of both members: it FAILs if EIT
 source ~/.claude/skills/gstack/bin/gstack-codex-probe 2>/dev/null || true
 # Honor config + availability. If codex is not_installed / not_authed, or the user has
 # codex_reviews disabled, mark the Codex member ABSENT (see Forum fallback below — do NOT fail
-# the gate on that alone). codex_reviews=off is the ONLY run-durable disable: a quota / capacity /
+# the gate on that alone). codex_reviews=disabled is the ONLY run-durable disable: a quota / capacity /
 # timeout failure in a PRIOR gate must NEVER carry forward — run this full recipe at EVERY gate.
-_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo on)
+# gstack-config vocabulary is enabled/disabled (default enabled). Gate on the EXPLICIT
+# negative only — an unknown or empty value must not silently drop the member (live
+# failure 2026-08-15: a literal `!= "on"` check classified enabled-as-disabled).
+_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
 
 TMPERR=$(mktemp "${TMP_ROOT:-/tmp}/codex-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
 CODEX_PROMPT=$(cat <<'EOF'
@@ -1669,7 +1470,7 @@ EOF
 #                            until reset); mark ABSENT for THIS gate only. The NEXT gate re-attempts
 #                            and it self-heals at the reset time — NEVER latch Codex off for the run.
 # Max 4 attempts so a hard failure can't spin. `sleep` here runs on the user's machine at gate time.
-if [ "$_CODEX_ENABLED" != "on" ]; then
+if [ "$_CODEX_ENABLED" = "disabled" ] || [ "$_CODEX_ENABLED" = "off" ]; then
   _CODEX_STATUS=disabled   # the config gate must actually GATE — a computed-but-untested flag is dead code
   echo "Codex member disabled (codex_reviews=$_CODEX_ENABLED) — ABSENT by user config (the one run-durable skip)."
 else
@@ -1720,7 +1521,9 @@ model id" error and losing this forum member; the current default IS the latest,
 ```bash
 # Honor config + availability. If grok is missing or grok_reviews is disabled, mark the Grok
 # member ABSENT (see Forum fallback below — do NOT fail the gate on that alone).
-_GROK_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get grok_reviews 2>/dev/null || echo on)
+# grok_reviews may be unset (gstack-config returns EMPTY, exit 0 — the || fallback does
+# NOT fire). Empty/unknown means enabled; gate on the explicit negative only.
+_GROK_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get grok_reviews 2>/dev/null || echo enabled)
 command -v grok >/dev/null 2>&1 || _GROK_ENABLED=absent
 
 TMPERR_GROK=$(mktemp "${TMP_ROOT:-/tmp}/grok-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
@@ -1739,8 +1542,8 @@ EOF
 # Same error-class-aware retry as the Codex member (grok can also hit quota / capacity / rate
 # limits, all exit !=0): TIMEOUT (124) -> step down high@600s -> medium@300s; TRANSIENT (capacity/
 # overload/rate/5xx/network) -> backoff + retry same effort; QUOTA -> ABSENT this gate only, next
-# gate re-attempts. Max 4 attempts. grok_reviews=off is the only run-durable disable.
-if [ "$_GROK_ENABLED" != "on" ]; then
+# gate re-attempts. Max 4 attempts. grok_reviews=disabled is the only run-durable disable.
+if [ "$_GROK_ENABLED" = "absent" ] || [ "$_GROK_ENABLED" = "disabled" ] || [ "$_GROK_ENABLED" = "off" ]; then
   _GROK_STATUS=disabled   # gate on the flag for real — absent/off must skip the invocation
   echo "Grok member disabled/absent (grok_reviews=$_GROK_ENABLED) — ABSENT ($([ "$_GROK_ENABLED" = "absent" ] && echo 'CLI not installed' || echo 'user config'))."
 else

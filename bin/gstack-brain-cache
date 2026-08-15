@@ -32,6 +32,7 @@ import {
   SALIENCE_DEFAULT_ALLOWLIST,
   type BrainCacheEntity,
 } from '../scripts/brain-cache-spec';
+import { datamark } from '../lib/gstack-decision';
 
 // ──────────────────────────────────────────────────────────────────────────
 // Paths + meta
@@ -524,7 +525,10 @@ function fetchGoals(projectSlug: string | null): string | null {
  * kind that carries human-readable decision text; `kind: "supersede"` entries
  * are structural links with nothing to render).
  */
-function fetchLocalDecisionsLedger(projectSlug: string, limit: number): string | null {
+export function fetchLocalDecisionsLedger(projectSlug: string, limit: number): string | null {
+  // Slug is CLI-controllable (--project); refuse separators so the join can't
+  // escape GSTACK_HOME/projects/ and read an arbitrary decisions.active.json.
+  if (/[/\\]|\.\./.test(projectSlug)) return null;
   const path = join(GSTACK_HOME, 'projects', projectSlug, 'decisions.active.json');
   if (!existsSync(path)) return null;
   let parsed: unknown;
@@ -544,9 +548,11 @@ function fetchLocalDecisionsLedger(projectSlug: string, limit: number): string |
     return bd - ad;
   });
   const lines = decided.slice(0, limit).map((e) => {
-    const date = typeof e.date === 'string' ? e.date.slice(0, 10) : 'unknown-date';
-    const scope = typeof e.scope === 'string' ? e.scope : 'repo';
-    const text = String(e.decision).replace(/\s+/g, ' ').trim();
+    // datamark at the render boundary (gstack-decision.ts contract: snapshot
+    // reads must mark — write-time denylist alone doesn't cover old records)
+    const date = typeof e.date === 'string' ? datamark(e.date.slice(0, 10)) : 'unknown-date';
+    const scope = typeof e.scope === 'string' ? datamark(e.scope) : 'repo';
+    const text = datamark(String(e.decision)).replace(/\s+/g, ' ').trim();
     return `- (${date}, ${scope}) ${text}`;
   });
   return `# Recent decisions (project: ${projectSlug})\n\n${lines.join('\n')}\n`;
@@ -582,6 +588,9 @@ function fetchRecentDecisions(projectSlug: string | null): string | null {
     // failure.
     return null;
   }
+  // A malformed payload ({pages: {}} etc.) must classify as failure, not crash
+  // refreshEntity mid-refresh — same honest-missing polarity as the F10 fix.
+  if (!Array.isArray(result.pages)) return null;
   if (result.pages.length === 0) {
     return `# Recent decisions (project: ${projectSlug})\n\n_No prior skill runs recorded._\n`;
   }
