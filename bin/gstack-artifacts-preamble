@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# gstack-artifacts-preamble — skill-start artifacts-sync status check (#48).
+#
+# Absorbs the bash that the preamble used to inline into every SKILL.md
+# (scripts/resolvers/preamble/generate-brain-sync-block.ts). Deterministic
+# checks belong in code, not prose: the generated skill now runs this script
+# and interprets its status lines; the rare-path prose (restore offer, privacy
+# stop-gate) lives in preamble/sections/artifacts-sync.md, read on demand.
+#
+# Behavior is a faithful port of the inline block:
+#   0. GBrain availability hint (worktree-pinned vs unpinned variants)
+#   1. Restore-available hint when a remote file exists but ~/.gstack has no
+#      .git (does NOT auto-run restore)
+#   2. If sync is on: gstack-brain-sync --once (drain + push)
+#   3. First skill of the day (24h cache): git fetch + ff-only merge
+#   4. ARTIFACTS_SYNC: status line (remote-mode / mode+queue / off)
+# New here (replaces prose-side condition checking):
+#   5. ARTIFACTS_SYNC_PROMPT: needed — when mode is off, the privacy stop-gate
+#      was never answered, and gbrain is available. The skill reads the shared
+#      artifacts-sync section only when this line (or the restore hint) fires.
+set -u
+
+_BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+_GSTACK_HOME="${GSTACK_HOME:-$HOME/.gstack}"
+
+# Prefer the v1.27.0.0 artifacts file; fall back to brain file for users
+# upgrading mid-stream before the migration script runs.
+if [ -f "$HOME/.gstack-artifacts-remote.txt" ]; then
+  _BRAIN_REMOTE_FILE="$HOME/.gstack-artifacts-remote.txt"
+else
+  _BRAIN_REMOTE_FILE="$HOME/.gstack-brain-remote.txt"
+fi
+_BRAIN_SYNC_BIN="$_BIN_DIR/gstack-brain-sync"
+_BRAIN_CONFIG_BIN="$_BIN_DIR/gstack-config"
+
+# GBrain context-load hint: teach the agent to use gbrain when it's available.
+# Per-worktree pin via .gbrain-source in the git toplevel (kubectl-style) so
+# worktree B without a pin doesn't claim "indexed" because worktree A synced.
+# Silent when gbrain is not configured (zero context cost for non-gbrain users).
+_GBRAIN_CONFIG="$HOME/.gbrain/config.json"
+if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
+  _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ' || echo 0)
+  if [ "$_GBRAIN_VERSION_OK" -gt 0 ] 2>/dev/null; then
+    _GBRAIN_PIN_PATH=""
+    _REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    if [ -n "$_REPO_TOP" ] && [ -f "$_REPO_TOP/.gbrain-source" ]; then
+      _GBRAIN_PIN_PATH="$_REPO_TOP/.gbrain-source"
+    fi
+    if [ -n "$_GBRAIN_PIN_PATH" ]; then
+      echo "GBrain configured. Prefer \`gbrain search\`/\`gbrain query\` over Grep for"
+      echo "semantic questions; use \`gbrain code-def\`/\`code-refs\`/\`code-callers\` for"
+      echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in CLAUDE.md."
+      echo "Run /sync-gbrain to refresh."
+    else
+      echo "GBrain configured but this worktree isn't pinned yet. Run \`/sync-gbrain --full\`"
+      echo "before relying on \`gbrain search\` for code questions in this worktree."
+      echo "Falls back to Grep until pinned."
+    fi
+  fi
+fi
+
+_BRAIN_SYNC_MODE=$("$_BRAIN_CONFIG_BIN" get artifacts_sync_mode 2>/dev/null || echo off)
+
+# Detect remote-MCP mode (Path 4 of /setup-gbrain). Local artifacts sync is a
+# no-op in remote mode; the brain server pulls from GitHub/GitLab on its own
+# cadence. Read claude.json directly to keep skill start fast.
+_GBRAIN_MCP_MODE="none"
+_GBRAIN_MCP_URL=""
+if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
+  # Single jq pass extracts type AND url (this file grows unboundedly on
+  # long-lived installs; parse it once, not twice).
+  _GBRAIN_MCP_INFO=$(jq -r '[(.mcpServers.gbrain.type // .mcpServers.gbrain.transport // ""), (.mcpServers.gbrain.url // "")] | @tsv' "$HOME/.claude.json" 2>/dev/null)
+  _GBRAIN_MCP_TYPE=${_GBRAIN_MCP_INFO%%$'\t'*}
+  _GBRAIN_MCP_URL=${_GBRAIN_MCP_INFO#*$'\t'}
+  case "$_GBRAIN_MCP_TYPE" in
+    url|http|sse) _GBRAIN_MCP_MODE="remote-http" ;;
+    stdio) _GBRAIN_MCP_MODE="local-stdio" ;;
+  esac
+fi
+
+if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
+  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$_BRAIN_NEW_URL" ]; then
+    echo "ARTIFACTS_SYNC: artifacts repo detected: $_BRAIN_NEW_URL"
+    echo "ARTIFACTS_SYNC: run 'gstack-brain-restore' to pull your cross-machine artifacts (or 'gstack-config set artifacts_sync_mode off' to dismiss forever)"
+  fi
+fi
+
+if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
+  _BRAIN_LAST_PULL_FILE="$_GSTACK_HOME/.brain-last-pull"
+  _BRAIN_NOW=$(date +%s)
+  _BRAIN_DO_PULL=1
+  if [ -f "$_BRAIN_LAST_PULL_FILE" ]; then
+    _BRAIN_LAST=$(cat "$_BRAIN_LAST_PULL_FILE" 2>/dev/null || echo 0)
+    # Numeric-validate before arithmetic: $(( )) evaluates its operands, so a
+    # non-numeric value (the file lives in the git-synced ~/.gstack tree and
+    # could arrive from the remote) would otherwise be an injection vector.
+    case "$_BRAIN_LAST" in ''|*[!0-9]*) _BRAIN_LAST=0 ;; esac
+    _BRAIN_AGE=$(( _BRAIN_NOW - _BRAIN_LAST ))
+    [ "$_BRAIN_AGE" -lt 86400 ] && _BRAIN_DO_PULL=0
+  fi
+  if [ "$_BRAIN_DO_PULL" = "1" ]; then
+    ( cd "$_GSTACK_HOME" && git fetch origin >/dev/null 2>&1 && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
+    echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+  fi
+  "$_BRAIN_SYNC_BIN" --once 2>/dev/null || true
+fi
+
+if [ "$_GBRAIN_MCP_MODE" = "remote-http" ]; then
+  # Remote-MCP mode: local artifacts sync is a no-op (brain admin's server
+  # pulls from GitHub/GitLab). Show the user this is by design, not broken.
+  # Sanitize the host to one line of hostname-safe chars: the url value comes
+  # from ~/.claude.json (commonly written by third-party install snippets) and
+  # is echoed into status output the agent is told to trust — a crafted value
+  # could otherwise inject fake ARTIFACTS_SYNC lines.
+  _GBRAIN_HOST=$(printf '%s' "$_GBRAIN_MCP_URL" | sed -E 's|^https?://([^/:]+).*|\1|' | head -1 | tr -cd 'A-Za-z0-9._-')
+  echo "ARTIFACTS_SYNC: remote-mode (managed by brain server ${_GBRAIN_HOST:-remote})"
+elif [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
+  _BRAIN_QUEUE_DEPTH=0
+  [ -f "$_GSTACK_HOME/.brain-queue.jsonl" ] && _BRAIN_QUEUE_DEPTH=$(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl" | tr -d ' ')
+  _BRAIN_LAST_PUSH="never"
+  [ -f "$_GSTACK_HOME/.brain-last-push" ] && _BRAIN_LAST_PUSH=$(cat "$_GSTACK_HOME/.brain-last-push" 2>/dev/null || echo never)
+  echo "ARTIFACTS_SYNC: mode=$_BRAIN_SYNC_MODE | last_push=$_BRAIN_LAST_PUSH | queue=$_BRAIN_QUEUE_DEPTH"
+else
+  echo "ARTIFACTS_SYNC: off"
+  # Privacy stop-gate trigger (was prose-side condition checking): fires ONLY
+  # in this true-off branch, mirroring the old inline prose that keyed on the
+  # literal "ARTIFACTS_SYNC: off" output line. In remote-MCP mode the brain
+  # server manages sync and the status says remote-mode, so no local prompt.
+  _SYNC_PROMPTED=$("$_BRAIN_CONFIG_BIN" get artifacts_sync_mode_prompted 2>/dev/null || echo false)
+  if [ "$_SYNC_PROMPTED" != "true" ] && command -v gbrain >/dev/null 2>&1; then
+    echo "ARTIFACTS_SYNC_PROMPT: needed"
+  fi
+fi

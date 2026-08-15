@@ -150,22 +150,34 @@ describe('gstack-first-task-detect — contract', () => {
 });
 
 describe('first-run-guidance preamble wiring (generated)', () => {
+  // #48 carve: detection bash stays in the always-loaded skeleton (it feeds
+  // the FIRST_TASK echo); the guidance PROSE moved to the shared onboarding
+  // section, which the skeleton routes to via the ACTIVATED/FIRST_LOOP_SHOWN
+  // rows of the Preamble Section Index.
   const md = fs.readFileSync(path.join(ROOT, 'ship', 'SKILL.md'), 'utf-8');
+  const onboarding = fs.readFileSync(
+    path.join(ROOT, 'preamble', 'sections', 'onboarding.md'), 'utf-8');
 
   test('detection is gated to the first-ever run only (ACTIVATED=no, not headless)', () => {
     expect(md).toContain('if [ "$_ACTIVATED" = "no" ] && [ "$_SESSION_KIND" != "headless" ]');
     expect(md).toContain('gstack-first-task-detect');
   });
 
-  test('emits the unified first-run guidance section branching on ACTIVATED', () => {
-    expect(md).toContain('## First-run guidance (one-time)');
-    expect(md).toContain('`ACTIVATED` is `no`'); // P4 scaffold branch
-    expect(md).toContain('`ACTIVATED` is `yes` AND `FIRST_LOOP_SHOWN` is `no`'); // P3 tip branch
+  test('skeleton routes ACTIVATED/FIRST_LOOP_SHOWN to the shared onboarding section', () => {
+    expect(md).toContain('`ACTIVATED: no`');
+    expect(md).toContain('`FIRST_LOOP_SHOWN: no`');
+    expect(md).toContain('preamble/sections/onboarding.md');
   });
 
-  test('marks activated + logs the scaffold telemetry only on the shown path', () => {
-    expect(md).toContain('first_task_scaffold_shown');
-    expect(md).toContain('touch ~/.gstack/.activated');
-    expect(md).toContain('touch ~/.gstack/.first-loop-tip-shown');
+  test('shared onboarding section carries the unified first-run guidance branching on ACTIVATED', () => {
+    expect(onboarding).toContain('## First-run guidance (one-time)');
+    expect(onboarding).toContain('`ACTIVATED` is `no`'); // P4 scaffold branch
+    expect(onboarding).toContain('`ACTIVATED` is `yes` AND `FIRST_LOOP_SHOWN` is `no`'); // P3 tip branch
+  });
+
+  test('shared onboarding section marks activated + logs the scaffold telemetry only on the shown path', () => {
+    expect(onboarding).toContain('first_task_scaffold_shown');
+    expect(onboarding).toContain('touch ~/.gstack/.activated');
+    expect(onboarding).toContain('touch ~/.gstack/.first-loop-tip-shown');
   });
 });

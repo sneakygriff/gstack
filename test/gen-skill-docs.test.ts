@@ -766,7 +766,10 @@ describe('REVIEW_DASHBOARD resolver', () => {
   }
 
   test('plan-ceo-review chaining mentions eng and design reviews', () => {
-    const content = fs.readFileSync(path.join(ROOT, 'plan-ceo-review', 'SKILL.md'), 'utf-8');
+    // Carved skill: the chaining text lives in sections/review-sections.md
+    // (the skeleton previously matched only via the now-carved routing
+    // injection prose) — assert on the skeleton+sections union.
+    const content = readSkillUnion('plan-ceo-review');
     expect(content).toContain('/plan-eng-review');
     expect(content).toContain('/plan-design-review');
   });
@@ -1532,7 +1535,12 @@ describe('parameterized resolver support', () => {
 // --- Preamble routing injection tests ---
 
 describe('preamble routing injection', () => {
-  const shipContent = readShipUnion();
+  // #48 carve: the routing-injection PROSE lives in the shared onboarding
+  // section (Claude host); the detection bash + HAS_ROUTING/ROUTING_DECLINED
+  // gating stay in the always-loaded skeleton. Union both so each assertion
+  // keeps checking the surface the model actually sees.
+  const shipContent = readShipUnion() + '\n' + fs.readFileSync(
+    path.join(ROOT, 'preamble', 'sections', 'onboarding.md'), 'utf-8');
 
   test('preamble bash checks for routing section in CLAUDE.md', () => {
     expect(shipContent).toContain('grep -q "## Skill routing" CLAUDE.md');
@@ -1577,6 +1585,88 @@ describe('preamble routing injection', () => {
   test('routing section uses soft "when in doubt" policy, not hard "ALWAYS invoke"', () => {
     expect(shipContent).toContain('When in doubt, invoke the skill');
     expect(shipContent).not.toContain('Do NOT answer directly');
+  });
+});
+
+// --- Preamble Section Index (#48 carve) ---
+// The shared preamble sections are reachable ONLY via the index table's
+// trigger rows — if a row (or a trigger literal inside it) is dropped, the
+// onboarding prompts / full AUQ spec / artifacts-sync prose become silently
+// unreachable on Claude while every other test stays green. Pin the literals.
+
+describe('preamble section index routes every shared section', () => {
+  const ONBOARDING_TRIGGERS = [
+    '`LAKE_INTRO: no`', '`TEL_PROMPTED: no`', '`PROACTIVE_PROMPTED: no`',
+    '`ACTIVATED: no`', '`FIRST_LOOP_SHOWN: no`', '`HAS_ROUTING: no`',
+    '`VENDORED_GSTACK: yes`', '`SPAWNED_SESSION: true`',
+  ];
+  const SECTION_PATHS = [
+    'preamble/sections/onboarding.md',
+    'preamble/sections/ask-user-questions.md',
+    'preamble/sections/artifacts-sync.md',
+  ];
+
+  test('tier-4 skill (ship) carries the full index: all triggers + all three paths', () => {
+    const content = fs.readFileSync(path.join(ROOT, 'ship', 'SKILL.md'), 'utf-8');
+    expect(content).toContain('## Preamble Section Index');
+    for (const t of ONBOARDING_TRIGGERS) expect(content).toContain(t);
+    for (const p of SECTION_PATHS) expect(content).toContain(p);
+    // AUQ row trigger phrase (tier >= 2 only)
+    expect(content).toContain('before composing your FIRST AskUserQuestion');
+    // Artifacts row trigger literals must match what bin/gstack-artifacts-preamble echoes
+    expect(content).toContain('ARTIFACTS_SYNC_PROMPT: needed');
+    expect(content).toContain('artifacts repo detected');
+  });
+
+  test('tier-1 skill (benchmark) has the index without the AUQ row', () => {
+    const content = fs.readFileSync(path.join(ROOT, 'benchmark', 'SKILL.md'), 'utf-8');
+    expect(content).toContain('## Preamble Section Index');
+    expect(content).toContain('preamble/sections/onboarding.md');
+    expect(content).not.toContain('preamble/sections/ask-user-questions.md');
+  });
+
+  test('every shared section file the index points at is generated', () => {
+    for (const p of SECTION_PATHS) {
+      expect(fs.existsSync(path.join(ROOT, p))).toBe(true);
+    }
+  });
+
+  test('artifacts prompt trigger literal stays in sync with bin/gstack-artifacts-preamble', () => {
+    const script = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-artifacts-preamble'), 'utf-8');
+    expect(script).toContain('ARTIFACTS_SYNC_PROMPT: needed');
+    expect(script).toContain('artifacts repo detected');
+  });
+});
+
+// --- autoplan lazy per-phase review-skill loading (#48 fix 3) ---
+describe('autoplan loads review skills lazily per phase', () => {
+  const md = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md'), 'utf-8');
+
+  test('Phase 0 defers all review-skill reads', () => {
+    expect(md).toContain('Do NOT read any review skill file yet');
+  });
+
+  test('each phase opens with a Load-now Read of its own skill file', () => {
+    expect(md).toContain('**Load now:** Read `~/.claude/skills/gstack/plan-ceo-review/SKILL.md`');
+    expect(md).toContain('**Load now:** Read `~/.claude/skills/gstack/plan-eng-review/SKILL.md`');
+    expect(md).toContain('**Load now:** Read `~/.claude/skills/gstack/plan-design-review/SKILL.md`');
+    expect(md).toContain('**Load now:** Read `~/.claude/skills/gstack/plan-devex-review/SKILL.md`');
+  });
+
+  test('conditional phases gate LOADING: skip-condition precedes Load-now', () => {
+    // Design (UI scope) and DX (DX scope) must say "do NOT read the skill file"
+    // BEFORE their Load-now line, so a skipped phase never reads its 79-87 KB file.
+    for (const skill of ['plan-design-review', 'plan-devex-review']) {
+      const loadIdx = md.indexOf(`**Load now:** Read \`~/.claude/skills/gstack/${skill}/SKILL.md\``);
+      const skipIdx = md.lastIndexOf('do NOT read the skill file', loadIdx);
+      expect(skipIdx).toBeGreaterThan(-1);
+      expect(skipIdx).toBeLessThan(loadIdx);
+    }
+  });
+
+  test('Phase 0 skip list neutralizes the carved preamble sections', () => {
+    expect(md).toContain('Preamble Section Index');
+    expect(md).toContain('Artifacts Sync (skill start)');
   });
 });
 
@@ -2645,13 +2735,17 @@ describe('telemetry', () => {
     expect(content).toContain('gstack-config get telemetry');
   });
 
-  test('generated SKILL.md contains telemetry opt-in prompt', () => {
+  test('telemetry opt-in prompt reachable from generated SKILL.md (#48: prose in shared onboarding section)', () => {
     const content = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
+    // Skeleton keeps the TEL_PROMPTED detection + the index route to onboarding.
     expect(content).toContain('.telemetry-prompted');
-    expect(content).toContain('Help gstack get better');
-    expect(content).toContain('gstack-config set telemetry community');
-    expect(content).toContain('gstack-config set telemetry anonymous');
-    expect(content).toContain('gstack-config set telemetry off');
+    expect(content).toContain('preamble/sections/onboarding.md');
+    const onboarding = fs.readFileSync(
+      path.join(ROOT, 'preamble', 'sections', 'onboarding.md'), 'utf-8');
+    expect(onboarding).toContain('Help gstack get better');
+    expect(onboarding).toContain('gstack-config set telemetry community');
+    expect(onboarding).toContain('gstack-config set telemetry anonymous');
+    expect(onboarding).toContain('gstack-config set telemetry off');
   });
 
   test('generated SKILL.md contains telemetry epilogue', () => {

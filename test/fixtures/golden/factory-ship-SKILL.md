@@ -158,25 +158,6 @@ Feature discovery, max one prompt per session:
 
 After upgrade prompts, continue workflow.
 
-If `WRITING_STYLE_PENDING` is `yes`: ask once about writing style:
-
-> v1 prompts are simpler: first-use jargon glosses, outcome-framed questions, shorter prose. Keep default or restore terse?
-
-Options:
-- A) Keep the new default (recommended — good writing helps everyone)
-- B) Restore V0 prose — set `explain_level: terse`
-
-If A: leave `explain_level` unset (defaults to `default`).
-If B: run `$GSTACK_BIN/gstack-config set explain_level terse`.
-
-Always run (regardless of choice):
-```bash
-rm -f ~/.gstack/.writing-style-prompt-pending
-touch ~/.gstack/.writing-style-prompted
-```
-
-Skip if `WRITING_STYLE_PENDING` is `no`.
-
 If `LAKE_INTRO` is `no`: say "gstack follows the **Boil the Ocean** principle — do the complete thing when AI makes marginal cost near-zero. Read more: https://garryslist.org/posts/boil-the-ocean" Offer to open:
 
 ```bash
@@ -236,7 +217,10 @@ Skip if `PROACTIVE_PROMPTED` is `yes`.
 
 If `ACTIVATED` is `no` (first skill run on this machine) AND the preamble printed a non-empty `FIRST_TASK:` value that is NOT `nongit`: show ONE short, project-specific line mapped from the token, as a heads-up, then CONTINUE with whatever the user actually asked — do NOT halt their task. Map the token: `greenfield` → "Fresh repo — shape it first with `/spec` or `/office-hours`." `code_node`/`code_python`/`code_rust`/`code_go`/`code_ruby`/`code_ios` → "There's code here — `/qa` to see it work, or `/investigate` if something's off." `branch_ahead` → "Unshipped work on this branch — `/review` then `/ship`." `dirty_default` → "Uncommitted changes — `/review` before committing." `clean_default` → "Pick one: `/spec`, `/investigate`, or `/qa`." Then substitute the token you saw for TASK_TOKEN and run (best-effort), and mark activated:
 ```bash
-$GSTACK_BIN/gstack-telemetry-log --event-type first_task_scaffold_shown --skill "TASK_TOKEN" --outcome shown 2>/dev/null || true
+_TEL=$($GSTACK_BIN/gstack-config get telemetry 2>/dev/null || echo "off")
+if [ "$_TEL" != "off" ]; then
+  $GSTACK_BIN/gstack-telemetry-log --event-type first_task_scaffold_shown --skill "TASK_TOKEN" --outcome shown 2>/dev/null || true
+fi
 touch ~/.gstack/.activated 2>/dev/null || true
 ```
 
@@ -520,6 +504,7 @@ if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   _BRAIN_DO_PULL=1
   if [ -f "$_BRAIN_LAST_PULL_FILE" ]; then
     _BRAIN_LAST=$(cat "$_BRAIN_LAST_PULL_FILE" 2>/dev/null || echo 0)
+    case "$_BRAIN_LAST" in ''|*[!0-9]*) _BRAIN_LAST=0 ;; esac
     _BRAIN_AGE=$(( _BRAIN_NOW - _BRAIN_LAST ))
     [ "$_BRAIN_AGE" -lt 86400 ] && _BRAIN_DO_PULL=0
   fi
@@ -533,7 +518,7 @@ fi
 if [ "$_GBRAIN_MCP_MODE" = "remote-http" ]; then
   # Remote-MCP mode: local artifacts sync is a no-op (brain admin's server
   # pulls from GitHub/GitLab). Show the user this is by design, not broken.
-  _GBRAIN_HOST=$(jq -r '.mcpServers.gbrain.url // empty' "$HOME/.claude.json" 2>/dev/null | sed -E 's|^https?://([^/:]+).*|\1|')
+  _GBRAIN_HOST=$(jq -r '.mcpServers.gbrain.url // empty' "$HOME/.claude.json" 2>/dev/null | sed -E 's|^https?://([^/:]+).*|\1|' | head -1 | tr -cd 'A-Za-z0-9._-')
   echo "ARTIFACTS_SYNC: remote-mode (managed by brain server ${_GBRAIN_HOST:-remote})"
 elif [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   _BRAIN_QUEUE_DEPTH=0
@@ -656,13 +641,13 @@ Applies to AskUserQuestion, user replies, and findings. AskUserQuestion Format i
 Curated jargon list lives at `$GSTACK_ROOT/scripts/jargon-list.json` (80+ terms). On the first jargon term you encounter this session, Read that file once; treat the `terms` array as the canonical list. The list is repo-owned and may grow between releases.
 
 
-## Completeness Principle — Boil the Ocean
+## Completeness Principle — Boil the Ocean (skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 AI makes completeness cheap, so the complete thing is the goal. Recommend full coverage (tests, edge cases, error paths) — boil the ocean one lake at a time. The only thing out of scope is genuinely unrelated work (rewrites, multi-quarter migrations); flag that as separate scope, never as an excuse for a shortcut.
 
 When options differ in coverage, include `Completeness: X/10` (10 = all edge cases, 7 = happy path, 3 = shortcut). When options differ in kind, write: `Note: options differ in kind, not coverage — no completeness score.` Do not fabricate scores.
 
-## Confusion Protocol
+## Confusion Protocol (skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 For high-stakes ambiguity (architecture, data model, destructive scope, missing context), STOP. Name it in one sentence, present 2-3 options with tradeoffs, and ask. Do not use for routine coding or obvious changes.
 
@@ -691,7 +676,7 @@ Rules: stage only intentional files, NEVER `git add -A`, do not commit broken te
 
 If `CHECKPOINT_MODE` is `"explicit"`: ignore this section unless a skill or user asks to commit.
 
-## Context Health (soft directive)
+## Context Health (soft directive; skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 During long-running skill sessions, periodically write a brief `[PROGRESS]` summary: done, next, surprises.
 

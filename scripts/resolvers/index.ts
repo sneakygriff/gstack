@@ -32,6 +32,7 @@ import { generateDxFramework } from './dx';
 import { generateGBrainContextLoad, generateGBrainSaveResults, generateBrainPreflight, generateBrainCacheRefresh, generateBrainWriteBack } from './gbrain';
 import { generateTasksSectionEmit, generateTasksSectionAggregate } from './tasks-section';
 import { SECTION, SECTION_INDEX } from './sections';
+import { generatePreambleSection } from './preamble/carved-sections';
 import { generateRedactInvocationBlock } from './redact-doc';
 
 export const RESOLVERS: Record<string, ResolverFn> = {
@@ -92,4 +93,8 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   TASKS_SECTION_AGGREGATE: generateTasksSectionAggregate,
   SECTION,
   SECTION_INDEX,
+  // Shared preamble sections (#48): used only by preamble/sections/*.md.tmpl,
+  // which generate Claude-only (non-Claude hosts keep the inline preamble).
+  PREAMBLE_SECTION: (ctx: TemplateContext, args?: string[]) =>
+    generatePreambleSection(ctx, args?.[0] ?? ''),
 };

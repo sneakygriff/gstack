@@ -295,10 +295,13 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    // v1.64.1.0: shared-preamble prose from the two parallel v1.64 waves lands
-    // the skeleton at 69,022 B; +~1 KB headroom.
-    maxSkeletonBytes: 70_000,
-    minUnionBytes: 72_000,
+    // #48 preamble carve on v1.64.1.0: the onboarding chain, full AUQ spec,
+    // and artifacts-sync prose moved to shared preamble/sections/ files,
+    // deliberately shrinking this skeleton/union. Ceiling ~2% over and floor
+    // ~4% under the post-carve regen measurement (2026-08-15:
+    // skeleton 50,820 B, union 72,173 B).
+    maxSkeletonBytes: 52_000,
+    minUnionBytes: 69_000,
     mustContain: ['Typography', 'Color', 'Aesthetic Direction'],
     // Cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB +
     // the cross-session decision-memory nudge) lands this carved skeleton just over
@@ -336,8 +339,13 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    maxSkeletonBytes: 75_000,
-    minUnionBytes: 72_000,
+    // Re-derived for the #48 carve on v1.64.1.0 (2026-08-15 regen:
+    // skeleton 56,708 B, union 71,298 B) — ceiling ~2% over, floor ~4% under.
+    maxSkeletonBytes: 58_000,
+    // Floor lowered 72_000 → 68_000 for the #48 preamble carve (see
+    // design-consultation note above; cso union shrank ~13 KB, 83,808 →
+    // ~70,4xx B — floor sits ~4% under the post-carve union).
+    minUnionBytes: 68_000,
     mustContain: ['OWASP', 'STRIDE', 'daily', 'comprehensive', 'verif'],
     // cso keeps its mode-dispatch + FP-filtering phases always-loaded, so the
     // cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB + the

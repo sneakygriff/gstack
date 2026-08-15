@@ -31,7 +31,10 @@ import { runParityChecks, PARITY_INVARIANTS } from './helpers/parity-harness';
 import type { ParityBaseline } from './helpers/capture-parity-baseline';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '..');
-const BASELINE_PATH = path.join(REPO_ROOT, 'test', 'fixtures', 'parity-baseline-v1.64.1.0.json');
+// Rebased to the post-carve anchor (2026-08-15): the #48 preamble carve port
+// shrinks every tier-2+ Claude skeleton, so the pre-carve v1.64.1.0 fixture
+// would read absurd ratios. Carved skills are union-normalized in the fixture.
+const BASELINE_PATH = path.join(REPO_ROOT, 'test', 'fixtures', 'parity-baseline-v1.64.1.0-carve.json');
 
 describe('parity suite vs v1.64.1.0 baseline (gate, free)', () => {
   test('baseline exists', () => {

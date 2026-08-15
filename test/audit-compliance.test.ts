@@ -17,6 +17,19 @@ function getAllSkillMds(): Array<{ name: string; content: string }> {
       results.push({ name: entry.name, content: readFileSync(skillPath, 'utf-8') });
     }
   }
+  // #48 carve: shared preamble sections are model-facing instruction files
+  // exactly like SKILL.md bodies (the onboarding section carries the
+  // first-run telemetry bash) — the audit invariants must scan them too.
+  const preambleSections = join(ROOT, 'preamble', 'sections');
+  if (existsSync(preambleSections)) {
+    for (const f of readdirSync(preambleSections)) {
+      if (!f.endsWith('.md')) continue; // .md only; .md.tmpl sources never match this
+      results.push({
+        name: `preamble/sections/${f}`,
+        content: readFileSync(join(preambleSections, f), 'utf-8'),
+      });
+    }
+  }
   return results;
 }
 

@@ -65,11 +65,39 @@ for (const file of SKILL_FILES) {
 console.log('\n  Templates:');
 const TEMPLATES = discoverTemplates(ROOT);
 
+// Skills the Claude host deliberately never generates (hosts/claude.ts
+// skipSkills — e.g. claude/, the outside-voice skill for non-Claude hosts).
+// Their outputs live only under external host subdirs (.agents/, .factory/,
+// ...), so requiring a local sibling SKILL.md is a false alarm. Instead,
+// verify at least one external host actually generated the skill.
+const CLAUDE_SKIPPED = new Set(getHostConfig('claude').generation.skipSkills ?? []);
+
+function externalOutputsFor(skillDir: string): string[] {
+  // Mirror externalSkillName's convention (gen-skill-docs.ts): gstack- prefix,
+  // no double-prefixing. skipSkills entries are dir names, which match the
+  // frontmatter name for these skills.
+  const externalName = skillDir.startsWith('gstack-') ? skillDir : `gstack-${skillDir}`;
+  return getExternalHosts()
+    .map(h => path.join(h.hostSubdir, 'skills', externalName, 'SKILL.md'))
+    .filter(rel => fs.existsSync(path.join(ROOT, rel)));
+}
+
 for (const { tmpl, output } of TEMPLATES) {
   const tmplPath = path.join(ROOT, tmpl);
   const outPath = path.join(ROOT, output);
   if (!fs.existsSync(tmplPath)) {
     console.log(`  \u26a0\ufe0f  ${output.padEnd(30)} — no template`);
+    continue;
+  }
+  const skillDir = path.dirname(tmpl);
+  if (CLAUDE_SKIPPED.has(skillDir)) {
+    const external = externalOutputsFor(skillDir);
+    if (external.length > 0) {
+      console.log(`  \u2705 ${tmpl.padEnd(30)} \u2192 external-host-only (${external.length} host outputs, e.g. ${external[0]})`);
+    } else {
+      hasErrors = true;
+      console.log(`  \u274c ${tmpl.padEnd(30)} — Claude-skipped skill has NO external host output either! Run: bun run gen:skill-docs --host all`);
+    }
     continue;
   }
   if (!fs.existsSync(outPath)) {
@@ -90,7 +118,7 @@ for (const file of SKILL_FILES) {
 
 // ─── External Host Skills (config-driven) ───────────────────
 
-import { getExternalHosts } from '../hosts/index';
+import { getExternalHosts, getHostConfig } from '../hosts/index';
 
 for (const hostConfig of getExternalHosts()) {
   const hostDir = path.join(ROOT, hostConfig.hostSubdir, 'skills');
