@@ -55,7 +55,11 @@ _artifacts_preamble_remote_host() {
 # Silent when gbrain is not configured (zero context cost for non-gbrain users).
 _GBRAIN_CONFIG="$HOME/.gbrain/config.json"
 if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
-  _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ' || echo 0)
+  # grep -c already prints its own "0" on no-match but exits 1; a trailing
+  # `|| echo 0` would append a SECOND "0" line, making the value "0\n0" and
+  # breaking the numeric comparison below. Keep grep -c's own output; `|| true`
+  # only swallows the pipeline's exit status.
+  _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ') || true
   if [ "$_GBRAIN_VERSION_OK" -gt 0 ] 2>/dev/null; then
     _GBRAIN_PIN_PATH=""
     _REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
@@ -95,7 +99,11 @@ if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
 fi
 
 if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
-  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
+  # Threat: this file lives in the git-SYNCED tree; a crafted multi-line or
+  # control-char value could otherwise forge extra ARTIFACTS_SYNC lines in
+  # this agent-consumed output. First line only, strip control/whitespace,
+  # cap length before it's echoed below.
+  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:][:cntrl:]' | cut -c1-120)
   if [ -n "$_BRAIN_NEW_URL" ]; then
     echo "ARTIFACTS_SYNC: artifacts repo detected: $_BRAIN_NEW_URL"
     echo "ARTIFACTS_SYNC: run 'gstack-brain-restore' to pull your cross-machine artifacts (or 'gstack-config set artifacts_sync_mode off' to dismiss forever)"
@@ -120,8 +128,11 @@ if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
     if GSTACK_HOME="$_GSTACK_HOME" _receipted_git closed brain-sync "$_PREAMBLE_PULL_HOST" curated-memory-git-fetch "artifacts_sync_mode!=off" \
         bash -c 'git -C "$1" fetch origin >/dev/null 2>&1' _ "$_GSTACK_HOME"; then
       git -C "$_GSTACK_HOME" merge --ff-only "origin/$(git -C "$_GSTACK_HOME" rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 || true
+      # Only stamp the cooldown on a successful (receipted) fetch: a failed
+      # fetch retries at the next skill start by design, instead of being
+      # silenced for 24h by a stamp that doesn't reflect a real sync.
+      echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
     fi
-    echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
   fi
   "$_BRAIN_SYNC_BIN" --once 2>/dev/null || true
 fi
@@ -138,8 +149,19 @@ if [ "$_GBRAIN_MCP_MODE" = "remote-http" ]; then
 elif [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   _BRAIN_QUEUE_DEPTH=0
   [ -f "$_GSTACK_HOME/.brain-queue.jsonl" ] && _BRAIN_QUEUE_DEPTH=$(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl" | tr -d ' ')
+  # Threat: wc -l should already be numeric, but the file lives in the
+  # git-SYNCED tree; enforce numeric before it's interpolated into this
+  # agent-consumed status line.
+  case "$_BRAIN_QUEUE_DEPTH" in ''|*[!0-9]*) _BRAIN_QUEUE_DEPTH=0 ;; esac
   _BRAIN_LAST_PUSH="never"
-  [ -f "$_GSTACK_HOME/.brain-last-push" ] && _BRAIN_LAST_PUSH=$(cat "$_GSTACK_HOME/.brain-last-push" 2>/dev/null || echo never)
+  if [ -f "$_GSTACK_HOME/.brain-last-push" ]; then
+    # Threat: this stamp file lives in the git-SYNCED tree; a crafted
+    # multi-line or control-char value could forge extra ARTIFACTS_SYNC lines
+    # in this agent-consumed output. First line only, timestamp-safe charset,
+    # cap length; empty/invalid falls back to "never".
+    _BRAIN_LAST_PUSH_RAW=$(head -1 "$_GSTACK_HOME/.brain-last-push" 2>/dev/null | tr -cd 'A-Za-z0-9TZ:+.-' | cut -c1-40)
+    [ -n "$_BRAIN_LAST_PUSH_RAW" ] && _BRAIN_LAST_PUSH="$_BRAIN_LAST_PUSH_RAW"
+  fi
   echo "ARTIFACTS_SYNC: mode=$_BRAIN_SYNC_MODE | last_push=$_BRAIN_LAST_PUSH | queue=$_BRAIN_QUEUE_DEPTH"
 else
   echo "ARTIFACTS_SYNC: off"

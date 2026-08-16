@@ -489,7 +489,11 @@ if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
 fi
 
 if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
-  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
+  # Threat: this file lives in the git-SYNCED tree; a crafted multi-line or
+  # control-char value could otherwise forge extra ARTIFACTS_SYNC lines in
+  # this agent-consumed output. First line only, strip control/whitespace,
+  # cap length before it's echoed below.
+  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:][:cntrl:]' | cut -c1-120)
   if [ -n "$_BRAIN_NEW_URL" ]; then
     echo "ARTIFACTS_SYNC: artifacts repo detected: $_BRAIN_NEW_URL"
     echo "ARTIFACTS_SYNC: run 'gstack-brain-restore' to pull your cross-machine artifacts (or 'gstack-config set artifacts_sync_mode off' to dismiss forever)"
@@ -516,13 +520,28 @@ fi
 if [ "$_GBRAIN_MCP_MODE" = "remote-http" ]; then
   # Remote-MCP mode: local artifacts sync is a no-op (brain admin's server
   # pulls from GitHub/GitLab). Show the user this is by design, not broken.
+  # Sanitize the host to one line of hostname-safe chars: the url value comes
+  # from ~/.claude.json (commonly written by third-party install snippets) and
+  # is echoed into status output the agent is told to trust — a crafted value
+  # could otherwise inject fake ARTIFACTS_SYNC lines.
   _GBRAIN_HOST=$(jq -r '.mcpServers.gbrain.url // empty' "$HOME/.claude.json" 2>/dev/null | sed -E 's|^https?://([^/:]+).*|\1|' | head -1 | tr -cd 'A-Za-z0-9._-')
   echo "ARTIFACTS_SYNC: remote-mode (managed by brain server ${_GBRAIN_HOST:-remote})"
 elif [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   _BRAIN_QUEUE_DEPTH=0
   [ -f "$_GSTACK_HOME/.brain-queue.jsonl" ] && _BRAIN_QUEUE_DEPTH=$(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl" | tr -d ' ')
+  # Threat: wc -l should already be numeric, but the file lives in the
+  # git-SYNCED tree; enforce numeric before it's interpolated into this
+  # agent-consumed status line.
+  case "$_BRAIN_QUEUE_DEPTH" in ''|*[!0-9]*) _BRAIN_QUEUE_DEPTH=0 ;; esac
   _BRAIN_LAST_PUSH="never"
-  [ -f "$_GSTACK_HOME/.brain-last-push" ] && _BRAIN_LAST_PUSH=$(cat "$_GSTACK_HOME/.brain-last-push" 2>/dev/null || echo never)
+  if [ -f "$_GSTACK_HOME/.brain-last-push" ]; then
+    # Threat: this stamp file lives in the git-SYNCED tree; a crafted
+    # multi-line or control-char value could forge extra ARTIFACTS_SYNC lines
+    # in this agent-consumed output. First line only, timestamp-safe charset,
+    # cap length; empty/invalid falls back to "never".
+    _BRAIN_LAST_PUSH_RAW=$(head -1 "$_GSTACK_HOME/.brain-last-push" 2>/dev/null | tr -cd 'A-Za-z0-9TZ:+.-' | cut -c1-40)
+    [ -n "$_BRAIN_LAST_PUSH_RAW" ] && _BRAIN_LAST_PUSH="$_BRAIN_LAST_PUSH_RAW"
+  fi
   echo "ARTIFACTS_SYNC: mode=$_BRAIN_SYNC_MODE | last_push=$_BRAIN_LAST_PUSH | queue=$_BRAIN_QUEUE_DEPTH"
 else
   echo "ARTIFACTS_SYNC: off"

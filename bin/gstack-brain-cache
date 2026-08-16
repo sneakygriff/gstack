@@ -502,10 +502,12 @@ function fetchGoals(projectSlug: string | null): string | null {
   const goals = result.pages.filter((p) => p.slug?.startsWith(`gstack/goal/${projectSlug}/`));
   if (goals.length === 0) {
     // Empty digest is valid (just header + 'no active goals' line)
-    return `# Active goals (project: ${projectSlug})\n\n_No active goals recorded yet._\n`;
+    return `# Active goals (project: ${datamark(projectSlug)})\n\n_No active goals recorded yet._\n`;
   }
-  const lines = goals.map((g) => `- [[${g.slug}]] — ${g.title || '(untitled)'}`);
-  return `# Active goals (project: ${projectSlug})\n\n${lines.join('\n')}\n`;
+  // datamark: title is free text from a gbrain-served page, rendered into an
+  // agent-consumed digest (same render-boundary contract as fetchRecentDecisions).
+  const lines = goals.map((g) => `- [[${g.slug}]] — ${datamark(g.title || '(untitled)')}`);
+  return `# Active goals (project: ${datamark(projectSlug)})\n\n${lines.join('\n')}\n`;
 }
 
 /**
@@ -592,10 +594,14 @@ function fetchRecentDecisions(projectSlug: string | null): string | null {
   // refreshEntity mid-refresh — same honest-missing polarity as the F10 fix.
   if (!Array.isArray(result.pages)) return null;
   if (result.pages.length === 0) {
-    return `# Recent decisions (project: ${projectSlug})\n\n_No prior skill runs recorded._\n`;
+    return `# Recent decisions (project: ${datamark(projectSlug)})\n\n_No prior skill runs recorded._\n`;
   }
-  const lines = result.pages.map((p) => `- ${p.title || p.slug}`);
-  return `# Recent decisions (project: ${projectSlug})\n\n${lines.join('\n')}\n`;
+  // datamark: title/slug are free text from a gbrain-served page, rendered into
+  // an agent-consumed digest (same render-boundary contract as datamark's other
+  // callers in this file — a gbrain-fallback page shouldn't get to masquerade
+  // as instructions when this digest lands in agent context).
+  const lines = result.pages.map((p) => `- ${datamark(p.title || p.slug)}`);
+  return `# Recent decisions (project: ${datamark(projectSlug)})\n\n${lines.join('\n')}\n`;
 }
 
 /**
@@ -672,7 +678,9 @@ function fetchSalience(projectSlug: string | null): string | null {
       : `\n_No salient pages in last 14d._\n`;
     return `${header}\n${note}`;
   }
-  const lines = filtered.map((p) => `- [[${p.slug}]] — ${p.title || ''} (weight: ${p.emotional_weight?.toFixed(2) ?? 'n/a'})`);
+  // datamark: title is free text from a gbrain-served page, rendered into an
+  // agent-consumed digest (same render-boundary contract as fetchGoals/fetchRecentDecisions).
+  const lines = filtered.map((p) => `- [[${p.slug}]] — ${datamark(p.title || '')} (weight: ${p.emotional_weight?.toFixed(2) ?? 'n/a'})`);
   const footer = stripped > 0
     ? `\n\n_${stripped} private entries stripped by allowlist gate._`
     : '';
