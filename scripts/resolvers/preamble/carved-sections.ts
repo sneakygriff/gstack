@@ -69,7 +69,10 @@ export function generatePreambleSectionIndex(ctx: TemplateContext): string {
 
 Heavy preamble guidance is carved into shared files under \`${base}/\` (one copy
 for the whole skill suite). Read a file IN FULL the moment its trigger applies —
-never act on its topic from memory.
+never act on its topic from memory. If that base doesn't exist on this machine
+(vendored or non-standard install), resolve the same filename relative to this
+skill file's own installed location instead — \`../../preamble/sections/\` from
+a skill dir, or the gstack repo root's \`preamble/sections/\`.
 
 | When | Read |
 |------|------|
