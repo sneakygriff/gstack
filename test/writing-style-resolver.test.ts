@@ -90,9 +90,14 @@ describe('Writing Style preamble section', () => {
     expect(out).toContain('AskUserQuestion Format');
   });
 
-  test('tier 2+ preamble migration-prompt block appears', () => {
-    const out = generatePreamble(makeCtx('claude', 2));
-    expect(out).toContain('WRITING_STYLE_PENDING');
-    expect(out).toMatch(/writing-style-prompt-pending/);
+  test('dead writing-style migration prompt stays removed (all hosts + shared onboarding)', () => {
+    // The WRITING_STYLE_PENDING prompt never fired in production (the flag was
+    // never echoed; the v1.0.0.0 migration's explain_level short-circuit was
+    // always taken) and was deleted after the #48 carve. Guard against
+    // reintroduction anywhere the preamble renders.
+    const { generatePreambleSection } = require('../scripts/resolvers/preamble/carved-sections');
+    expect(generatePreamble(makeCtx('claude', 2))).not.toContain('WRITING_STYLE_PENDING');
+    expect(generatePreamble(makeCtx('codex', 2))).not.toContain('WRITING_STYLE_PENDING');
+    expect(generatePreambleSection(makeCtx('claude', 2), 'onboarding')).not.toContain('WRITING_STYLE_PENDING');
   });
 });

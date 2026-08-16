@@ -361,16 +361,30 @@ describe("daemon /shutdown", () => {
     await fetchHandler(
       req("POST", `/boards/${board.id}/api/feedback`, { regenerated: false }),
     );
-    // Now non-done count is 0 — handler should return shuttingDown:true.
-    // We DON'T let the real gracefulShutdown timer fire (it calls process.exit
-    // after 50ms which would tear down the test runner); instead we just
-    // observe the immediate response.
-    const r = await fetchHandler(req("POST", "/shutdown"));
-    expect(r.status).toBe(200);
-    const body = (await r.json()) as any;
-    expect(body.shuttingDown).toBe(true);
-    // Reset state for subsequent tests; the shutdown timer will be a no-op
-    // because the next resetForTest flips shuttingDown back to false.
+    // The handler arms setTimeout(gracefulShutdown, 50), and gracefulShutdown
+    // arms a second 50ms timer that calls the real exit. bun test runs ALL files in one
+    // process, so letting that exit fire would kill the whole suite ~100ms
+    // later (exit 0, no summary — see test/no-suicide-exit.test.ts). Stub
+    // process.exit, wait past both timers so they fire harmlessly while
+    // stubbed, then restore. (resetForTest does NOT defuse the timers: the
+    // exit callback is unconditional.)
+    const origExit = process.exit;
+    (process as any).exit = (() => undefined) as any;
+    try {
+      const r = await fetchHandler(req("POST", "/shutdown"));
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as any;
+      expect(body.shuttingDown).toBe(true);
+    } finally {
+      // Drain BOTH 50ms timers (gracefulShutdown, then its process.exit)
+      // against the stub BEFORE restoring the real process.exit — inside
+      // finally, so a failed assertion above can't restore the real exit
+      // within the timer window and let the daemon kill the whole bun test
+      // run (exit 0, no summary).
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      (process as any).exit = origExit;
+    }
+    // Reset state for subsequent tests (gracefulShutdown set shuttingDown).
     resetDaemon();
   });
 });

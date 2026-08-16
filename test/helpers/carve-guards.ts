@@ -144,7 +144,9 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     },
     behavioral: 'external',
     externalTest: 'test/skill-e2e-plan-ceo-review-section-loading.test.ts',
-    maxSkeletonBytes: 90_000,
+    // v1.64.1.0: shared-preamble prose from the two parallel v1.64 waves lands
+    // the skeleton at 90,280 B; +1 KB headroom.
+    maxSkeletonBytes: 91_000,
     minUnionBytes: 80_000,
     mustContain: ['SCOPE EXPANSION', 'SELECTIVE EXPANSION', 'HOLD SCOPE', 'SCOPE REDUCTION'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
@@ -164,7 +166,10 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     },
     behavioral: 'plan',
     // v1.2.0 activation lift (shared first-run-guidance preamble) + #2077 ask-first scope gate.
-    maxSkeletonBytes: 67_000,
+    // +~1 KB: plan-mode auto-select-B scope-gate exceptions (2026-08).
+    // v1.64.1.0: shared-preamble prose from the two parallel v1.64 waves lands
+    // the skeleton at 68,163 B; +~1 KB headroom.
+    maxSkeletonBytes: 69_000,
     minUnionBytes: 70_000,
     mustContain: ['Architecture', 'Code Quality', 'Test', 'Performance'],
     // Cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback + the
@@ -172,7 +177,10 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
     // prose, replacing the smaller opt-in question) land this at ~6.6% over the
     // v1.53.0.0 baseline. Headroom for those intentional additions.
-    maxSizeRatio: 1.08,
+    // 1.08 → 1.10: the scope-gate exceptions block (+ its adversarial-review
+    // hardening: host-anchored mode signal, precedence, passing-mention
+    // guards) and the plan-mode preamble reword land the union at 1.092.
+    maxSizeRatio: 1.10,
   },
   'plan-design-review': {
     skill: 'plan-design-review',
@@ -189,10 +197,14 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift (shared first-run-guidance preamble) + #2077 ask-first scope gate.
-    maxSkeletonBytes: 88_000,
+    // +~1.3 KB: plan-mode auto-select-B scope-gate exceptions (2026-08).
+    // +~340 B: telemetry --error-message/--failed-step flags + prose in the
+    // shared completion-status preamble (PR #769, 2026-08); this skill was the
+    // closest to its ceiling (landed 89040 / ratio 1.072).
+    maxSkeletonBytes: 89_400,
     minUnionBytes: 70_000,
     mustContain: ['design', 'visual'],
-    maxSizeRatio: 1.07,
+    maxSizeRatio: 1.08,
   },
   'plan-devex-review': {
     skill: 'plan-devex-review',
@@ -232,7 +244,9 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     behavioral: 'prompt',
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble,
     // plus the P1 office-hours closing handoff (AUQ that launches the next skill).
-    maxSkeletonBytes: 98_000,
+    // v1.64.1.0: shared-preamble prose from the two parallel v1.64 waves lands
+    // the skeleton at 98,193 B; +~1 KB headroom.
+    maxSkeletonBytes: 99_000,
     minUnionBytes: 70_000,
     mustContain: ['design doc', 'problem statement'],
     maxSizeRatio: 1.07,
@@ -281,8 +295,13 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    maxSkeletonBytes: 69_000,
-    minUnionBytes: 72_000,
+    // #48 preamble carve on v1.64.1.0: the onboarding chain, full AUQ spec,
+    // and artifacts-sync prose moved to shared preamble/sections/ files,
+    // deliberately shrinking this skeleton/union. Ceiling ~2% over and floor
+    // ~4% under the post-carve regen measurement (2026-08-15:
+    // skeleton 50,820 B, union 72,173 B).
+    maxSkeletonBytes: 52_000,
+    minUnionBytes: 69_000,
     mustContain: ['Typography', 'Color', 'Aesthetic Direction'],
     // Cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB +
     // the cross-session decision-memory nudge) lands this carved skeleton just over
@@ -320,8 +339,13 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    maxSkeletonBytes: 75_000,
-    minUnionBytes: 72_000,
+    // Re-derived for the #48 carve on v1.64.1.0 (2026-08-15 regen:
+    // skeleton 56,708 B, union 71,298 B) — ceiling ~2% over, floor ~4% under.
+    maxSkeletonBytes: 58_000,
+    // Floor lowered 72_000 → 68_000 for the #48 preamble carve (see
+    // design-consultation note above; cso union shrank ~13 KB, 83,808 →
+    // ~70,4xx B — floor sits ~4% under the post-carve union).
+    minUnionBytes: 68_000,
     mustContain: ['OWASP', 'STRIDE', 'daily', 'comprehensive', 'verif'],
     // cso keeps its mode-dispatch + FP-filtering phases always-loaded, so the
     // cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB + the

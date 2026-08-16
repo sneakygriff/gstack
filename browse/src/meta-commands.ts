@@ -421,15 +421,25 @@ export async function handleMetaCommand(
     }
 
     case 'stop': {
-      await shutdown();
+      // Defer shutdown so the response flushes before process.exit() (same
+      // reason as 'restart' below). Otherwise the CLI sees a dropped socket;
+      // and now that connection-loss triggers the crash-retry path, that would
+      // resurrect a fresh daemon only to stop it again. Send the 200, then exit.
+      setTimeout(() => { void shutdown(); }, 100);
       return 'Server stopped';
     }
 
     case 'restart': {
-      // Signal that we want a restart — the CLI will detect exit and restart
+      // Signal that we want a restart — the CLI will detect exit and restart.
       console.log('[browse] Restart requested. Exiting for CLI to restart.');
-      await shutdown();
-      return 'Restarting...';
+      // Defer shutdown one tick so this HTTP response actually flushes before
+      // process.exit(). shutdown() exits inline (server.ts), so the old
+      // `await shutdown(); return 'Restarting...'` never sent a response — the
+      // CLI saw a dropped socket and `browse restart` errored out. The daemon
+      // now exits ~100ms after the CLI gets its 200; the next browse command
+      // lazily cold-starts a fresh one.
+      setTimeout(() => { void shutdown(); }, 100);
+      return 'Restarting... (daemon exiting; next browse command starts a fresh one)';
     }
 
     // ─── Visual ────────────────────────────────────────
@@ -667,40 +677,13 @@ export async function handleMetaCommand(
           lastWasWrite = WRITE_COMMANDS.has(c.name);
         }
       } else {
-        // Fallback: direct dispatch (CLI mode, no server context)
-        const { handleReadCommand } = await import('./read-commands');
-        const { handleWriteCommand } = await import('./write-commands');
-
-        for (const c of commands) {
-          const name = c.name;
-          const cmdArgs = c.args;
-          const label = c.rawName === name ? name : `${c.rawName}→${name}`;
-          try {
-            let result: string;
-            if (WRITE_COMMANDS.has(name)) {
-              if (bm.isWatching()) {
-                result = 'BLOCKED: write commands disabled in watch mode';
-              } else {
-                result = await handleWriteCommand(name, cmdArgs, session, bm);
-              }
-              lastWasWrite = true;
-            } else if (READ_COMMANDS.has(name)) {
-              result = await handleReadCommand(name, cmdArgs, session);
-              if (PAGE_CONTENT_COMMANDS.has(name)) {
-                result = wrapUntrustedContent(result, bm.getCurrentUrl());
-              }
-              lastWasWrite = false;
-            } else if (META_COMMANDS.has(name)) {
-              result = await handleMetaCommand(name, cmdArgs, bm, shutdown, tokenInfo, opts);
-              lastWasWrite = false;
-            } else {
-              throw new Error(`Unknown command: ${c.rawName}`);
-            }
-            results.push(`[${label}] ${result}`);
-          } catch (err: any) {
-            results.push(`[${label}] ERROR: ${err.message}`);
-          }
-        }
+        // No fallback dispatcher. The old direct-dispatch branch here
+        // re-implemented command routing WITHOUT the server pipeline's
+        // security gates (scope, domain, tab ownership, rate limit, hidden
+        // element stripping, scoped-token enveloping, JS-origin assertion).
+        // It was unreachable in production (server.ts always passes
+        // executeCommand) and one boolean away from being live.
+        throw new Error('chain requires the browse server (no executeCommand context)');
       }
 
       // Wait for network to settle after write commands before returning

@@ -121,6 +121,15 @@ export const SKILL_COVERAGE: Record<string, SkillCoverage> = {
     gate: ['test/skill-coverage-floor.test.ts'],
     periodic: ['test/skill-e2e-autoplan-chain.test.ts', 'test/skill-e2e-autoplan-dual-voice.test.ts'],
   },
+  'autobuilder-loop': {
+    gate: ['test/skill-coverage-floor.test.ts', 'test/skill-recipe-invariants.test.ts'],
+    periodic: [],
+  },
+  'plan-deliverables': {
+    gate: ['test/skill-coverage-floor.test.ts', 'test/skill-recipe-invariants.test.ts'],
+    periodic: [],
+    rationale: 'Structural floor is the eval-first minimum; authors per-milestone acceptance criteria + paired tests into the design doc (consumed by /autobuilder-loop). skill-recipe-invariants pins the fork-only recipe fragments (config gates, retry-by-failure-class, fail-closed verdict) neither the floor nor a shared parity-suite covers.',
+  },
   'office-hours': {
     gate: ['test/skill-e2e-office-hours.test.ts', 'test/skill-coverage-floor.test.ts'],
     periodic: ['test/skill-e2e-office-hours-auto-mode.test.ts', 'test/skill-e2e-office-hours-phase4.test.ts'],

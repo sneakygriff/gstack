@@ -10,7 +10,8 @@ Conventions:
 
 ## Skills
 
-- [/autoplan](autoplan/SKILL.md): Auto-review pipeline — reads the full CEO, design, eng, and DX review skills from disk and runs them sequentially with auto-decisions using 6 decision principles.
+- [/autobuilder-loop](autobuilder-loop/SKILL.md): Use when asked to "autobuilder", "build loop", "auto-build", "keep building automatically", "drive the plan to completion", or "run the build loop" on an already-approved plan, spec, or backlog.
+- [/autoplan](autoplan/SKILL.md): Auto-review pipeline — runs the full CEO, design, eng, and DX review skills sequentially with auto-decisions using 6 decision principles, loading each review skill at the start of its own phase.
 - [/benchmark](benchmark/SKILL.md): Performance regression detection using the browse daemon.
 - [/benchmark-models](benchmark-models/SKILL.md): Cross-model benchmark for gstack skills.
 - [/browse](browse/SKILL.md): Fast headless browser for QA testing and site dogfooding.
@@ -26,7 +27,7 @@ Conventions:
 - [/design-review](design-review/SKILL.md): Designer's eye QA: finds visual inconsistency, spacing issues, hierarchy problems, AI slop patterns, and slow interactions — then fixes them.
 - [/design-shotgun](design-shotgun/SKILL.md): Design shotgun: generate multiple AI design variants, open a comparison board, collect structured feedback, and iterate.
 - [/devex-review](devex-review/SKILL.md): Live developer experience audit.
-- [/diagram](diagram/SKILL.md): Turn an English description (or mermaid source) into a diagram triplet: the source, an editable .excalidraw file you can open on excalidraw.com, and rendered SVG + PNG (clean mermaid style; the .excalidraw carries the hand-drawn aesthetic).
+- [/diagram](diagram/SKILL.md): Turn an English description (or mermaid source) into a diagram triplet: the source, an editable .excalidraw file you can open on excalidraw.com, and rendered SVG + PNG.
 - [/document-generate](document-generate/SKILL.md): Generate missing documentation from scratch for a feature, module, or entire project.
 - [/document-release](document-release/SKILL.md): Post-ship documentation update.
 - [/freeze](freeze/SKILL.md): Restrict file edits to a specific directory for the session.
@@ -48,6 +49,7 @@ Conventions:
 - [/open-gstack-browser](open-gstack-browser/SKILL.md): Launch GStack Browser — AI-controlled Chromium with the sidebar extension baked in.
 - [/pair-agent](pair-agent/SKILL.md): Pair a remote AI agent with your browser.
 - [/plan-ceo-review](plan-ceo-review/SKILL.md): CEO/founder-mode plan review.
+- [/plan-deliverables](plan-deliverables/SKILL.md): Turn an approved design/plan into per-milestone acceptance criteria, each measurable and paired with the specific check that validates it (the deliverable).
 - [/plan-design-review](plan-design-review/SKILL.md): Designer's eye plan review — interactive, like CEO and Eng review.
 - [/plan-devex-review](plan-devex-review/SKILL.md): Interactive developer experience plan review.
 - [/plan-eng-review](plan-eng-review/SKILL.md): Eng manager-mode plan review.

@@ -164,15 +164,66 @@ Only commit if there are changes. Stage all bootstrap files (config, test direct
 `db:test:prepare` internally, which loads the schema into the correct lane database.
 Running bare test migrations without INSTANCE hits an orphan DB and corrupts structure.sql.
 
-Run both test suites in parallel:
+Run both test suites in parallel — and, in the same batch, **lint + typecheck** (detected
+below; ship gates on all four, not tests alone — a type error tests never touch must not
+reach the PR):
 
 ```bash
-bin/test-lane 2>&1 | tee /tmp/ship_tests.txt &
-npm run test 2>&1 | tee /tmp/ship_vitest.txt &
+# A script exists only if it is a key under "scripts" — grep '"lint"' also matches a
+# dependency, a nested config key, or a word in the description, and would run a script
+# that isn't there (or skip a detected linter because a lookalike string matched).
+has_script() { [ -f package.json ] || return 1; \
+  if command -v bun >/dev/null 2>&1; then bun -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]]?0:1)' "$1" ; \
+  elif command -v node >/dev/null 2>&1; then node -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]]?0:1)' "$1" ; \
+  else grep -q "\"$1\"[[:space:]]*:" package.json; fi; }
+run_script() { if command -v npm >/dev/null 2>&1; then npm run "$1"; else bun run "$1"; fi; }
+# Repo-local binary first. bunx is the LAST resort and says so out loud: it downloads and
+# executes registry code nobody vetted, in the middle of a ship — the same reason
+# bin/gstack-lint-touched refuses bunx outright.
+run_tool() { _b="$1"; _pkg="$2"; shift 2; \
+  if [ -x "node_modules/.bin/$_b" ]; then "node_modules/.bin/$_b" "$@" ; \
+  else echo "WARN: no repo-local $_b — falling back to 'bunx $_pkg' (registry download + unvetted execution mid-ship)"; bunx "$_pkg" "$@"; fi; }
+
+# Launch only the jobs this project actually has, and drop the others from the join list
+# below too: a job in that list with no status file is read as a failure, never as a skip.
+rm -f /tmp/ship_rc_*.txt
+{ bin/test-lane; echo $? >/tmp/ship_rc_tests.txt; } 2>&1 | tee /tmp/ship_tests.txt &
+{ npm run test; echo $? >/tmp/ship_rc_vitest.txt; } 2>&1 | tee /tmp/ship_vitest.txt &
+# Lint — first match wins: the project's own script, else a detected tool, else skip.
+{ if has_script lint; then run_script lint ; \
+  elif [ -f biome.json ] || [ -f biome.jsonc ]; then run_tool biome @biomejs/biome check . ; \
+  elif { _ecfg=0; for _f in .eslintrc* eslint.config.*; do [ -e "$_f" ] && { _ecfg=1; break; }; done; [ "$_ecfg" -eq 1 ]; }; then run_tool eslint eslint . ; \
+  else echo "LINT: no lint script/config detected — skipped"; fi; echo $? >/tmp/ship_rc_lint.txt; } 2>&1 | tee /tmp/ship_lint.txt &
+# (@biomejs/biome, never bare "biome" — the bare name is an unrelated squatted
+# package that exits 0 on anything, turning the lint gate into a silent false-clean.)
+# Typecheck — project's own script ("typecheck" or "type-check"), else tsc when a tsconfig exists, else skip.
+{ if has_script typecheck; then run_script typecheck ; \
+  elif has_script type-check; then run_script type-check ; \
+  elif [ -f tsconfig.json ]; then run_tool tsc typescript --noEmit ; \
+  else echo "TYPECHECK: no typecheck script/tsconfig — skipped"; fi; echo $? >/tmp/ship_rc_typecheck.txt; } 2>&1 | tee /tmp/ship_typecheck.txt &
 wait
+# Fail-closed join: tee'd output can read clean while the job exited nonzero (or died
+# before printing anything at all), so the gate is decided by exit codes, not by eyeballing.
+GATE=0
+for j in tests vitest lint typecheck; do
+  rc=$(cat "/tmp/ship_rc_$j.txt" 2>/dev/null)
+  case "$rc" in
+    0) echo "PASS $j" ;;
+    "") echo "FAIL $j (no exit status — job died before reporting)"; GATE=1 ;;
+    *) echo "FAIL $j (exit $rc)"; GATE=1 ;;
+  esac
+done
+[ "$GATE" -eq 0 ] && echo "GATE: all four green" || echo "GATE: FAILED"
 ```
 
-After both complete, read the output files and check pass/fail.
+The join prints one PASS/FAIL line per job. Any FAIL — including a job that reported no exit
+status — fails the gate; open that job's output file before anything else. Then read the
+output files for counts and detail.
+
+**If lint or typecheck fails:** fix in-branch findings now (or STOP if they can't be fixed
+cleanly). Never skip lint — a detected linter that errors is a gate failure, not a warning.
+Pre-existing violations untouched by this branch's diff may be TODOed rather than fixed, but
+say so explicitly.
 
 **If any test fails:** Do NOT immediately stop. Apply the Test Failure Ownership Triage:
 
@@ -282,7 +333,7 @@ Use AskUserQuestion:
 
 **After triage:** If any in-branch failures remain unfixed, **STOP**. Do not proceed. If all failures were pre-existing and handled (fixed, TODOed, assigned, or skipped), continue to Step 6.
 
-**If all pass:** Continue silently — just note the counts briefly.
+**If all pass:** Continue silently — just note the counts briefly (tests, lint, typecheck).
 
 ---
 

@@ -60,6 +60,10 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           # terse   = V0 prose style, no glosses, no outcome-framing layer
 #                           #           (for power users who know the terms)
 #                           # Unknown values default to "default" with a warning.
+#                           # RUNTIME switch only: skills still load the same
+#                           # SKILL.md bytes. To strip terse-gated sections from
+#                           # the generated files too, rebuild with
+#                           # `bun run gen:skill-docs --explain-level=terse`.
 #                           # See docs/designs/PLAN_TUNING_V1.md for rationale.
 #
 # ─── Artifacts sync (renamed from gbrain_sync_mode in v1.27.0.0) ─────
@@ -123,6 +127,7 @@ lookup_default() {
     checkpoint_push) echo "false" ;;
     explain_level) echo "default" ;;
     codex_reviews) echo "enabled" ;;
+    grok_reviews) echo "enabled" ;;
     gstack_contributor) echo "false" ;;
     skip_eng_review) echo "false" ;;
     workspace_root) echo "$HOME/conductor/workspaces" ;;
@@ -257,6 +262,16 @@ resolve_user_slug() {
   printf '%s' "$_slug"
 }
 
+read_config_value() {
+  local key="$1"
+  if [ ! -f "$CONFIG_FILE" ]; then
+    return 0
+  fi
+  grep -E "^${key}:" "$CONFIG_FILE" 2>/dev/null \
+    | tail -1 \
+    | sed -E "s/^${key}:[[:space:]]*//; s/[[:space:]]+$//"
+}
+
 case "${1:-}" in
   get)
     KEY="${2:?Usage: gstack-config get <key>}"
@@ -264,12 +279,11 @@ case "${1:-}" in
     # endpoint-namespaced keys introduced by the brain-aware planning layer).
     # Endpoint ids are sha8/sha16 hex for remote MCP URLs, or the literal
     # "local" for stdio/PGLite engines (see endpoint_hash).
-    if ! printf '%s' "$KEY" | grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
+    if ! printf '%s' "$KEY" | LC_ALL=C grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
       echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
       exit 1
     fi
-    # Use literal match for keys containing @ (endpoint ids), regex otherwise
-    VALUE=$(grep -F "${KEY}:" "$CONFIG_FILE" 2>/dev/null | grep -E "^${KEY%@*}(@[a-zA-Z0-9]+)?:" | grep -F "${KEY}:" | tail -1 | awk '{print $2}' | tr -d '[:space:]' || true)
+    VALUE=$(read_config_value "$KEY" || true)
     if [ -z "$VALUE" ]; then
       VALUE=$(lookup_default "$KEY")
     fi
@@ -280,7 +294,7 @@ case "${1:-}" in
     VALUE="${3:?Usage: gstack-config set <key> <value>}"
     # Validate key (alphanumeric + underscore + optional @<endpoint-id> suffix).
     # Accepts hex hashes and the literal "local" from endpoint_hash.
-    if ! printf '%s' "$KEY" | grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
+    if ! printf '%s' "$KEY" | LC_ALL=C grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
       echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
       exit 1
     fi
@@ -314,31 +328,61 @@ case "${1:-}" in
       echo "Warning: plan_tune_hooks '$VALUE' not recognized. Valid values: prompt, yes, no. Using prompt." >&2
       VALUE="prompt"
     fi
-    # codex_reviews controls PAID Codex calls. Unlike the warn-and-default keys above,
-    # an invalid value is REJECTED and the existing setting is left unchanged — a typo
-    # must never silently flip the switch and turn paid Codex calls on or off.
-    if [ "$KEY" = "codex_reviews" ] && [ "$VALUE" != "enabled" ] && [ "$VALUE" != "disabled" ]; then
-      echo "Error: codex_reviews '$VALUE' not recognized. Valid values: enabled, disabled. Existing value left unchanged." >&2
-      exit 1
+    # codex_reviews / grok_reviews are the kill-switches for PAID Codex/Grok forum-review
+    # calls. Recipes gate on the explicit negative (see autobuilder-loop SKILL.md.tmpl:
+    # "grok_reviews=disabled is the only run-durable disable"), so a common alias like
+    # off/false/0 must land as the literal "disabled" — not pass through as an
+    # unrecognized value that silently means "enabled" to the caller. Normalize aliases
+    # first, then apply the same reject-on-set treatment as before: unlike the
+    # warn-and-default keys above, anything outside enabled|disabled is REJECTED and the
+    # existing setting is left unchanged — a typo must never silently flip paid calls
+    # on or off.
+    if [ "$KEY" = "codex_reviews" ] || [ "$KEY" = "grok_reviews" ]; then
+      case "$VALUE" in
+        off|false|0)
+          echo "$KEY: normalizing '$VALUE' to 'disabled'."
+          VALUE="disabled"
+          ;;
+        on|true|1)
+          echo "$KEY: normalizing '$VALUE' to 'enabled'."
+          VALUE="enabled"
+          ;;
+      esac
+      if [ "$VALUE" != "enabled" ] && [ "$VALUE" != "disabled" ]; then
+        echo "Error: $KEY '$VALUE' not recognized. Valid values: enabled, disabled. Existing value left unchanged." >&2
+        exit 1
+      fi
     fi
     mkdir -p "$STATE_DIR"
     # Write annotated header on first creation
     if [ ! -f "$CONFIG_FILE" ]; then
       printf '%s' "$CONFIG_HEADER" > "$CONFIG_FILE"
     fi
-    # Escape sed special chars in value and drop embedded newlines
-    ESC_VALUE="$(printf '%s' "$VALUE" | head -1 | sed 's/[&/\]/\\&/g')"
+    # Drop embedded newlines, then escape sed replacement metacharacters.
+    SAFE_VALUE="$(printf '%s' "$VALUE" | head -1)"
+    ESC_VALUE="$(printf '%s' "$SAFE_VALUE" | sed 's/[&/\]/\\&/g')"
     if grep -qE "^${KEY}:" "$CONFIG_FILE" 2>/dev/null; then
       # Portable in-place edit (BSD sed uses -i '', GNU sed uses -i without arg)
       _tmpfile="$(mktemp "${CONFIG_FILE}.XXXXXX")"
       sed "/^${KEY}:/s/.*/${KEY}: ${ESC_VALUE}/" "$CONFIG_FILE" > "$_tmpfile" && mv "$_tmpfile" "$CONFIG_FILE"
     else
-      echo "${KEY}: ${VALUE}" >> "$CONFIG_FILE"
+      echo "${KEY}: ${SAFE_VALUE}" >> "$CONFIG_FILE"
     fi
     # Auto-relink skills when prefix setting changes (skip during setup to avoid recursive call)
     if [ "$KEY" = "skill_prefix" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
       GSTACK_RELINK="$(dirname "$0")/gstack-relink"
       [ -x "$GSTACK_RELINK" ] && "$GSTACK_RELINK" || true
+    fi
+    # explain_level is a runtime behavior switch: the preamble echoes
+    # EXPLAIN_LEVEL and the model skips sections whose headings carry the
+    # terse gate. It does NOT shrink the generated SKILL.md files — that
+    # takes a rebuild with the matching --explain-level flag. Say so, so
+    # nobody sets the key expecting a token-cost reduction (#48).
+    if [ "$KEY" = "explain_level" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
+      echo "explain_level: $VALUE — runtime behavior switch, active on the next skill run."
+      echo "Generated SKILL.md files are unchanged (token cost is the same). To also strip"
+      echo "terse-gated sections from the files, rebuild:"
+      echo "  cd ~/.claude/skills/gstack && bun run gen:skill-docs --explain-level=$VALUE"
     fi
     ;;
   list)
@@ -351,7 +395,7 @@ case "${1:-}" in
                skill_prefix checkpoint_mode checkpoint_push explain_level \
                codex_reviews gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted plan_tune_hooks; do
-      VALUE=$(grep -E "^${KEY}:" "$CONFIG_FILE" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '[:space:]' || true)
+      VALUE=$(read_config_value "$KEY" || true)
       SOURCE="default"
       if [ -n "$VALUE" ]; then
         SOURCE="set"
@@ -414,9 +458,11 @@ case "${1:-}" in
     fi
 
     case "$STATUS" in
-      ok|timeout)
-        # "timeout" = slow-but-healthy engine (#1964) — same treatment as
-        # "ok", matching gstack-gbrain-detect --is-ok and gen-skill-docs.
+      ok|timeout|thin-client)
+        # "timeout" = slow-but-healthy engine (#1964); "thin-client" =
+        # remote-HTTP MCP brain, no local engine by design (#2051) — same
+        # treatment as "ok", matching gstack-gbrain-detect --is-ok and
+        # gen-skill-docs.
         echo "Detected gbrain v$VERSION (local-status: $STATUS)."
         # Render brain-aware blocks INTO the global install so EVERY project's
         # Claude sessions get them (other projects read SKILL.md + sections from

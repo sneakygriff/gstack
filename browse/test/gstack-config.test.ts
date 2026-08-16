@@ -18,6 +18,16 @@ function run(args: string[] = [], extraEnv: Record<string, string> = {}) {
   const result = Bun.spawnSync(['bash', SCRIPT, ...args], {
     env: {
       ...process.env,
+      // The script resolves STATE_DIR as GSTACK_STATE_ROOT > GSTACK_HOME >
+      // GSTACK_STATE_DIR > $HOME/.gstack. Other test files mutate
+      // process.env.GSTACK_HOME / GSTACK_STATE_ROOT globally (e.g.
+      // brain-cache-roundtrip, declared-annotation), which the spread above
+      // would leak into this spawn and outrank our isolation dir when files
+      // run in the same batch. Mask both with '' (the script's :- expansion
+      // treats empty as unset) so GSTACK_STATE_DIR stays operative — and
+      // overridable per-test via extraEnv.
+      GSTACK_STATE_ROOT: '',
+      GSTACK_HOME: '',
       GSTACK_STATE_DIR: stateDir,
       ...extraEnv,
     },
@@ -196,6 +206,38 @@ describe('gstack-config', () => {
     expect(run(['get', 'codex_reviews']).stdout).toBe('disabled');
   });
 
+  // ─── kill-switch alias normalization (codex_reviews / grok_reviews) ──
+  // Recipes gate on the explicit negative (autobuilder-loop SKILL.md.tmpl), so
+  // off/false/0 must persist as the literal "disabled", not pass through
+  // unrecognized (which would silently read back as enabled).
+  test('set codex_reviews off normalizes to disabled', () => {
+    const { exitCode, stdout } = run(['set', 'codex_reviews', 'off']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('disabled');
+    expect(run(['get', 'codex_reviews']).stdout).toBe('disabled');
+  });
+
+  test('set grok_reviews true normalizes to enabled', () => {
+    const { exitCode, stdout } = run(['set', 'grok_reviews', 'true']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('enabled');
+    expect(run(['get', 'grok_reviews']).stdout).toBe('enabled');
+  });
+
+  test('set codex_reviews bogus is rejected and existing value is unchanged', () => {
+    run(['set', 'codex_reviews', 'disabled']);
+    const { exitCode, stderr } = run(['set', 'codex_reviews', 'bogus']);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain('not recognized');
+    expect(run(['get', 'codex_reviews']).stdout).toBe('disabled');
+  });
+
+  test('get grok_reviews unset returns enabled', () => {
+    const { exitCode, stdout } = run(['get', 'grok_reviews']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe('enabled');
+  });
+
   test('header written only once, not duplicated on second set', () => {
     run(['set', 'foo', 'bar']);
     run(['set', 'baz', 'qux']);
@@ -218,6 +260,56 @@ describe('gstack-config', () => {
     const content = readFileSync(join(stateDir, 'config.yaml'), 'utf-8');
     expect(content).toContain('existing: value');
     expect(content).not.toContain('# gstack configuration');
+  });
+
+  // ─── explain_level honesty output (#48) ────────────────────
+  // `set explain_level` prints a note that the key is a RUNTIME switch only
+  // (generated SKILL.md bytes are unchanged) and names the rebuild command
+  // with the matching --explain-level flag. Pin the output so nobody sets
+  // the key expecting a token-cost reduction and gets silence.
+  describe('explain_level honesty output', () => {
+    // GSTACK_SETUP_RUNNING masked with '' (the script's :- expansion treats
+    // empty as unset) so an ambient value in the batch environment can never
+    // suppress the note in the positive tests.
+    test('set explain_level terse prints runtime-switch note with matching rebuild flag', () => {
+      const { exitCode, stdout } = run(['set', 'explain_level', 'terse'], {
+        GSTACK_SETUP_RUNNING: '',
+      });
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain('runtime behavior switch');
+      expect(stdout).toContain('gen:skill-docs --explain-level=terse');
+      // Value actually persisted alongside the note
+      expect(run(['get', 'explain_level']).stdout).toBe('terse');
+    });
+
+    test('set explain_level default prints the note with --explain-level=default', () => {
+      const { exitCode, stdout } = run(['set', 'explain_level', 'default'], {
+        GSTACK_SETUP_RUNNING: '',
+      });
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain('runtime behavior switch');
+      expect(stdout).toContain('gen:skill-docs --explain-level=default');
+    });
+
+    test('GSTACK_SETUP_RUNNING=1 suppresses the honesty output (setup stays quiet)', () => {
+      const { exitCode, stdout, stderr } = run(['set', 'explain_level', 'terse'], {
+        GSTACK_SETUP_RUNNING: '1',
+      });
+      expect(exitCode).toBe(0);
+      expect(stdout).toBe('');
+      expect(stderr).toBe('');
+      // Suppressing the note must not suppress the write itself
+      expect(run(['get', 'explain_level']).stdout).toBe('terse');
+    });
+
+    test('set on another key (telemetry off) prints no honesty output', () => {
+      const { exitCode, stdout } = run(['set', 'telemetry', 'off'], {
+        GSTACK_SETUP_RUNNING: '',
+      });
+      expect(exitCode).toBe(0);
+      expect(stdout).toBe('');
+      expect(stdout).not.toContain('runtime behavior switch');
+    });
   });
 
   // ─── routing_declined ──────────────────────────────────────

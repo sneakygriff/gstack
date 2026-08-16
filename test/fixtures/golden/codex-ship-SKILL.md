@@ -70,6 +70,8 @@ if [ "$_EXPLAIN_LEVEL" != "default" ] && [ "$_EXPLAIN_LEVEL" != "terse" ]; then 
 echo "EXPLAIN_LEVEL: $_EXPLAIN_LEVEL"
 _QUESTION_TUNING=$($GSTACK_BIN/gstack-config get question_tuning 2>/dev/null || echo "false")
 echo "QUESTION_TUNING: $_QUESTION_TUNING"
+_UPDATE_CHECK=$($GSTACK_BIN/gstack-config get update_check 2>/dev/null || echo "true")
+echo "UPDATE_CHECK: $_UPDATE_CHECK"
 mkdir -p ~/.gstack/analytics
 if [ "$_TEL" != "off" ]; then
 echo '{"skill":"ship","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","repo":"'$(_repo=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null | tr -cd 'a-zA-Z0-9._-'); echo "${_repo:-unknown}")'"}'  >> ~/.gstack/analytics/skill-usage.jsonl 2>/dev/null || true
@@ -96,7 +98,7 @@ else
 fi
 $GSTACK_BIN/gstack-timeline-log '{"skill":"ship","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 _HAS_ROUTING="no"
-if [ -f CLAUDE.md ] && grep -q "## Skill routing" CLAUDE.md 2>/dev/null; then
+if [ -f AGENTS.md ] && grep -q "## Skill routing" AGENTS.md 2>/dev/null; then
   _HAS_ROUTING="yes"
 fi
 _ROUTING_DECLINED=$($GSTACK_BIN/gstack-config get routing_declined 2>/dev/null || echo "false")
@@ -136,11 +138,13 @@ In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`co
 
 ## Skill Invocation During Plan Mode
 
-If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; the first AskUserQuestion is the workflow entering plan mode, not a violation of it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
+If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; any AskUserQuestion the skill fires is the workflow operating within plan mode, not a violation of it — and a skill whose instructions resolve a question themselves (e.g. a plan-mode auto-select) may legitimately not ask it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
 If `PROACTIVE` is `"false"`, do not auto-invoke or proactively suggest skills. If a skill seems useful, ask: "I think /skillname might help here — want me to run it?"
 
 If `SKILL_PREFIX` is `"true"`, suggest/invoke `/gstack-*` names. Disk paths stay `$GSTACK_ROOT/[skill-name]/SKILL.md`.
+
+If `UPDATE_CHECK` is `"false"`, skip the next two lines — the update-check binary emits nothing in that mode, so there is no `UPGRADE_AVAILABLE` / `JUST_UPGRADED` output to act on.
 
 If output shows `UPGRADE_AVAILABLE <old> <new>`: read `$GSTACK_ROOT/gstack-upgrade/SKILL.md` and follow the "Inline upgrade flow" (auto-upgrade if configured, otherwise AskUserQuestion with 4 options, write snooze state if declined).
 
@@ -151,25 +155,6 @@ Feature discovery, max one prompt per session:
 - Missing `$GSTACK_ROOT/.feature-prompted-model-overlay`: inform "Model overlays are active. MODEL_OVERLAY shows the patch." Always touch marker.
 
 After upgrade prompts, continue workflow.
-
-If `WRITING_STYLE_PENDING` is `yes`: ask once about writing style:
-
-> v1 prompts are simpler: first-use jargon glosses, outcome-framed questions, shorter prose. Keep default or restore terse?
-
-Options:
-- A) Keep the new default (recommended — good writing helps everyone)
-- B) Restore V0 prose — set `explain_level: terse`
-
-If A: leave `explain_level` unset (defaults to `default`).
-If B: run `$GSTACK_BIN/gstack-config set explain_level terse`.
-
-Always run (regardless of choice):
-```bash
-rm -f ~/.gstack/.writing-style-prompt-pending
-touch ~/.gstack/.writing-style-prompted
-```
-
-Skip if `WRITING_STYLE_PENDING` is `no`.
 
 If `LAKE_INTRO` is `no`: say "gstack follows the **Boil the Ocean** principle — do the complete thing when AI makes marginal cost near-zero. Read more: https://garryslist.org/posts/boil-the-ocean" Offer to open:
 
@@ -230,7 +215,10 @@ Skip if `PROACTIVE_PROMPTED` is `yes`.
 
 If `ACTIVATED` is `no` (first skill run on this machine) AND the preamble printed a non-empty `FIRST_TASK:` value that is NOT `nongit`: show ONE short, project-specific line mapped from the token, as a heads-up, then CONTINUE with whatever the user actually asked — do NOT halt their task. Map the token: `greenfield` → "Fresh repo — shape it first with `/spec` or `/office-hours`." `code_node`/`code_python`/`code_rust`/`code_go`/`code_ruby`/`code_ios` → "There's code here — `/qa` to see it work, or `/investigate` if something's off." `branch_ahead` → "Unshipped work on this branch — `/review` then `/ship`." `dirty_default` → "Uncommitted changes — `/review` before committing." `clean_default` → "Pick one: `/spec`, `/investigate`, or `/qa`." Then substitute the token you saw for TASK_TOKEN and run (best-effort), and mark activated:
 ```bash
-$GSTACK_BIN/gstack-telemetry-log --event-type first_task_scaffold_shown --skill "TASK_TOKEN" --outcome shown 2>/dev/null || true
+_TEL=$($GSTACK_BIN/gstack-config get telemetry 2>/dev/null || echo "off")
+if [ "$_TEL" != "off" ]; then
+  $GSTACK_BIN/gstack-telemetry-log --event-type first_task_scaffold_shown --skill "TASK_TOKEN" --outcome shown 2>/dev/null || true
+fi
 touch ~/.gstack/.activated 2>/dev/null || true
 ```
 
@@ -245,17 +233,17 @@ Then run `touch ~/.gstack/.first-loop-tip-shown 2>/dev/null || true`.
 Skip this section if `ACTIVATED` and `FIRST_LOOP_SHOWN` are both `yes`.
 
 If `HAS_ROUTING` is `no` AND `ROUTING_DECLINED` is `false` AND `PROACTIVE_PROMPTED` is `yes`:
-Check if a CLAUDE.md file exists in the project root. If it does not exist, create it.
+Check if a AGENTS.md file exists in the project root. If it does not exist, create it.
 
 Use AskUserQuestion:
 
-> gstack works best when your project's CLAUDE.md includes skill routing rules.
+> gstack works best when your project's AGENTS.md includes skill routing rules.
 
 Options:
-- A) Add routing rules to CLAUDE.md (recommended)
+- A) Add routing rules to AGENTS.md (recommended)
 - B) No thanks, I'll invoke skills manually
 
-If A: Append this section to the end of CLAUDE.md:
+If A: Append this section to the end of AGENTS.md:
 
 ```markdown
 
@@ -279,7 +267,7 @@ Key routing rules:
 - Author a backlog-ready spec/issue → invoke /spec
 ```
 
-Then commit the change: `git add CLAUDE.md && git commit -m "chore: add gstack skill routing rules to CLAUDE.md"`
+Then commit the change: `git add AGENTS.md && git commit -m "chore: add gstack skill routing rules to AGENTS.md"`
 
 If B: run `$GSTACK_BIN/gstack-config set routing_declined true` and say they can re-enable with `gstack-config set routing_declined false`.
 
@@ -298,7 +286,7 @@ If A:
 1. Run `git rm -r .agents/skills/gstack/`
 2. Run `echo '.agents/skills/gstack/' >> .gitignore`
 3. Run `$GSTACK_BIN/gstack-team-init required` (or `optional`)
-4. Run `git add .claude/ .gitignore CLAUDE.md && git commit -m "chore: migrate gstack from vendored to team mode"`
+4. Run `git add .claude/ .gitignore AGENTS.md && git commit -m "chore: migrate gstack from vendored to team mode"`
 5. Tell the user: "Done. Each developer now runs: `cd $GSTACK_ROOT && ./setup --team`"
 
 If B: say "OK, you're on your own to keep the vendored copy up to date."
@@ -475,7 +463,7 @@ if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
     if [ -n "$_GBRAIN_PIN_PATH" ]; then
       echo "GBrain configured. Prefer \`gbrain search\`/\`gbrain query\` over Grep for"
       echo "semantic questions; use \`gbrain code-def\`/\`code-refs\`/\`code-callers\` for"
-      echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in CLAUDE.md."
+      echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in AGENTS.md."
       echo "Run /sync-gbrain to refresh."
     else
       echo "GBrain configured but this worktree isn't pinned yet. Run \`/sync-gbrain --full\`"
@@ -501,7 +489,11 @@ if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
 fi
 
 if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
-  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
+  # Threat: this file lives in the git-SYNCED tree; a crafted multi-line or
+  # control-char value could otherwise forge extra ARTIFACTS_SYNC lines in
+  # this agent-consumed output. First line only, strip control/whitespace,
+  # cap length before it's echoed below.
+  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:][:cntrl:]' | cut -c1-120)
   if [ -n "$_BRAIN_NEW_URL" ]; then
     echo "ARTIFACTS_SYNC: artifacts repo detected: $_BRAIN_NEW_URL"
     echo "ARTIFACTS_SYNC: run 'gstack-brain-restore' to pull your cross-machine artifacts (or 'gstack-config set artifacts_sync_mode off' to dismiss forever)"
@@ -514,6 +506,7 @@ if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   _BRAIN_DO_PULL=1
   if [ -f "$_BRAIN_LAST_PULL_FILE" ]; then
     _BRAIN_LAST=$(cat "$_BRAIN_LAST_PULL_FILE" 2>/dev/null || echo 0)
+    case "$_BRAIN_LAST" in ''|*[!0-9]*) _BRAIN_LAST=0 ;; esac
     _BRAIN_AGE=$(( _BRAIN_NOW - _BRAIN_LAST ))
     [ "$_BRAIN_AGE" -lt 86400 ] && _BRAIN_DO_PULL=0
   fi
@@ -527,13 +520,28 @@ fi
 if [ "$_GBRAIN_MCP_MODE" = "remote-http" ]; then
   # Remote-MCP mode: local artifacts sync is a no-op (brain admin's server
   # pulls from GitHub/GitLab). Show the user this is by design, not broken.
-  _GBRAIN_HOST=$(jq -r '.mcpServers.gbrain.url // empty' "$HOME/.claude.json" 2>/dev/null | sed -E 's|^https?://([^/:]+).*|\1|')
+  # Sanitize the host to one line of hostname-safe chars: the url value comes
+  # from ~/.claude.json (commonly written by third-party install snippets) and
+  # is echoed into status output the agent is told to trust — a crafted value
+  # could otherwise inject fake ARTIFACTS_SYNC lines.
+  _GBRAIN_HOST=$(jq -r '.mcpServers.gbrain.url // empty' "$HOME/.claude.json" 2>/dev/null | sed -E 's|^https?://([^/:]+).*|\1|' | head -1 | tr -cd 'A-Za-z0-9._-')
   echo "ARTIFACTS_SYNC: remote-mode (managed by brain server ${_GBRAIN_HOST:-remote})"
 elif [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   _BRAIN_QUEUE_DEPTH=0
   [ -f "$_GSTACK_HOME/.brain-queue.jsonl" ] && _BRAIN_QUEUE_DEPTH=$(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl" | tr -d ' ')
+  # Threat: wc -l should already be numeric, but the file lives in the
+  # git-SYNCED tree; enforce numeric before it's interpolated into this
+  # agent-consumed status line.
+  case "$_BRAIN_QUEUE_DEPTH" in ''|*[!0-9]*) _BRAIN_QUEUE_DEPTH=0 ;; esac
   _BRAIN_LAST_PUSH="never"
-  [ -f "$_GSTACK_HOME/.brain-last-push" ] && _BRAIN_LAST_PUSH=$(cat "$_GSTACK_HOME/.brain-last-push" 2>/dev/null || echo never)
+  if [ -f "$_GSTACK_HOME/.brain-last-push" ]; then
+    # Threat: this stamp file lives in the git-SYNCED tree; a crafted
+    # multi-line or control-char value could forge extra ARTIFACTS_SYNC lines
+    # in this agent-consumed output. First line only, timestamp-safe charset,
+    # cap length; empty/invalid falls back to "never".
+    _BRAIN_LAST_PUSH_RAW=$(head -1 "$_GSTACK_HOME/.brain-last-push" 2>/dev/null | tr -cd 'A-Za-z0-9TZ:+.-' | cut -c1-40)
+    [ -n "$_BRAIN_LAST_PUSH_RAW" ] && _BRAIN_LAST_PUSH="$_BRAIN_LAST_PUSH_RAW"
+  fi
   echo "ARTIFACTS_SYNC: mode=$_BRAIN_SYNC_MODE | last_push=$_BRAIN_LAST_PUSH | queue=$_BRAIN_QUEUE_DEPTH"
 else
   echo "ARTIFACTS_SYNC: off"
@@ -650,13 +658,13 @@ Applies to AskUserQuestion, user replies, and findings. AskUserQuestion Format i
 Curated jargon list lives at `$GSTACK_ROOT/scripts/jargon-list.json` (80+ terms). On the first jargon term you encounter this session, Read that file once; treat the `terms` array as the canonical list. The list is repo-owned and may grow between releases.
 
 
-## Completeness Principle — Boil the Ocean
+## Completeness Principle — Boil the Ocean (skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 AI makes completeness cheap, so the complete thing is the goal. Recommend full coverage (tests, edge cases, error paths) — boil the ocean one lake at a time. The only thing out of scope is genuinely unrelated work (rewrites, multi-quarter migrations); flag that as separate scope, never as an excuse for a shortcut.
 
 When options differ in coverage, include `Completeness: X/10` (10 = all edge cases, 7 = happy path, 3 = shortcut). When options differ in kind, write: `Note: options differ in kind, not coverage — no completeness score.` Do not fabricate scores.
 
-## Confusion Protocol
+## Confusion Protocol (skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 For high-stakes ambiguity (architecture, data model, destructive scope, missing context), STOP. Name it in one sentence, present 2-3 options with tradeoffs, and ask. Do not use for routine coding or obvious changes.
 
@@ -685,7 +693,7 @@ Rules: stage only intentional files, NEVER `git add -A`, do not commit broken te
 
 If `CHECKPOINT_MODE` is `"explicit"`: ignore this section unless a skill or user asks to commit.
 
-## Context Health (soft directive)
+## Context Health (soft directive; skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 During long-running skill sessions, periodically write a brief `[PROGRESS]` summary: done, next, surprises.
 
@@ -693,7 +701,7 @@ If you are looping on the same diagnostic, same file, or failed fix variants, ST
 
 ## Question Tuning (skip entirely if `QUESTION_TUNING: false`)
 
-Before each AskUserQuestion, choose `question_id` from `scripts/question-registry.ts` or `{skill}-{slug}`, then run `$GSTACK_BIN/gstack-question-preference --check "<id>"`. `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
+Before each AskUserQuestion, choose `question_id` from `scripts/question-registry.ts` or `{skill}-{slug}`, then run `printf '%s' "<question summary>" | $GSTACK_BIN/gstack-question-preference --check "<id>" --summary-stdin` (piped summary feeds the one-way keyword net, #2024). `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
 
 **Embed the question_id as a marker in the question text** so hooks can identify it deterministically (plan-tune cathedral T14 / D18 progressive markers). Append `<gstack-qid:{question_id}>` somewhere in the rendered question (the leading line or trailing line is fine; the marker doesn't render visibly to the user when wrapped in HTML-style angle brackets, but the hook strips it). Without the marker the PreToolUse enforcement hook treats the AUQ as observed-only and never auto-decides — so always include it when the question matches a registered `question_id`.
 
@@ -776,11 +784,15 @@ fi
 if [ "$_TEL" != "off" ] && [ -x $GSTACK_ROOT/bin/gstack-telemetry-log ]; then
   $GSTACK_ROOT/bin/gstack-telemetry-log \
     --skill "SKILL_NAME" --duration "$_TEL_DUR" --outcome "OUTCOME" \
-    --used-browse "USED_BROWSE" --session-id "$_SESSION_ID" 2>/dev/null &
+    --used-browse "USED_BROWSE" --session-id "$_SESSION_ID" \
+    --error-message "ERROR_MESSAGE" --failed-step "FAILED_STEP" 2>/dev/null &
 fi
 ```
 
 Replace `SKILL_NAME`, `OUTCOME`, and `USED_BROWSE` before running.
+Replace `ERROR_MESSAGE` with a short description of the error (if outcome is error,
+otherwise use empty string ""), and `FAILED_STEP` with the step name or number where
+the failure occurred (if outcome is error, otherwise use empty string "").
 
 ## Plan Status Footer
 
@@ -1117,9 +1129,9 @@ Write TESTING.md with:
 - Test layers: Unit tests (what, where, when), Integration tests, Smoke tests, E2E tests
 - Conventions: file naming, assertion style, setup/teardown patterns
 
-### B7. Update CLAUDE.md
+### B7. Update AGENTS.md
 
-First check: If CLAUDE.md already has a `## Testing` section → skip. Don't duplicate.
+First check: If AGENTS.md already has a `## Testing` section → skip. Don't duplicate.
 
 Append a `## Testing` section:
 - Run command and test directory
@@ -1138,7 +1150,7 @@ Append a `## Testing` section:
 git status --porcelain
 ```
 
-Only commit if there are changes. Stage all bootstrap files (config, test directory, TESTING.md, CLAUDE.md, .github/workflows/test.yml if created):
+Only commit if there are changes. Stage all bootstrap files (config, test directory, TESTING.md, AGENTS.md, .github/workflows/test.yml if created):
 `git commit -m "chore: bootstrap test framework ({framework name})"`
 
 ---
@@ -1151,15 +1163,66 @@ Only commit if there are changes. Stage all bootstrap files (config, test direct
 `db:test:prepare` internally, which loads the schema into the correct lane database.
 Running bare test migrations without INSTANCE hits an orphan DB and corrupts structure.sql.
 
-Run both test suites in parallel:
+Run both test suites in parallel — and, in the same batch, **lint + typecheck** (detected
+below; ship gates on all four, not tests alone — a type error tests never touch must not
+reach the PR):
 
 ```bash
-bin/test-lane 2>&1 | tee /tmp/ship_tests.txt &
-npm run test 2>&1 | tee /tmp/ship_vitest.txt &
+# A script exists only if it is a key under "scripts" — grep '"lint"' also matches a
+# dependency, a nested config key, or a word in the description, and would run a script
+# that isn't there (or skip a detected linter because a lookalike string matched).
+has_script() { [ -f package.json ] || return 1; \
+  if command -v bun >/dev/null 2>&1; then bun -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]]?0:1)' "$1" ; \
+  elif command -v node >/dev/null 2>&1; then node -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]]?0:1)' "$1" ; \
+  else grep -q "\"$1\"[[:space:]]*:" package.json; fi; }
+run_script() { if command -v npm >/dev/null 2>&1; then npm run "$1"; else bun run "$1"; fi; }
+# Repo-local binary first. bunx is the LAST resort and says so out loud: it downloads and
+# executes registry code nobody vetted, in the middle of a ship — the same reason
+# bin/gstack-lint-touched refuses bunx outright.
+run_tool() { _b="$1"; _pkg="$2"; shift 2; \
+  if [ -x "node_modules/.bin/$_b" ]; then "node_modules/.bin/$_b" "$@" ; \
+  else echo "WARN: no repo-local $_b — falling back to 'bunx $_pkg' (registry download + unvetted execution mid-ship)"; bunx "$_pkg" "$@"; fi; }
+
+# Launch only the jobs this project actually has, and drop the others from the join list
+# below too: a job in that list with no status file is read as a failure, never as a skip.
+rm -f /tmp/ship_rc_*.txt
+{ bin/test-lane; echo $? >/tmp/ship_rc_tests.txt; } 2>&1 | tee /tmp/ship_tests.txt &
+{ npm run test; echo $? >/tmp/ship_rc_vitest.txt; } 2>&1 | tee /tmp/ship_vitest.txt &
+# Lint — first match wins: the project's own script, else a detected tool, else skip.
+{ if has_script lint; then run_script lint ; \
+  elif [ -f biome.json ] || [ -f biome.jsonc ]; then run_tool biome @biomejs/biome check . ; \
+  elif { _ecfg=0; for _f in .eslintrc* eslint.config.*; do [ -e "$_f" ] && { _ecfg=1; break; }; done; [ "$_ecfg" -eq 1 ]; }; then run_tool eslint eslint . ; \
+  else echo "LINT: no lint script/config detected — skipped"; fi; echo $? >/tmp/ship_rc_lint.txt; } 2>&1 | tee /tmp/ship_lint.txt &
+# (@biomejs/biome, never bare "biome" — the bare name is an unrelated squatted
+# package that exits 0 on anything, turning the lint gate into a silent false-clean.)
+# Typecheck — project's own script ("typecheck" or "type-check"), else tsc when a tsconfig exists, else skip.
+{ if has_script typecheck; then run_script typecheck ; \
+  elif has_script type-check; then run_script type-check ; \
+  elif [ -f tsconfig.json ]; then run_tool tsc typescript --noEmit ; \
+  else echo "TYPECHECK: no typecheck script/tsconfig — skipped"; fi; echo $? >/tmp/ship_rc_typecheck.txt; } 2>&1 | tee /tmp/ship_typecheck.txt &
 wait
+# Fail-closed join: tee'd output can read clean while the job exited nonzero (or died
+# before printing anything at all), so the gate is decided by exit codes, not by eyeballing.
+GATE=0
+for j in tests vitest lint typecheck; do
+  rc=$(cat "/tmp/ship_rc_$j.txt" 2>/dev/null)
+  case "$rc" in
+    0) echo "PASS $j" ;;
+    "") echo "FAIL $j (no exit status — job died before reporting)"; GATE=1 ;;
+    *) echo "FAIL $j (exit $rc)"; GATE=1 ;;
+  esac
+done
+[ "$GATE" -eq 0 ] && echo "GATE: all four green" || echo "GATE: FAILED"
 ```
 
-After both complete, read the output files and check pass/fail.
+The join prints one PASS/FAIL line per job. Any FAIL — including a job that reported no exit
+status — fails the gate; open that job's output file before anything else. Then read the
+output files for counts and detail.
+
+**If lint or typecheck fails:** fix in-branch findings now (or STOP if they can't be fixed
+cleanly). Never skip lint — a detected linter that errors is a gate failure, not a warning.
+Pre-existing violations untouched by this branch's diff may be TODOed rather than fixed, but
+say so explicitly.
 
 **If any test fails:** Do NOT immediately stop. Apply the Test Failure Ownership Triage:
 
@@ -1269,7 +1332,7 @@ Use AskUserQuestion:
 
 **After triage:** If any in-branch failures remain unfixed, **STOP**. Do not proceed. If all failures were pre-existing and handled (fixed, TODOed, assigned, or skipped), continue to Step 6.
 
-**If all pass:** Continue silently — just note the counts briefly.
+**If all pass:** Continue silently — just note the counts briefly (tests, lint, typecheck).
 
 ---
 
@@ -1283,7 +1346,7 @@ Evals are mandatory when prompt-related files change. Skip this step entirely if
 git diff origin/<base> --name-only
 ```
 
-Match against these patterns (from CLAUDE.md):
+Match against these patterns (from AGENTS.md):
 - `app/services/*_prompt_builder.rb`
 - `app/services/*_generation_service.rb`, `*_writer_service.rb`, `*_designer_service.rb`
 - `app/services/*_evaluator.rb`, `*_scorer.rb`, `*_classifier_service.rb`, `*_analyzer.rb`
@@ -1365,8 +1428,8 @@ poller is reaped.
 
 Before analyzing coverage, detect the project's test framework:
 
-1. **Read CLAUDE.md** — look for a `## Testing` section with test command and framework name. If found, use that as the authoritative source.
-2. **If CLAUDE.md has no testing section, auto-detect:**
+1. **Read AGENTS.md** — look for a `## Testing` section with test command and framework name. If found, use that as the authoritative source.
+2. **If AGENTS.md has no testing section, auto-detect:**
 
 ```bash
 setopt +o nomatch 2>/dev/null || true  # zsh compat
@@ -1387,7 +1450,7 @@ ls -d test/ tests/ spec/ __tests__/ cypress/ e2e/ 2>/dev/null
 
 ```bash
 # Count test files before any generation
-find . -name '*.test.*' -o -name '*.spec.*' -o -name '*_test.*' -o -name '*_spec.*' | grep -v node_modules | wc -l
+git ls-files 2>/dev/null | grep -E '(\.test\.|\.spec\.|_test\.|_spec\.)' | wc -l
 ```
 
 Store this number for the PR body.
@@ -1525,7 +1588,7 @@ If no test framework AND user declined bootstrap → diagram only, no generation
 
 ```bash
 # Count test files after generation
-find . -name '*.test.*' -o -name '*.spec.*' -o -name '*_test.*' -o -name '*_spec.*' | grep -v node_modules | wc -l
+git ls-files 2>/dev/null | grep -E '(\.test\.|\.spec\.|_test\.|_spec\.)' | wc -l
 ```
 
 For PR body: `Tests: {before} → {after} (+{delta} new)`
@@ -1533,7 +1596,7 @@ Coverage line: `Test Coverage Audit: N new code paths. M covered (X%). K tests g
 
 **7. Coverage gate:**
 
-Before proceeding, check CLAUDE.md for a `## Test Coverage` section with `Minimum:` and `Target:` fields. If found, use those percentages. Otherwise use defaults: Minimum = 60%, Target = 80%.
+Before proceeding, check AGENTS.md for a `## Test Coverage` section with `Minimum:` and `Target:` fields. If found, use those percentages. Otherwise use defaults: Minimum = 60%, Target = 80%.
 
 Using the coverage percentage from the diagram in substep 4 (the `COVERAGE: X/Y (Z%)` line):
 
@@ -2427,9 +2490,11 @@ Before pushing, re-verify if code changed during Steps 4-6:
 
 1. **Test verification:** If ANY code changed after Step 5's test run (fixes from review findings, CHANGELOG edits don't count), re-run the test suite. Paste fresh output. Stale output from Step 5 is NOT acceptable.
 
-2. **Build verification:** If the project has a build step, run it. Paste output.
+2. **Lint + typecheck verification:** If any code changed after Step 5, re-run the Step 5 lint and typecheck commands too — a review-fix that breaks the types must not push. Paste the fresh one-line results.
 
-3. **Rationalization prevention:**
+3. **Build verification:** If the project has a build step, run it. Paste output.
+
+4. **Rationalization prevention:**
    - "Should work now" → RUN IT.
    - "I'm confident" → Confidence is not evidence.
    - "I already tested earlier" → Code changed since then. Test again.
@@ -2455,9 +2520,15 @@ _HOOK_INSTALLED="no"
 # committed hook and write a machine-local wrapper into the working tree.
 _HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null || echo "")
 _GIT_DIR=$(git rev-parse --absolute-git-dir 2>/dev/null || echo "")
+# Linked worktrees: --absolute-git-dir is .git/worktrees/<name> but hooks
+# resolve to the COMMON .git/hooks, so match against the common dir too or
+# every Conductor worktree false-negatives as a "custom hooks path". The
+# /nonexistent fallback keeps the case pattern from collapsing to "/*"
+# (match-everything) when resolution fails.
+_GIT_COMMON=$(cd "$(git rev-parse --git-common-dir 2>/dev/null || echo /nonexistent)" 2>/dev/null && pwd || echo /nonexistent)
 _HOOKS_IN_GIT_DIR="no"
 case "$_HOOKS_DIR" in
-  "$_GIT_DIR"/*|hooks|.git/hooks) _HOOKS_IN_GIT_DIR="yes" ;;
+  "$_GIT_DIR"/*|"$_GIT_COMMON"/*|hooks|.git/hooks) _HOOKS_IN_GIT_DIR="yes" ;;
 esac
 _PREPUSH_PROMPTED=$([ -f "${GSTACK_HOME:-$HOME/.gstack}/.redact-prepush-prompted" ] && echo "yes" || echo "no")
 echo "REDACT_PREPUSH: $_REDACT_PREPUSH"
@@ -2533,7 +2604,7 @@ git push -u origin <branch-name>
 > You are executing the /document-release workflow after a code push. Read the full skill file `${HOME}/.agents/skills/gstack/document-release/SKILL.md` and execute its complete workflow end-to-end, including CHANGELOG clobber protection, doc exclusions, risky-change gates, and named staging. Do NOT attempt to edit the PR body — no PR exists yet. Branch: `<branch>`, base: `<base>`.
 >
 > After completing the workflow, output a single JSON object on the LAST LINE of your response (no other text after it):
-> `{"files_updated":["README.md","CLAUDE.md",...],"commit_sha":"abc1234","pushed":true,"documentation_section":"<markdown block for PR body's ## Documentation section>"}`
+> `{"files_updated":["README.md","AGENTS.md",...],"commit_sha":"abc1234","pushed":true,"documentation_section":"<markdown block for PR body's ## Documentation section>"}`
 >
 > If no documentation files needed updating, output:
 > `{"files_updated":[],"commit_sha":null,"pushed":false,"documentation_section":null}`
@@ -2730,16 +2801,17 @@ Print the branch name, remote URL, and instruct the user to create the PR/MR man
 
 ## Step 20: Persist ship metrics
 
-Log coverage and plan completion data so `/retro` can track trends:
+Log coverage and plan completion data so `/retro` can track trends.
+
+Route the append through `gstack-review-log`. It resolves the project slug and
+the canonical branch form itself, creates the directory, validates the JSON, and
+enqueues the row for gbrain sync. It takes **no path argument** — never build a
+`<branch>-reviews.jsonl` path by hand. A branch with a `/` in it turns a
+hand-built path into a subdirectory write, and the row goes somewhere `/retro`
+will never look.
 
 ```bash
-eval "$($GSTACK_ROOT/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
-```
-
-Append to `~/.gstack/projects/$SLUG/$BRANCH-reviews.jsonl`:
-
-```bash
-echo '{"skill":"ship","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","coverage_pct":COVERAGE_PCT,"plan_items_total":PLAN_TOTAL,"plan_items_done":PLAN_DONE,"verification_result":"VERIFY_RESULT","version":"VERSION","branch":"BRANCH"}' >> ~/.gstack/projects/$SLUG/$BRANCH-reviews.jsonl
+$GSTACK_ROOT/bin/gstack-review-log '{"skill":"ship","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","coverage_pct":COVERAGE_PCT,"plan_items_total":PLAN_TOTAL,"plan_items_done":PLAN_DONE,"verification_result":"VERIFY_RESULT","version":"VERSION","branch":"'"$(git rev-parse --abbrev-ref HEAD)"'"}'
 ```
 
 Substitute from earlier steps:
@@ -2748,7 +2820,9 @@ Substitute from earlier steps:
 - **PLAN_DONE**: count of DONE + CHANGED items from Step 8 (0 if no plan file)
 - **VERIFY_RESULT**: "pass", "fail", or "skipped" from Step 8.1
 - **VERSION**: from the VERSION file
-- **BRANCH**: current branch name
+
+The branch name is filled in by the shell — there is no `BRANCH` placeholder to
+substitute.
 
 This step is automatic — never skip it, never ask for confirmation.
 

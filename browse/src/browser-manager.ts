@@ -91,7 +91,11 @@ export function shouldEnableChromiumSandbox(): boolean {
  * restarts on backoff.
  */
 export async function resolveDisconnectCause(browser: Browser | null): Promise<'clean' | 'crash'> {
-  const proc = browser?.process();
+  // `.process()` only exists on browsers we launched ourselves. A browser
+  // obtained via connectOverCDP() (or a stub in tests) has no such method —
+  // calling it blind throws inside the disconnect handler, which killed the
+  // whole daemon with "browser?.process is not a function".
+  const proc = typeof browser?.process === 'function' ? browser.process() : null;
   if (proc && proc.exitCode === null && proc.signalCode === null) {
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 1000);
@@ -244,7 +248,7 @@ export class BrowserManager {
 
   // Called when the headed browser disconnects without intentional teardown
   // (user closed the window). Wired up by server.ts to run full cleanup
-  // (sidebar-agent, state file, profile locks) before exiting with code 2.
+  // (terminal agent, state file, profile locks) before exiting with code 2.
   // Returns void or a Promise; rejections are caught and fall back to exit(2).
   // `exitCode` is the resolved process exit code from the disconnect cause:
   // 0 on clean user-initiated quit (e.g., Cmd+Q on headed Chromium), 2 on
@@ -680,7 +684,7 @@ export class BrowserManager {
     // restart loop. Crash → process.exit(2) preserves the legacy headed
     // semantics that's distinct from launch()'s code 1.
     // Always calls onDisconnect() first to trigger full shutdown (kill
-    // sidebar-agent, save session, clean profile locks + state file) so
+    // terminal agent, save session, clean profile locks + state file) so
     // crashes don't strand resources either.
     if (this.browser) {
       this.browser.on('disconnected', () => {
@@ -798,19 +802,31 @@ export class BrowserManager {
     const page = this.pages.get(tabId);
     if (!page) throw new Error(`Tab ${tabId} not found`);
 
+    // Capture BEFORE close(): the page 'close' event handler wired in
+    // wirePageEvents() can fire while page.close() is awaited. It removes
+    // the tab from the maps and reassigns activeTabId (to 0 when no tabs
+    // remain), so a post-close `tabId === this.activeTabId` check is
+    // order-dependent — whether the event dispatches before or after
+    // close() resolves varies across Playwright/Chromium versions and
+    // machines, and losing the race means the last-tab auto-create below
+    // never runs, leaving the manager with zero tabs.
+    const wasActive = tabId === this.activeTabId;
+
     await page.close();
     this.pages.delete(tabId);
     this.tabSessions.delete(tabId);
     this.tabOwnership.delete(tabId);
 
     // Switch to another tab if we closed the active one
-    if (tabId === this.activeTabId) {
+    if (wasActive) {
       const remaining = [...this.pages.keys()];
-      if (remaining.length > 0) {
-        this.activeTabId = remaining[remaining.length - 1];
-      } else {
+      if (remaining.length === 0) {
         // No tabs left — create a new blank one
         await this.newTab();
+      } else if (!this.pages.has(this.activeTabId)) {
+        // The 'close' handler may have already switched to a valid tab;
+        // only reassign when activeTabId no longer points at a live tab.
+        this.activeTabId = remaining[remaining.length - 1];
       }
     }
   }
@@ -1561,15 +1577,20 @@ export class BrowserManager {
       if (extensionPath) {
         launchArgs.push(`--disable-extensions-except=${extensionPath}`);
         launchArgs.push(`--load-extension=${extensionPath}`);
-        // Auth token is served via /health endpoint now (no file write needed).
-        // Extension reads token from /health on connect.
+        // Auth token is served via POST /extension-token (pinned-origin
+        // bootstrap, no file write needed). /health is liveness-only.
         console.log(`[browse] Handoff: loading extension from ${extensionPath}`);
       } else {
         console.log('[browse] Handoff: extension not found — headed mode without side panel');
       }
 
-      const userDataDir = path.join(process.env.HOME || '/tmp', '.gstack', 'chromium-profile');
+      // Same profile resolution + singleton-lock cleanup as launchHeaded().
+      // This path previously hardcoded ~/.gstack/chromium-profile, silently
+      // ignoring $CHROMIUM_PROFILE / $GSTACK_HOME and skipping the lock
+      // cleanup — the third shipped drift between the three launch paths.
+      const userDataDir = resolveChromiumProfile();
       fs.mkdirSync(userDataDir, { recursive: true });
+      cleanSingletonLocks(userDataDir);
 
       // T1: same automation-tell-stripping defaults as launchHeaded().
       // The handoff path (headless → headed re-launch) takes the same

@@ -19,7 +19,10 @@ export function generateFirstRunGuidance(ctx: TemplateContext): string {
 
 If \`ACTIVATED\` is \`no\` (first skill run on this machine) AND the preamble printed a non-empty \`FIRST_TASK:\` value that is NOT \`nongit\`: show ONE short, project-specific line mapped from the token, as a heads-up, then CONTINUE with whatever the user actually asked — do NOT halt their task. Map the token: \`greenfield\` → "Fresh repo — shape it first with \`/spec\` or \`/office-hours\`." \`code_node\`/\`code_python\`/\`code_rust\`/\`code_go\`/\`code_ruby\`/\`code_ios\` → "There's code here — \`/qa\` to see it work, or \`/investigate\` if something's off." \`branch_ahead\` → "Unshipped work on this branch — \`/review\` then \`/ship\`." \`dirty_default\` → "Uncommitted changes — \`/review\` before committing." \`clean_default\` → "Pick one: \`/spec\`, \`/investigate\`, or \`/qa\`." Then substitute the token you saw for TASK_TOKEN and run (best-effort), and mark activated:
 \`\`\`bash
-${ctx.paths.binDir}/gstack-telemetry-log --event-type first_task_scaffold_shown --skill "TASK_TOKEN" --outcome shown 2>/dev/null || true
+_TEL=$(${ctx.paths.binDir}/gstack-config get telemetry 2>/dev/null || echo "off")
+if [ "$_TEL" != "off" ]; then
+  ${ctx.paths.binDir}/gstack-telemetry-log --event-type first_task_scaffold_shown --skill "TASK_TOKEN" --outcome shown 2>/dev/null || true
+fi
 touch ~/.gstack/.activated 2>/dev/null || true
 \`\`\`
 

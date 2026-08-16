@@ -1,5 +1,29 @@
 import type { TemplateContext } from '../types';
 
+/**
+ * The fenced decision-brief template. Single source of truth — rendered in
+ * BOTH the full spec below and the always-loaded compact contract
+ * (carved-sections.ts generateAskUserFormatCompact). On the Claude host both
+ * surfaces are visible to the model; if they diverged, the model would see two
+ * conflicting brief formats.
+ */
+export const AUQ_FORMAT_BLOCK = `\`\`\`
+D<N> — <one-line question title>
+Project/branch/task: <1 short grounding sentence using _BRANCH>
+ELI10: <plain English a 16-year-old could follow, 2-4 sentences, name the stakes>
+Stakes if we pick wrong: <one sentence on what breaks, what user sees, what's lost>
+Recommendation: <choice> because <one-line reason>
+Completeness: A=X/10, B=Y/10   (or: Note: options differ in kind, not coverage — no completeness score)
+Pros / cons:
+A) <option label> (recommended)
+  ✅ <pro — concrete, observable, ≥40 chars>
+  ❌ <con — honest, ≥40 chars>
+B) <option label>
+  ✅ <pro>
+  ❌ <con>
+Net: <one-line synthesis of what you're actually trading off>
+\`\`\``;
+
 export function generateAskUserFormat(_ctx: TemplateContext): string {
   return `## AskUserQuestion Format
 
@@ -41,22 +65,7 @@ Layout: a \`D<N>\` title + a one-line note to reply with a letter (in Conductor 
 
 Every AskUserQuestion is a decision brief and must be sent as tool_use, not prose — unless the documented failure fallback above applies (interactive session + the call is unavailable/erroring), in which case the prose fallback is the correct output.
 
-\`\`\`
-D<N> — <one-line question title>
-Project/branch/task: <1 short grounding sentence using _BRANCH>
-ELI10: <plain English a 16-year-old could follow, 2-4 sentences, name the stakes>
-Stakes if we pick wrong: <one sentence on what breaks, what user sees, what's lost>
-Recommendation: <choice> because <one-line reason>
-Completeness: A=X/10, B=Y/10   (or: Note: options differ in kind, not coverage — no completeness score)
-Pros / cons:
-A) <option label> (recommended)
-  ✅ <pro — concrete, observable, ≥40 chars>
-  ❌ <con — honest, ≥40 chars>
-B) <option label>
-  ✅ <pro>
-  ❌ <con>
-Net: <one-line synthesis of what you're actually trading off>
-\`\`\`
+${AUQ_FORMAT_BLOCK}
 
 D-numbering: first question in a skill invocation is \`D1\`; increment yourself. This is a model-level instruction, not a runtime counter.
 

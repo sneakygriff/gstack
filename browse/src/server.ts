@@ -18,21 +18,20 @@ import { handleReadCommand, hasOutArg } from './read-commands';
 import { handleWriteCommand } from './write-commands';
 import { handleMetaCommand } from './meta-commands';
 import { handleCookiePickerRoute, hasActivePicker } from './cookie-picker-routes';
-import { sanitizeExtensionUrl } from './sidebar-utils';
 import { COMMAND_DESCRIPTIONS, PAGE_CONTENT_COMMANDS, DOM_CONTENT_COMMANDS, wrapUntrustedContent, canonicalizeCommand, buildUnknownCommandError, ALL_COMMANDS } from './commands';
 import {
   wrapUntrustedPageContent, datamarkContent,
   runContentFilters, type ContentFilterResult,
   markHiddenElements, getCleanTextWithStripping, cleanupHiddenMarkers,
 } from './content-security';
-import { generateCanary, injectCanary, getStatus as getSecurityStatus, writeDecision } from './security';
+import { getStatus as getSecurityStatus } from './security';
 import { isSidecarAvailable, scanWithSidecar } from './security-sidecar-client';
-import { writeSecureFile, mkdirSecure } from './file-permissions';
+import { writeSecureFile, mkdirSecure, appendSecureFile } from './file-permissions';
 import { handleSnapshot, SNAPSHOT_FLAGS } from './snapshot';
 import {
   initRegistry, validateToken as validateScopedToken, checkScope, checkDomain,
   checkRate, createToken, createSetupKey, exchangeSetupKey, revokeToken,
-  rotateRoot, listTokens, serializeRegistry, restoreRegistry, recordCommand,
+  listTokens, recordCommand,
   isRootToken, checkConnectRateLimit, type TokenInfo,
 } from './token-registry';
 import { validateTempPath } from './path-security';
@@ -44,11 +43,12 @@ import { inspectElement, modifyStyle, resetModifications, getModificationHistory
 // Bun.spawn used instead of child_process.spawn (compiled bun binaries
 // fail posix_spawn on all executables including /bin/bash)
 import { safeUnlink, safeUnlinkQuiet, safeKill } from './error-handling';
-import { readAgentRecord, killAgentByRecord, clearAgentRecord, agentRecordPath, spawnTerminalAgent } from './terminal-agent-control';
+import { readAgentRecord, killAgentByRecord, agentRecordPath, spawnTerminalAgent } from './terminal-agent-control';
 import { isProcessAlive } from './error-handling';
-import { sanitizeBody, stripLoneSurrogateEscapes } from './sanitize';
+import { sanitizeBody, stripLoneSurrogateEscapes, stripLoneSurrogates, sanitizeReplacer } from './sanitize';
 import { startSocksBridge, testUpstream, type BridgeHandle } from './socks-bridge';
 import { parseProxyConfig, toUpstreamConfig, ProxyConfigError } from './proxy-config';
+import { writeReceipt } from '../../lib/egress-receipt';
 import { redactProxyUrl } from './proxy-redact';
 import { shouldSpawnXvfb, pickFreeDisplay, spawnXvfb, xvfbInstallHint, type XvfbHandle } from './xvfb';
 import { logTunnelDenial } from './tunnel-denial-log';
@@ -68,41 +68,22 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 
 // ─── Unicode Sanitization ───────────────────────────────────────
-// Remove unpaired UTF-16 surrogate halves (\uD800–\uDFFF). Page DOM text,
-// OCR output, and other CDP-sourced strings can contain lone surrogates;
-// JSON consumers downstream (Anthropic API in particular) reject them with
-// "no low surrogate in string". Valid surrogate pairs (e.g. emoji) survive
-// unchanged. Lone halves become U+FFFD (�).
+// Unpaired UTF-16 surrogate halves (\uD800–\uDFFF) in page DOM text, OCR
+// output, and other CDP-sourced strings are rejected by JSON consumers
+// downstream (Anthropic API in particular: "no low surrogate in string").
+// The sanitizers live in sanitize.ts (single source of truth, shared with
+// sse-helpers.ts and the read/snapshot pipeline): `stripLoneSurrogates`
+// replaces lone halves with U+FFFD (valid pairs like emoji survive), and
+// `sanitizeReplacer` runs it on every string value inside JSON.stringify.
 //
 // INVARIANT: every server egress path that ships page-content strings MUST
-// route through this sanitizer. handleCommandInternal wraps the final
+// route through the sanitizer. handleCommandInternal wraps the final
 // cr.result string (text/plain bodies carry lone surrogates verbatim;
-// JSON.stringify already escapes them). The two SSE producers below
-// stringify with `sanitizeReplacer` so payload string fields get cleaned
-// BEFORE escaping. Plain post-stringify regex is a no-op there because
-// JSON.stringify converts \uD800 → "\\ud800" — the regex can't see the
-// surrogate after that point.
-function sanitizeLoneSurrogates(str: string): string {
-  return str.replace(/[\uD800-\uDFFF]/g, (match, offset) => {
-    const code = match.charCodeAt(0);
-    if (code >= 0xD800 && code <= 0xDBFF) {
-      const next = str.charCodeAt(offset + 1);
-      if (next >= 0xDC00 && next <= 0xDFFF) return match;
-    }
-    if (code >= 0xDC00 && code <= 0xDFFF) {
-      const prev = str.charCodeAt(offset - 1);
-      if (prev >= 0xD800 && prev <= 0xDBFF) return match;
-    }
-    return '�';
-  });
-}
-
-// JSON.stringify replacer that sanitizes string values before they get
-// escape-encoded. Pair with stringify when the consumer will JSON.parse the
-// payload back into JS strings (SSE clients do this).
-function sanitizeReplacer(_key: string, value: unknown): unknown {
-  return typeof value === 'string' ? sanitizeLoneSurrogates(value) : value;
-}
+// JSON.stringify already escapes them). The SSE producers stringify with
+// `sanitizeReplacer` so payload string fields get cleaned BEFORE escaping.
+// Plain post-stringify regex is a no-op there because JSON.stringify
+// converts \uD800 → "\\ud800" — the regex can't see the surrogate after
+// that point.
 
 // ─── Config ─────────────────────────────────────────────────────
 const config = resolveConfig();
@@ -190,14 +171,16 @@ export interface ServerConfig {
   authToken: string;
   /** Local listener port. Used in /welcome URL + state-file. */
   browsePort: number;
-  /** Idle shutdown timeout. Default 30 min. */
-  idleTimeoutMs: number;
   /** Result of resolveConfig() — stateDir, auditLog, stateFile. */
   config: ReturnType<typeof resolveConfig>;
   /** Pre-launched BrowserManager. Caller owns lifecycle. */
   browserManager: BrowserManager;
-  /** Optional Chromium profile path override. Resolved by resolveChromiumProfile(). */
-  chromiumProfile?: string;
+  // NOTE: per-factory idleTimeoutMs and chromiumProfile were deleted — they
+  // were documented but never read (the idle timer, activity state, and
+  // shutdown target are module-global, so per-factory wiring would lie for
+  // any embedder running >1 handler). Real support belongs to the deferred
+  // server.ts singleton/route-table refactor. Until then: BROWSE_IDLE_TIMEOUT
+  // and CHROMIUM_PROFILE env are the honest knobs.
   /** Caller-owned. shutdown() does NOT call xvfb.stop(); caller is responsible. */
   xvfb?: XvfbHandle | null;
   /** Caller-owned. shutdown() does NOT call proxyBridge.close(); caller is responsible. */
@@ -283,7 +266,6 @@ export function resolveConfigFromEnv(): Omit<ServerConfig, 'browserManager' | 's
     // embedder can't ship a BOM/zero-width as the bearer secret.
     authToken: sanitizeAuthToken(process.env.AUTH_TOKEN) || crypto.randomUUID(),
     browsePort: parseInt(process.env.BROWSE_PORT || '0', 10),
-    idleTimeoutMs: parseInt(process.env.BROWSE_IDLE_TIMEOUT || '1800000', 10),
     config: resolveConfig(),
   };
 }
@@ -302,8 +284,18 @@ export function resolveConfigFromEnv(): Omit<ServerConfig, 'browserManager' | 's
 const TUNNEL_PATHS = new Set<string>([
   '/connect',
   '/command',
-  '/sidebar-chat',
 ]);
+
+/**
+ * The gstack sidebar extension's pinned Chrome extension ID. Derived from
+ * the "key" field in extension/manifest.json (first 16 bytes of SHA-256 of
+ * the DER public key, hex nibbles mapped 0-9a-f → a-p). Reproduce with:
+ *   bun browse/scripts/extension-id.ts
+ * POST /extension-token releases AUTH_TOKEN only to an Origin of exactly
+ * `chrome-extension://<this id>`. If the manifest keypair is ever rotated,
+ * this constant must be updated in the same commit.
+ */
+export const GSTACK_EXTENSION_ID = 'dgbkdbjebeiblbajiilljmhjdpmiglep';
 
 /**
  * Commands reachable via POST /command over the tunnel surface. A paired
@@ -389,6 +381,100 @@ async function closeTunnel(): Promise<void> {
   tunnelServer = null;
   tunnelUrl = null;
   tunnelActive = false;
+}
+
+/**
+ * Result of startTunnel(). `stage` tells the caller which half failed so it
+ * can keep its distinct error surface: 'bind' = the tunnel-surface Bun.serve
+ * listener could not bind (nothing to clean up), 'ngrok' = anything after the
+ * bind (ngrok forward, egress receipt, state-file write) — startTunnel has
+ * already torn down both ngrok and the Bun listener by the time it returns.
+ */
+type StartTunnelResult =
+  | { ok: true; url: string }
+  | { ok: false; stage: 'bind' | 'ngrok'; error: Error };
+
+/**
+ * Start the ngrok tunnel using the dual-listener pattern: bind a dedicated
+ * tunnel-surface listener on an ephemeral 127.0.0.1 port and point
+ * ngrok.forward() at THAT port — the local listener (which serves
+ * /extension-token, /cookie-picker, /inspector/*, welcome, etc.) is never
+ * exposed to ngrok. Shared by the /tunnel/start route handler (which passes
+ * its in-closure makeFetchHandler('tunnel')) and the BROWSE_TUNNEL=1
+ * auto-start flow in start() (which passes handle.fetchTunnel from the
+ * factory). The BROWSE_TUNNEL_LOCAL_ONLY=1 test path does NOT use this
+ * helper — it binds the tunnel surface with no ngrok forwarding at all.
+ *
+ * Hard fail on listener bind (`stage: 'bind'`) — NEVER fall back to the
+ * local port, which would silently defeat the whole security property.
+ *
+ * On success, sets the module tunnel state (tunnelListener / tunnelUrl /
+ * tunnelServer / tunnelActive) and records the tunnel in the state file.
+ */
+async function startTunnel(opts: {
+  fetchHandler: (req: Request, server: any) => Promise<Response>;
+  authtoken: string;
+  consent: string;
+}): Promise<StartTunnelResult> {
+  // Bind the tunnel listener on an ephemeral port.  HARD FAIL if this
+  // errors — never fall back to the local port.
+  let boundTunnel: ReturnType<typeof Bun.serve>;
+  try {
+    boundTunnel = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch: opts.fetchHandler,
+    });
+  } catch (err: any) {
+    return { ok: false, stage: 'bind', error: err };
+  }
+  const tunnelPort = boundTunnel.port;
+
+  // Point ngrok at the TUNNEL port (not the local port).  If this fails,
+  // tear the listener back down so we don't leak sockets.
+  try {
+    const ngrok = await import('@ngrok/ngrok');
+    const domain = process.env.NGROK_DOMAIN;
+    const forwardOpts: any = { addr: tunnelPort, authtoken: opts.authtoken };
+    if (domain) forwardOpts.domain = domain;
+
+    // Egress receipt BEFORE the tunnel session opens, fail-closed: a
+    // writeReceipt failure lands in this catch, which tears the tunnel
+    // listener back down and refuses the start. One receipt per session
+    // open; browse command behavior over the tunnel is unchanged.
+    writeReceipt({
+      sink: 'browse-tunnel',
+      host: domain || 'connect.ngrok-agent.com',
+      payloadClass: 'tunnel-session-open (scoped-token browser-command surface)',
+      bytes: 0,
+      sha256: null,
+      consent: opts.consent,
+    });
+
+    tunnelListener = await ngrok.forward(forwardOpts);
+    tunnelUrl = tunnelListener.url();
+    tunnelServer = boundTunnel;
+    tunnelActive = true;
+    console.log(`[browse] Tunnel listener bound on 127.0.0.1:${tunnelPort}, ngrok → ${tunnelUrl}`);
+
+    // Update state file
+    const stateContent = JSON.parse(fs.readFileSync(config.stateFile, 'utf-8'));
+    stateContent.tunnel = { url: tunnelUrl, domain: domain || null, startedAt: new Date().toISOString() };
+    const tmpState = tmpStatePath();
+    fs.writeFileSync(tmpState, JSON.stringify(stateContent, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpState, config.stateFile);
+
+    return { ok: true, url: tunnelUrl! };
+  } catch (err: any) {
+    // Clean up BOTH ngrok and the Bun listener on failure.  If
+    // ngrok.forward() succeeded but tunnelListener.url() or the
+    // state-file write threw, we'd otherwise leak an active ngrok
+    // session on the user's account.
+    try { if (tunnelListener) await tunnelListener.close(); } catch {}
+    try { boundTunnel.stop(true); } catch {}
+    tunnelListener = null;
+    return { ok: false, stage: 'ngrok', error: err };
+  }
 }
 
 // Module-level validateAuth deleted in v1.35.0.0. Factory-scoped equivalent
@@ -486,10 +572,6 @@ function isRootRequest(req: Request): boolean {
   return token !== null && isRootToken(token);
 }
 
-// Sidebar model router was here (sonnet vs opus by message intent). Ripped
-// alongside the chat queue; the interactive PTY just runs whatever model
-// the user's `claude` CLI is configured with.
-
 // ─── Help text (auto-generated from COMMAND_DESCRIPTIONS) ────────
 function generateHelpText(): string {
   // Group commands by category
@@ -562,15 +644,6 @@ function tmpStatePath(): string {
 
 
 // ─── Sidebar agent / chat state ripped ──────────────────────────────
-// ChatEntry, SidebarSession, TabAgentState interfaces; chatBuffer,
-// chatBuffers, sidebarSession, agentProcess, agentStatus, agentStartTime,
-// agentTabId, messageQueue, currentMessage, tabAgents; addChatEntry,
-// loadSession, createSession, persistSession, processAgentEvent,
-// killAgent, listSessions, getTabAgent, getTabAgentStatus, and the
-// agentHealthInterval all lived here. Replaced by the live PTY in
-// terminal-agent.ts; chat queue + per-tab agent multiplexing are no
-// longer needed.
-
 let lastConsoleFlushed = 0;
 let lastNetworkFlushed = 0;
 let lastDialogFlushed = 0;
@@ -588,7 +661,7 @@ async function flushBuffers() {
       const lines = entries.map(e =>
         `[${new Date(e.timestamp).toISOString()}] [${e.level}] ${e.text}`
       ).join('\n') + '\n';
-      fs.appendFileSync(CONSOLE_LOG_PATH, lines);
+      appendSecureFile(CONSOLE_LOG_PATH, lines);
       lastConsoleFlushed = consoleBuffer.totalAdded;
     }
 
@@ -599,7 +672,7 @@ async function flushBuffers() {
       const lines = entries.map(e =>
         `[${new Date(e.timestamp).toISOString()}] ${e.method} ${e.url} → ${e.status || 'pending'} (${e.duration || '?'}ms, ${e.size || '?'}B)`
       ).join('\n') + '\n';
-      fs.appendFileSync(NETWORK_LOG_PATH, lines);
+      appendSecureFile(NETWORK_LOG_PATH, lines);
       lastNetworkFlushed = networkBuffer.totalAdded;
     }
 
@@ -610,7 +683,7 @@ async function flushBuffers() {
       const lines = entries.map(e =>
         `[${new Date(e.timestamp).toISOString()}] [${e.type}] "${e.message}" → ${e.action}${e.response ? ` "${e.response}"` : ''}`
       ).join('\n') + '\n';
-      fs.appendFileSync(DIALOG_LOG_PATH, lines);
+      appendSecureFile(DIALOG_LOG_PATH, lines);
       lastDialogFlushed = dialogBuffer.totalAdded;
     }
   } catch (err: any) {
@@ -769,7 +842,7 @@ const browserManager = new BrowserManager();
 // short-circuits idle-shutdown.
 let activeBrowserManager: BrowserManager = browserManager;
 // When the user closes the headed browser window, run full cleanup
-// (kill sidebar-agent, save session, remove profile locks, delete state file)
+// (kill terminal agent, save session, remove profile locks, delete state file)
 // before exiting. Exit code 0 means user-initiated clean quit (Cmd+Q on
 // macOS) so process supervisors like gbrowser's gbd skip the restart loop;
 // 2 means a real crash that should respawn. The fallback `?? 2` preserves
@@ -1021,7 +1094,7 @@ async function handleCommandInternalImpl(
     if (!opts?.skipRateCheck && tokenInfo.token) recordCommand(tokenInfo.token);
   }
 
-  // Pin to a specific tab if requested (set by BROWSE_TAB env var in sidebar agents).
+  // Pin to a specific tab if requested (set by BROWSE_TAB env var, e.g. per-tab agent contexts).
   // This prevents parallel agents from interfering with each other's tab context.
   // Safe because Bun's event loop is single-threaded — no concurrent handleCommand.
   let savedTabId: number | null = null;
@@ -1312,7 +1385,7 @@ async function handleCommandInternal(
   opts?: { skipRateCheck?: boolean; skipActivity?: boolean; chainDepth?: number },
 ): Promise<CommandResult> {
   const cr = await handleCommandInternalImpl(body, tokenInfo, opts);
-  return { ...cr, result: sanitizeLoneSurrogates(cr.result) };
+  return { ...cr, result: stripLoneSurrogates(cr.result) };
 }
 
 /**
@@ -1517,8 +1590,18 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
     process.env.GSTACK_AGENT_WATCHDOG_TICK_MS || '60000',
     10,
   );
-  const RESPAWN_GUARD_WINDOW_MS = 60_000;
   const RESPAWN_GUARD_MAX = 3;
+  // The guard window MUST span enough ticks for RESPAWN_GUARD_MAX respawns to
+  // land inside it. This was a fixed 60_000 against a 60_000 tick, so at most
+  // ONE respawn could ever be in the window and `respawnHistory.length >= 3`
+  // was unreachable — the guard could not fire at the default tick rate, and a
+  // steady one-per-tick leak ran unbounded instead of stopping after 3. Scale
+  // with the tick so the intent ("3 crashes in quick succession → stop") holds
+  // at any tick value: 3 respawns within 5 ticks trips it.
+  const RESPAWN_GUARD_WINDOW_MS = Math.max(
+    60_000,
+    AGENT_WATCHDOG_TICK_MS * (RESPAWN_GUARD_MAX + 2),
+  );
   let agentRespawnGuardTripped = false;
 
   if (ownsTerminalAgent) {
@@ -1551,6 +1634,7 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
         const pid = spawnTerminalAgent({
           stateFile: cfg.config.stateFile,
           serverPort: cfg.browsePort,
+          ownerPid: process.pid,
           cwd: cfg.config.projectDir,
         });
         if (pid) {
@@ -1769,7 +1853,51 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
         );
       }
 
-      // Health check — no auth required, does NOT reset idle timer
+      // ─── POST /extension-token — pinned-origin token bootstrap ──────
+      //
+      // The ONLY endpoint that hands out AUTH_TOKEN. GET /health used to
+      // carry the token (headed mode + any chrome-extension:// Origin),
+      // which meant ANY extension — or any localhost caller in headed
+      // mode — could read the root token. Now the token is released only
+      // to the one extension identity we ship: the Origin header must be
+      // exactly `chrome-extension://<GSTACK_EXTENSION_ID>`, where the ID
+      // is pinned by the "key" field in extension/manifest.json (derive
+      // it with `bun browse/scripts/extension-id.ts`). Chrome sets Origin
+      // on cross-origin POSTs from extension contexts and web pages
+      // cannot forge a chrome-extension:// Origin.
+      //
+      // Local listener only: NEVER added to TUNNEL_PATHS, so the tunnel
+      // surface 404s it by default-deny.
+      if (url.pathname === '/extension-token' && req.method === 'POST') {
+        // Defense-in-depth alongside the 127.0.0.1 bind: a DNS-rebinding
+        // page can't present a localhost Host header. Host arrives as
+        // '127.0.0.1:34567', so parse out the hostname — never compare
+        // the raw header (which carries the port) against a literal.
+        let hostname: string | null = null;
+        try {
+          hostname = new URL(`http://${req.headers.get('host') ?? ''}`).hostname;
+        } catch (err) {
+          if (!(err instanceof TypeError)) throw err;  // TypeError = malformed Host
+        }
+        const originOk =
+          req.headers.get('origin') === `chrome-extension://${GSTACK_EXTENSION_ID}`;
+        const hostOk = hostname === '127.0.0.1' || hostname === 'localhost';
+        if (!originOk || !hostOk) {
+          // No detail in the body — don't teach a probing caller which
+          // check failed.
+          return new Response(JSON.stringify({ error: 'Forbidden' }), {
+            status: 403, headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ token: authToken }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Health check — no auth required, does NOT reset idle timer.
+      // NEVER carries a token in any mode: token bootstrap is
+      // POST /extension-token (pinned extension Origin) and shell auth
+      // is POST /pty-session. Liveness/status only.
       if (url.pathname === '/health') {
         const healthy = await browserManager.isHealthy();
         return new Response(JSON.stringify({
@@ -1777,23 +1905,9 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
           mode: browserManager.getConnectionMode(),
           uptime: Math.floor((Date.now() - startTime) / 1000),
           tabs: browserManager.getTabCount(),
-          // Auth token for extension bootstrap. Safe: /health is localhost-only.
-          // Previously served unconditionally, but that leaks the token if the
-          // server is tunneled to the internet (ngrok, SSH tunnel).
-          // In headed mode the server is always local, so return token unconditionally
-          // (fixes Playwright Chromium extensions that don't send Origin header).
-          ...(browserManager.getConnectionMode() === 'headed' ||
-              req.headers.get('origin')?.startsWith('chrome-extension://')
-              ? { token: authToken } : {}),
-          // The chat queue is gone — Terminal pane is the sole sidebar
-          // surface. Keep `chatEnabled: false` so any older extension
-          // build still treats the chat input as disabled.
-          chatEnabled: false,
           // Security module status — drives the shield icon in the sidepanel.
           // Returns {status: 'protected'|'degraded'|'inactive', layers: {...}}.
-          // The chat-path classifier no longer feeds this since
-          // sidebar-agent.ts was ripped; only the page-content side
-          // (canary, content-security) keeps reporting in.
+          // Fed by the page-content side (testsavant sidecar, canary state).
           security: getSecurityStatus(),
           // Terminal-agent discovery. ONLY a port number — never a token.
           // Tokens flow via the /pty-session HttpOnly cookie path. See
@@ -2309,7 +2423,7 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
       // Dual-listener model: binds a SECOND Bun.serve listener on an
       // ephemeral 127.0.0.1 port dedicated to tunnel traffic, then points
       // ngrok.forward() at THAT port.  The existing local listener (which
-      // serves /health+token, /cookie-picker, /inspector/*, welcome, etc.)
+      // serves /extension-token, /cookie-picker, /inspector/*, welcome, etc.)
       // is never exposed to ngrok.
       //
       // Hard fail if the tunnel listener bind fails — NEVER fall back to
@@ -2351,58 +2465,24 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
           }), { status: 400, headers: { 'Content-Type': 'application/json' } });
         }
 
-        // 2) Bind the tunnel listener on an ephemeral port.  HARD FAIL if
-        //    this errors — never fall back to the local port.
-        let boundTunnel: ReturnType<typeof Bun.serve>;
-        try {
-          boundTunnel = Bun.serve({
-            port: 0,
-            hostname: '127.0.0.1',
-            fetch: makeFetchHandler('tunnel'),
-          });
-        } catch (err: any) {
+        // 2) Bind the tunnel listener + open ngrok via the shared helper
+        //    (see startTunnel — hard-fails the bind, cleans up both ngrok
+        //    and the Bun listener on any post-bind failure).
+        const started = await startTunnel({
+          fetchHandler: makeFetchHandler('tunnel'),
+          authtoken,
+          consent: 'pair_agent=on',
+        });
+        if (!started.ok) {
           return new Response(JSON.stringify({
-            error: `Failed to bind tunnel listener: ${err.message}`,
+            error: started.stage === 'bind'
+              ? `Failed to bind tunnel listener: ${started.error.message}`
+              : `Failed to open ngrok tunnel: ${started.error.message}`,
           }), { status: 500, headers: { 'Content-Type': 'application/json' } });
         }
-        const tunnelPort = boundTunnel.port;
-
-        // 3) Point ngrok at the TUNNEL port (not the local port).  If this
-        //    fails, tear the listener back down so we don't leak sockets.
-        try {
-          const ngrok = await import('@ngrok/ngrok');
-          const domain = process.env.NGROK_DOMAIN;
-          const forwardOpts: any = { addr: tunnelPort, authtoken };
-          if (domain) forwardOpts.domain = domain;
-
-          tunnelListener = await ngrok.forward(forwardOpts);
-          tunnelUrl = tunnelListener.url();
-          tunnelServer = boundTunnel;
-          tunnelActive = true;
-          console.log(`[browse] Tunnel listener bound on 127.0.0.1:${tunnelPort}, ngrok → ${tunnelUrl}`);
-
-          // Update state file
-          const stateContent = JSON.parse(fs.readFileSync(config.stateFile, 'utf-8'));
-          stateContent.tunnel = { url: tunnelUrl, domain: domain || null, startedAt: new Date().toISOString() };
-          const tmpState = tmpStatePath();
-          fs.writeFileSync(tmpState, JSON.stringify(stateContent, null, 2), { mode: 0o600 });
-          fs.renameSync(tmpState, config.stateFile);
-
-          return new Response(JSON.stringify({ url: tunnelUrl }), {
-            status: 200, headers: { 'Content-Type': 'application/json' },
-          });
-        } catch (err: any) {
-          // Clean up BOTH ngrok and the Bun listener on failure.  If
-          // ngrok.forward() succeeded but tunnelListener.url() or the
-          // state-file write threw, we'd otherwise leak an active ngrok
-          // session on the user's account.
-          try { if (tunnelListener) await tunnelListener.close(); } catch {}
-          try { boundTunnel.stop(true); } catch {}
-          tunnelListener = null;
-          return new Response(JSON.stringify({
-            error: `Failed to open ngrok tunnel: ${err.message}`,
-          }), { status: 500, headers: { 'Content-Type': 'application/json' } });
-        }
+        return new Response(JSON.stringify({ url: started.url }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
       }
 
       // ─── SSE session cookie mint (auth required) ──────────────────
@@ -2502,15 +2582,6 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
           headers: { 'Content-Type': 'application/json' },
         });
       }
-
-
-      // ─── Sidebar chat endpoints ripped ──────────────────────────────
-      // /sidebar-tabs, /sidebar-tabs/switch, /sidebar-chat[/clear],
-      // /sidebar-command, /sidebar-agent/{event,kill,stop},
-      // /sidebar-queue/dismiss, /sidebar-session{,/new,/list} all lived
-      // here. They drove the one-shot claude -p chat queue. Replaced by
-      // the interactive PTY in terminal-agent.ts; the queue + browser-tab
-      // multiplexing are no longer needed.
 
 
       // ─── Batch endpoint — N commands, 1 HTTP round-trip ─────────────
@@ -2794,11 +2865,10 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
 
       // GET /memory — diagnostic snapshot (auth required, does NOT reset idle).
       // Same auth model as /activity/stream and /inspector/events: Bearer header
-      // OR view-only SSE-session cookie. Does NOT extend /health (which already
-      // leaks AUTH_TOKEN to any localhost caller in headed mode — see TODOS.md
-      // "Audit /health token distribution"); a separate endpoint with the
-      // standard SSE auth keeps the future /health fix from cascading into the
-      // sidebar footer poll.
+      // OR view-only SSE-session cookie. Does NOT extend /health (which is
+      // unauthenticated liveness-only — token bootstrap moved to the pinned
+      // POST /extension-token); a separate endpoint with the standard SSE auth
+      // keeps /health free of anything worth stealing.
       if (url.pathname === '/memory' && req.method === 'GET') {
         const cookieToken = extractSseCookie(req);
         if (!validateAuth(req) && !validateSseSessionToken(cookieToken)) {
@@ -3056,11 +3126,6 @@ export async function start() {
   console.log(`[browse] State file: ${config.stateFile}`);
   console.log(`[browse] Idle timeout: ${IDLE_TIMEOUT_MS / 1000}s`);
 
-  // initSidebarSession() ripped alongside the chat queue (it loaded
-  // chat.jsonl into memory and started the agent-health watchdog —
-  // both functions are gone). The Terminal pane manages its own state
-  // directly via terminal-agent.ts.
-
   // ─── Tunnel startup (optional) ────────────────────────────────
   // Start ngrok tunnel if BROWSE_TUNNEL=1 is set.  Uses the dual-listener
   // pattern: bind a dedicated tunnel listener on an ephemeral port and
@@ -3070,41 +3135,17 @@ export async function start() {
     if (!authtoken) {
       console.error('[browse] BROWSE_TUNNEL=1 but no NGROK_AUTHTOKEN found. Set it via env var or ~/.gstack/ngrok.env');
     } else {
-      let boundTunnel: ReturnType<typeof Bun.serve> | null = null;
-      try {
-        boundTunnel = Bun.serve({
-          port: 0,
-          hostname: '127.0.0.1',
-          fetch: handle.fetchTunnel,
-        });
-        const tunnelPort = boundTunnel.port;
-
-        const ngrok = await import('@ngrok/ngrok');
-        const domain = process.env.NGROK_DOMAIN;
-        const forwardOpts: any = { addr: tunnelPort, authtoken };
-        if (domain) forwardOpts.domain = domain;
-
-        tunnelListener = await ngrok.forward(forwardOpts);
-        tunnelUrl = tunnelListener.url();
-        tunnelServer = boundTunnel;
-        tunnelActive = true;
-
-        console.log(`[browse] Tunnel listener bound on 127.0.0.1:${tunnelPort}, ngrok → ${tunnelUrl}`);
-
-        // Update state file with tunnel URL
-        const stateContent = JSON.parse(fs.readFileSync(config.stateFile, 'utf-8'));
-        stateContent.tunnel = { url: tunnelUrl, domain: domain || null, startedAt: new Date().toISOString() };
-        const tmpState = tmpStatePath();
-        fs.writeFileSync(tmpState, JSON.stringify(stateContent, null, 2), { mode: 0o600 });
-        fs.renameSync(tmpState, config.stateFile);
-      } catch (err: any) {
-        console.error(`[browse] Failed to start tunnel: ${err.message}`);
-        // Same cleanup as /tunnel/start's error path: tear down BOTH
-        // ngrok and the Bun listener so we don't leak an ngrok session
-        // if the error happened after ngrok.forward() resolved.
-        try { if (tunnelListener) await tunnelListener.close(); } catch {}
-        try { if (boundTunnel) boundTunnel.stop(true); } catch {}
-        tunnelListener = null;
+      // Shared startTunnel helper: binds the tunnel listener, opens ngrok,
+      // and on any failure tears down BOTH ngrok and the Bun listener so we
+      // don't leak an ngrok session if the error happened after
+      // ngrok.forward() resolved.
+      const started = await startTunnel({
+        fetchHandler: handle.fetchTunnel,
+        authtoken,
+        consent: 'pair_agent=on (BROWSE_TUNNEL=1)',
+      });
+      if (!started.ok) {
+        console.error(`[browse] Failed to start tunnel: ${started.error.message}`);
       }
     }
   } else if (process.env.BROWSE_TUNNEL_LOCAL_ONLY === '1') {

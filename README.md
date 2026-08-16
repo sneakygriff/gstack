@@ -48,7 +48,7 @@ Fork it. Improve it. Make it yours. And if you want to hate on free open source 
 
 Open Claude Code and paste this. Claude does the rest.
 
-> Install gstack: run **`git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup`** then add a "gstack" section to CLAUDE.md that says to use the /browse skill from gstack for all web browsing, never use mcp\_\_claude-in-chrome\_\_\* tools, and lists the available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /setup-gbrain, /retro, /investigate, /document-release, /document-generate, /codex, /cso, /autoplan, /plan-devex-review, /devex-review, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn. Then ask the user if they also want to add gstack to the current project so teammates get it.
+> Install gstack: run **`git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup`** then add a "gstack" section to CLAUDE.md that says to use the /browse skill from gstack for all web browsing, never use mcp\_\_claude-in-chrome\_\_\* tools, and lists the available skills: /office-hours, /plan-deliverables, /autobuilder-loop, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /setup-gbrain, /retro, /investigate, /document-release, /document-generate, /codex, /cso, /autoplan, /plan-devex-review, /devex-review, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn. Then ask the user if they also want to add gstack to the current project so teammates get it.
 
 ### Step 2: Team mode — auto-update for shared repos (recommended)
 
@@ -179,6 +179,8 @@ Each skill feeds into the next. `/office-hours` writes a design doc that `/plan-
 | Skill | Your specialist | What they do |
 |-------|----------------|--------------|
 | `/office-hours` | **YC Office Hours** | Start here. Six forcing questions that reframe your product before you write code. Pushes back on your framing, challenges premises, generates implementation alternatives. Design doc feeds into every downstream skill. |
+| `/plan-deliverables` | **Planner** | Author per-milestone acceptance criteria, each paired with a validating test (the deliverable), and bake them into the plan. |
+| `/autobuilder-loop` | **Build Loop** | Drive an already-approved plan, spec, or backlog to completion unattended — model-routed subagents per milestone, review gates, Docker verification. |
 | `/plan-ceo-review` | **CEO / Founder** | Rethink the problem. Find the 10-star product hiding inside the request. Four modes: Expansion, Selective Expansion, Hold Scope, Reduction. |
 | `/plan-eng-review` | **Eng Manager** | Lock in architecture, data flow, diagrams, edge cases, and tests. Forces hidden assumptions into the open. |
 | `/plan-design-review` | **Senior Designer** | Rates each design dimension 0-10, explains what a 10 looks like, then edits the plan to get there. AI Slop detection. Interactive — one AskUserQuestion per design choice. |
@@ -235,7 +237,7 @@ Each skill feeds into the next. `/office-hours` writes a design doc that `/plan-
 | `/ios-qa` | **iOS Live-Device QA (v1.43.0.0+)** — drive a real iPhone over USB CoreDevice via an embedded `StateServer` in the app. Read Swift source, codegen typed `@Observable` accessors, run the agent loop. Optional `--tailnet` flag exposes the device to OpenClaw or any HTTP-capable agent on your Tailscale tailnet so remote agents can run iOS QA without ever touching the hardware. Capability-tier allowlist (observe/interact/mutate/restore), per-device session lock, audit log. |
 | `/ios-fix`, `/ios-design-review`, `/ios-clean`, `/ios-sync` | iOS bug-fix loop, designer's-eye HIG audit, debug-bridge cleanup, and accessor resync. See `docs/skills.md`. End-to-end walkthrough: [docs/howto-ios-testing-with-gstack.md](docs/howto-ios-testing-with-gstack.md). |
 
-### New binaries (v0.19)
+### Standalone binaries
 
 Beyond the slash-command skills, gstack ships standalone CLIs for workflows that don't belong inside a session:
 
@@ -243,6 +245,8 @@ Beyond the slash-command skills, gstack ships standalone CLIs for workflows that
 |---------|-------------|
 | `gstack-model-benchmark` | **Cross-model benchmark** — run the same prompt through Claude, GPT (via Codex CLI), and Gemini; compare latency, tokens, cost, and (optionally) LLM-judge quality score. Auth detected per provider, unavailable providers skip cleanly. Output as table, JSON, or markdown. `--dry-run` validates flags + auth without spending API calls. |
 | `gstack-taste-update` | **Design taste learning** — writes approvals and rejections from `/design-shotgun` into a persistent per-project taste profile. Decays 5%/week. Feeds back into future variant generation so the system learns what you actually pick. |
+| `gstack-egress` | **Egress receipt auditor** — every gstack-initiated off-machine send writes a tamper-evident, hash-chained receipt to `~/.gstack/security/egress.jsonl` before the send. `list` shows what gstack attempted to send and to which host, `grants` shows the standing consent settings plus the exact command that revokes each, `verify` recomputes the hash chain and exits 3 on tamper. |
+| `gstack-context-bill` | **Token bill-of-materials** — read-only, offline audit of what an installed skills tree costs in tokens: always-on frontmatter every session pays vs per-invocation SKILL.md + forced references. `--diff` compares two trees, `--budget` enforces a ceiling, `--exact` opts into Anthropic `count_tokens` (sends file text off-machine; writes an egress receipt first, degrades to the offline estimate if the receipt can't be written). |
 | `gstack-ios-qa-daemon` | **iOS QA daemon** — Mac-side broker between an agent and a connected iPhone over USB CoreDevice. Loopback by default; `--tailnet` opens a Tailscale-facing listener with identity-gated capability tiers. Single-instance via flock on `~/.gstack/ios-qa-daemon.pid`. See [docs/howto-ios-testing-with-gstack.md](docs/howto-ios-testing-with-gstack.md). |
 | `gstack-ios-qa-mint` | **iOS allowlist manager** — owner-grant CLI for the tailnet allowlist. `grant`/`revoke`/`list` against `~/.gstack/ios-qa-allowlist.json` (mode 0600). Remote agents never auto-allowlist; this is the explicit-intent path. |
 | `gstack-ios-qa-regen` | **iOS bridge regenerator** — deterministically installs the canonical DebugBridge package, generates typed state accessors, and records the installed gstack version. Safe to rerun after source changes or upgrades. |
@@ -418,7 +422,7 @@ The skill asks once per repo. The decision is sticky across worktrees and branch
 **GStack memory sync (different feature, same private-repo infra).** Optionally pushes your gstack state (learnings, CEO plans, design docs, retros, developer profile) to a private git repo so your memory follows you across machines, with a one-time privacy prompt (everything allowlisted / artifacts only / off) and a defense-in-depth secret scanner that blocks AWS keys, tokens, PEM blocks, and JWTs before they leave your machine.
 
 ```bash
-gstack-brain-init
+gstack-artifacts-init
 ```
 
 **Running gstack in Conductor?** Conductor explicitly strips `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from every workspace's process env, so paid evals and gbrain embeddings won't work out of the box. Set `GSTACK_ANTHROPIC_API_KEY` and `GSTACK_OPENAI_API_KEY` in Conductor's workspace env config instead — gstack's TS entry points promote them to canonical names at runtime. Full details and the contributor checklist for adding the import to new entry points: [Conductor + GSTACK_* env vars](USING_GBRAIN_WITH_GSTACK.md#conductor--gstack_-env-vars).
@@ -441,6 +445,25 @@ Other references: [docs/gbrain-sync.md](docs/gbrain-sync.md) (sync-specific guid
 | [Contributing](CONTRIBUTING.md) | Dev setup, testing, contributor mode, and dev mode |
 | [Changelog](CHANGELOG.md) | What's new in every version |
 
+## Token cost & small repos
+
+Every skill invocation loads its `SKILL.md` plus a shared preamble. Since the
+v1.60 carve, the always-loaded part averages roughly 25-45 KB per skill (~6-11k
+tokens); onboarding prompts, the full AskUserQuestion spec, and other
+conditional guidance live in shared `preamble/sections/` files that load only
+when actually needed. `/autoplan` loads each review skill at the start of its
+own phase, so skipped phases cost nothing.
+
+This overhead is **fixed per invocation** — it does not scale down with your
+codebase. On a large project it amortizes to noise; on a very small repo (a few
+hundred lines) a heavy skill like `/review` can still read more instruction
+text than source code. For small or throwaway projects, prefer the lighter
+skills (`/investigate`, `/qa-only`, `/context-save`) over the full pipelines
+(`/autoplan`, `/ship`), or just use your agent directly and reach for gstack
+when the loop — plan, review, ship — is worth the structure. Power users can
+additionally rebuild with `bun run gen:skill-docs --explain-level=terse` to
+strip the style-guidance sections from the generated files.
+
 ## Privacy & Telemetry
 
 gstack includes **opt-in** usage telemetry to help improve the project. Here's exactly what happens:
@@ -450,6 +473,7 @@ gstack includes **opt-in** usage telemetry to help improve the project. Here's e
 - **What's sent (if you opt in):** skill name, duration, success/fail, gstack version, OS. That's it.
 - **What's never sent:** code, file paths, repo names, branch names, prompts, or any user-generated content.
 - **Change anytime:** `gstack-config set telemetry off` disables everything instantly.
+- **Every off-machine send is receipted.** Any gstack-initiated network send — telemetry included — writes a hash-chained, tamper-evident receipt to `~/.gstack/security/egress.jsonl` before the send; sensitive sinks refuse to send at all if the receipt can't be written. Audit with `gstack-egress list`, verify the chain with `gstack-egress verify` (exit 3 on tamper), see the standing consent settings with `gstack-egress grants`. The ledger records attempted sends so accidents are auditable — it's an audit trail, not a network firewall.
 
 Data is stored in [Supabase](https://supabase.com) (open source Firebase alternative). The schema is in [`supabase/migrations/`](supabase/migrations/) — you can verify exactly what's collected. The Supabase publishable key in the repo is a public key (like a Firebase API key) — row-level security policies deny all direct access. Telemetry flows through validated edge functions that enforce schema checks, event type allowlists, and field length limits.
 
@@ -478,7 +502,7 @@ On Windows without Developer Mode (MSYS2 / Git Bash), `setup` falls back to file
 ```
 ## gstack
 Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__* tools.
-Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review,
+Available skills: /office-hours, /plan-deliverables, /autobuilder-loop, /plan-ceo-review, /plan-eng-review, /plan-design-review,
 /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy,
 /canary, /benchmark, /browse, /open-gstack-browser, /qa, /qa-only, /design-review,
 /setup-browser-cookies, /setup-deploy, /setup-gbrain, /sync-gbrain, /retro, /investigate,

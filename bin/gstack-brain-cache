@@ -32,6 +32,7 @@ import {
   SALIENCE_DEFAULT_ALLOWLIST,
   type BrainCacheEntity,
 } from '../scripts/brain-cache-spec';
+import { datamark } from '../lib/gstack-decision';
 
 // ──────────────────────────────────────────────────────────────────────────
 // Paths + meta
@@ -501,18 +502,100 @@ function fetchGoals(projectSlug: string | null): string | null {
   const goals = result.pages.filter((p) => p.slug?.startsWith(`gstack/goal/${projectSlug}/`));
   if (goals.length === 0) {
     // Empty digest is valid (just header + 'no active goals' line)
-    return `# Active goals (project: ${projectSlug})\n\n_No active goals recorded yet._\n`;
+    return `# Active goals (project: ${datamark(projectSlug)})\n\n_No active goals recorded yet._\n`;
   }
-  const lines = goals.map((g) => `- [[${g.slug}]] — ${g.title || '(untitled)'}`);
-  return `# Active goals (project: ${projectSlug})\n\n${lines.join('\n')}\n`;
+  // datamark: title is free text from a gbrain-served page, rendered into an
+  // agent-consumed digest (same render-boundary contract as fetchRecentDecisions).
+  const lines = goals.map((g) => `- [[${g.slug}]] — ${datamark(g.title || '(untitled)')}`);
+  return `# Active goals (project: ${datamark(projectSlug)})\n\n${lines.join('\n')}\n`;
 }
 
 /**
- * recent-decisions: last 5 gstack/skill-run pages for this project, compressed
- * to one-line summaries.
+ * Headers for the recent-decisions digest. The entity has two unrelated backing
+ * sources and the fallback between them is silent, so the header names which one
+ * produced the content: a short list from the local ledger and a short list from
+ * gbrain skill-run pages otherwise look identical, and "nothing here" means
+ * different things for each (no decisions logged vs. no skill runs recorded).
+ * Slug is datamarked in both — it arrives from the CLI's --project flag.
+ */
+function ledgerDigestHeader(projectSlug: string): string {
+  return `# Recent decisions (project: ${datamark(projectSlug)}) — source: local decision ledger`;
+}
+
+function skillRunDigestHeader(projectSlug: string): string {
+  return `# Recent decisions (project: ${datamark(projectSlug)}) — source: gbrain skill-run pages`;
+}
+
+/**
+ * Local decisions-ledger source for the recent-decisions digest (F10 root-cause
+ * fix, analytics-revenue-train-hygiene-20260720).
+ *
+ * Every project already maintains a local, git-independent decisions ledger at
+ * `~/.gstack/projects/<slug>/decisions.active.json` (compacted from
+ * decisions.jsonl) — this IS what a human means by "recent decisions" for a
+ * project, and it requires no external service to read. Prefer it over the
+ * gbrain `gstack/skill-run` query below: on machines where gbrain was never
+ * installed/configured (no `gbrain` binary, no `~/.gbrain/config.json`), the
+ * skill-run path can NEVER produce content, while this local ledger always can.
+ *
+ * Returns null (not a fetch failure — just "nothing to show here") when the
+ * file is absent, unparseable, or has no `kind: "decide"` entries (the only
+ * kind that carries human-readable decision text; `kind: "supersede"` entries
+ * are structural links with nothing to render).
+ *
+ * The header names this source explicitly: the two sources answer different
+ * questions (project decisions vs. gstack skill-run history), so a consumer
+ * that can't tell them apart can't judge what the digest's silence means.
+ */
+export function fetchLocalDecisionsLedger(projectSlug: string, limit: number): string | null {
+  // Slug is CLI-controllable (--project); refuse separators so the join can't
+  // escape GSTACK_HOME/projects/ and read an arbitrary decisions.active.json.
+  if (/[/\\]|\.\./.test(projectSlug)) return null;
+  const path = join(GSTACK_HOME, 'projects', projectSlug, 'decisions.active.json');
+  if (!existsSync(path)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const decided = (parsed as Array<Record<string, unknown>>).filter(
+    (e) => e && e.kind === 'decide' && typeof e.decision === 'string',
+  );
+  if (decided.length === 0) return null;
+  decided.sort((a, b) => {
+    const ad = typeof a.date === 'string' ? Date.parse(a.date) : 0;
+    const bd = typeof b.date === 'string' ? Date.parse(b.date) : 0;
+    return bd - ad;
+  });
+  const lines = decided.slice(0, limit).map((e) => {
+    // datamark at the render boundary (gstack-decision.ts contract: snapshot
+    // reads must mark — write-time denylist alone doesn't cover old records)
+    const date = typeof e.date === 'string' ? datamark(e.date.slice(0, 10)) : 'unknown-date';
+    const scope = typeof e.scope === 'string' ? datamark(e.scope) : 'repo';
+    const text = datamark(String(e.decision)).replace(/\s+/g, ' ').trim();
+    return `- (${date}, ${scope}) ${text}`;
+  });
+  return `${ledgerDigestHeader(projectSlug)}\n\n${lines.join('\n')}\n`;
+}
+
+/**
+ * recent-decisions: prefers the project's local decisions ledger (see
+ * fetchLocalDecisionsLedger above); falls back to the last 5 gstack/skill-run
+ * pages for this project, compressed to one-line summaries. Which source won is
+ * stated in the digest header — the fallback is otherwise invisible downstream.
+ *
+ * Cache freshness for the ledger source does not rely on the TTL alone:
+ * bin/gstack-decision-log busts this entity after every write, so a decision
+ * logged now is visible to the next planning skill rather than up to a TTL later.
  */
 function fetchRecentDecisions(projectSlug: string | null): string | null {
   if (!projectSlug) return null;
+
+  const local = fetchLocalDecisionsLedger(projectSlug, 5);
+  if (local) return local;
+
   const result = execGbrainJson<{ pages?: Array<{ slug: string; title?: string }> }>([
     'list-pages',
     '--type', 'gstack/skill-run',
@@ -521,10 +604,29 @@ function fetchRecentDecisions(projectSlug: string | null): string | null {
     '--json',
   ]);
   if (!result?.pages) {
-    return `# Recent decisions (project: ${projectSlug})\n\n_No prior skill runs recorded._\n`;
+    // F10 bug fix: this branch used to return the hardcoded
+    // "_No prior skill runs recorded._" string here, which is indistinguishable
+    // from a genuine zero-rows result. That silently converted a gbrain-
+    // unreachable FAILURE into a "successful" cached digest — refreshEntity()
+    // would write it and stamp last_refresh, so the false negative survived
+    // every subsequent TTL cycle forever. Returning null instead lets cmdGet's
+    // existing missing/stale-fallback machinery report the true state, exactly
+    // like every sibling fetcher (fetchGoals, fetchSimplePage) already does on
+    // failure.
+    return null;
   }
-  const lines = result.pages.map((p) => `- ${p.title || p.slug}`);
-  return `# Recent decisions (project: ${projectSlug})\n\n${lines.join('\n')}\n`;
+  // A malformed payload ({pages: {}} etc.) must classify as failure, not crash
+  // refreshEntity mid-refresh — same honest-missing polarity as the F10 fix.
+  if (!Array.isArray(result.pages)) return null;
+  if (result.pages.length === 0) {
+    return `${skillRunDigestHeader(projectSlug)}\n\n_No prior skill runs recorded._\n`;
+  }
+  // datamark: title/slug are free text from a gbrain-served page, rendered into
+  // an agent-consumed digest (same render-boundary contract as datamark's other
+  // callers in this file — a gbrain-fallback page shouldn't get to masquerade
+  // as instructions when this digest lands in agent context).
+  const lines = result.pages.map((p) => `- ${datamark(p.title || p.slug)}`);
+  return `${skillRunDigestHeader(projectSlug)}\n\n${lines.join('\n')}\n`;
 }
 
 /**
@@ -576,7 +678,17 @@ function fetchSalience(projectSlug: string | null): string | null {
     '--limit', '10',
     '--json',
   ]);
-  if (!result?.pages) return `# Recent salience\n\n_No salient pages in last 14d._\n`;
+  // F10 bug fix (sibling of fetchRecentDecisions above): a gbrain-unreachable
+  // failure used to render the identical hardcoded "no salient pages" string
+  // as a genuine empty result, which refreshEntity() then cached as if it
+  // were verified truth. Unlike recent-decisions there is no project-local
+  // fallback for salience — it is specifically gbrain's emotional-weight-
+  // ranked *brain* pages, not project decision/work data, and conflating the
+  // two would defeat the D9 privacy allowlist's purpose. So on failure we
+  // return null and let the cache report 'missing' (same as product.md,
+  // goals.md, etc. already do on this machine) instead of asserting a claim
+  // we have no way to verify.
+  if (!result?.pages) return null;
 
   // D9 privacy gate: strip entries outside the allowlist BEFORE rendering.
   // Sensitive personal content (family, therapy, reflection) is never written
@@ -591,7 +703,9 @@ function fetchSalience(projectSlug: string | null): string | null {
       : `\n_No salient pages in last 14d._\n`;
     return `${header}\n${note}`;
   }
-  const lines = filtered.map((p) => `- [[${p.slug}]] — ${p.title || ''} (weight: ${p.emotional_weight?.toFixed(2) ?? 'n/a'})`);
+  // datamark: title is free text from a gbrain-served page, rendered into an
+  // agent-consumed digest (same render-boundary contract as fetchGoals/fetchRecentDecisions).
+  const lines = filtered.map((p) => `- [[${p.slug}]] — ${datamark(p.title || '')} (weight: ${p.emotional_weight?.toFixed(2) ?? 'n/a'})`);
   const footer = stripped > 0
     ? `\n\n_${stripped} private entries stripped by allowlist gate._`
     : '';
