@@ -8,8 +8,9 @@
  *   gstack-decision-log --redact <decision-id>
  *   gstack-decision-log --compact
  *
- * Event-sourced (lib/gstack-decision): every call appends an event and refreshes the
- * bounded active snapshot. NON-INTERACTIVE — never prompts (agents/skills call this;
+ * Event-sourced (lib/gstack-decision): every call appends an event, refreshes the
+ * bounded active snapshot, and busts the brain-cache `recent-decisions` digest that
+ * reads that snapshot. NON-INTERACTIVE — never prompts (agents/skills call this;
  * a prompt would hang them). Validation + injection + HIGH-secret rejection happen in
  * validateDecide; a rejected decision exits 1 with a message, nothing persisted.
  */
@@ -35,9 +36,22 @@ const slug = resolveSlug(`${HERE}/gstack-slug`);
 const paths = decisionPaths(slug);
 mkdirSync(dirname(paths.log), { recursive: true });
 
-function enqueue(): void {
-  // Fire-and-forget cross-machine sync (no-op when artifacts_sync is off).
+/**
+ * Post-write side effects. Both are fire-and-forget: a failing sync or cache bust
+ * must never fail a decision that is already durably on disk.
+ */
+function afterWrite(): void {
+  // Cross-machine sync (no-op when artifacts_sync is off).
   spawnSync(`${HERE}/gstack-brain-enqueue`, [`projects/${slug}/decisions.jsonl`], { stdio: "ignore" });
+  // The brain-cache `recent-decisions` digest is backed by this ledger and is
+  // otherwise only re-read on TTL expiry, so a just-logged decision would stay
+  // invisible to the planning skills for hours — and the stale digest would look
+  // exactly like a fresh one. Marking the entity stale makes the next `get`
+  // re-read the ledger.
+  spawnSync(`${HERE}/gstack-brain-cache`, ["invalidate", "recent-decisions", "--project", slug], {
+    stdio: "ignore",
+    timeout: 5000,
+  });
 }
 
 if (args.includes("--compact")) {
@@ -47,7 +61,7 @@ if (args.includes("--compact")) {
     process.exit(0);
   }
   console.log(`compacted: ${r.activeCount} active, ${r.archivedCount} archived, ${r.expungedCount} expunged`);
-  enqueue();
+  afterWrite();
   process.exit(0);
 }
 
@@ -58,7 +72,7 @@ if (supersedeId || redactId) {
   const targetId = (supersedeId || redactId) as string;
   appendEvent(paths, makeRefEvent(kind, targetId, { source: "agent" }));
   rebuildSnapshot(paths);
-  enqueue();
+  afterWrite();
   console.log(`${kind}: ${targetId}`);
   process.exit(0);
 }
@@ -85,5 +99,5 @@ if (!res.ok) {
 }
 appendEvent(paths, res.event);
 rebuildSnapshot(paths);
-enqueue();
+afterWrite();
 console.log(res.event.id);

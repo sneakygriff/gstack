@@ -2,13 +2,16 @@
  * fetchLocalDecisionsLedger regression tests (cross-model forum findings,
  * 2026-08-15 restoration review).
  *
- * Pins three contracts:
+ * Pins four contracts:
  *   - datamark() runs at the render boundary (gstack-decision.ts documents
  *     snapshot reads as datamark-required; write-time hasInjection is only a
  *     denylist and doesn't cover hand-edited/synced/pre-pattern records).
  *   - A CLI-controllable slug cannot traverse out of GSTACK_HOME/projects/.
  *   - Absent/corrupt/decide-less ledgers return null (fall through to gbrain),
  *     never a fabricated digest.
+ *   - The header names the source. The ledger and the gbrain skill-run fallback
+ *     answer different questions, so a digest that doesn't say which one it came
+ *     from lets a silent fallback pass for project decision history.
  *
  * Uses tmp GSTACK_HOME per-test, same harness as brain-cache-roundtrip.
  * Gate-tier, free, ~50ms.
@@ -56,6 +59,19 @@ describe('fetchLocalDecisionsLedger', () => {
     expect(digest).toContain('newer decision');
     expect(digest).not.toContain('older decision');
     expect(digest).toContain('(2026-08-10, repo)');
+  });
+
+  test('header names the local ledger as the source', async () => {
+    const mod = await importCache();
+    writeLedger('helsinki', [
+      { kind: 'decide', decision: 'ship it', date: '2026-08-10T10:00:00Z', scope: 'repo' },
+    ]);
+    const digest = mod.fetchLocalDecisionsLedger('helsinki', 5)!;
+    expect(digest.split('\n')[0]).toBe(
+      '# Recent decisions (project: helsinki) — source: local decision ledger',
+    );
+    // The gbrain fallback must be distinguishable, not just differently worded.
+    expect(digest).not.toContain('skill-run');
   });
 
   test('datamarks decision text at the render boundary', async () => {
