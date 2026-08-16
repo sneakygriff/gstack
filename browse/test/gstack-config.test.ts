@@ -206,6 +206,38 @@ describe('gstack-config', () => {
     expect(run(['get', 'codex_reviews']).stdout).toBe('disabled');
   });
 
+  // ─── kill-switch alias normalization (codex_reviews / grok_reviews) ──
+  // Recipes gate on the explicit negative (autobuilder-loop SKILL.md.tmpl), so
+  // off/false/0 must persist as the literal "disabled", not pass through
+  // unrecognized (which would silently read back as enabled).
+  test('set codex_reviews off normalizes to disabled', () => {
+    const { exitCode, stdout } = run(['set', 'codex_reviews', 'off']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('disabled');
+    expect(run(['get', 'codex_reviews']).stdout).toBe('disabled');
+  });
+
+  test('set grok_reviews true normalizes to enabled', () => {
+    const { exitCode, stdout } = run(['set', 'grok_reviews', 'true']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('enabled');
+    expect(run(['get', 'grok_reviews']).stdout).toBe('enabled');
+  });
+
+  test('set codex_reviews bogus is rejected and existing value is unchanged', () => {
+    run(['set', 'codex_reviews', 'disabled']);
+    const { exitCode, stderr } = run(['set', 'codex_reviews', 'bogus']);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain('not recognized');
+    expect(run(['get', 'codex_reviews']).stdout).toBe('disabled');
+  });
+
+  test('get grok_reviews unset returns enabled', () => {
+    const { exitCode, stdout } = run(['get', 'grok_reviews']);
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe('enabled');
+  });
+
   test('header written only once, not duplicated on second set', () => {
     run(['set', 'foo', 'bar']);
     run(['set', 'baz', 'qux']);
