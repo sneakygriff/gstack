@@ -155,7 +155,10 @@ If the user invokes a skill in plan mode, the skill takes precedence over generi
 
 Heavy preamble guidance is carved into shared files under `~/.claude/skills/gstack/preamble/sections/` (one copy
 for the whole skill suite). Read a file IN FULL the moment its trigger applies —
-never act on its topic from memory.
+never act on its topic from memory. If that base doesn't exist on this machine
+(vendored or non-standard install), resolve the same filename relative to this
+skill file's own installed location instead — `../../preamble/sections/` from
+a skill dir, or the gstack repo root's `preamble/sections/`.
 
 | When | Read |
 |------|------|
