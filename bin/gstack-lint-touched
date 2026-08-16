@@ -58,11 +58,23 @@ LINT_CMD=()
 if { [ -f "$ROOT/biome.json" ] || [ -f "$ROOT/biome.jsonc" ]; } && [ -x "$ROOT/node_modules/.bin/biome" ]; then
   LINT_KIND="biome"
   LINT_CMD=("$ROOT/node_modules/.bin/biome" "check")
-elif ls "$ROOT"/.eslintrc* "$ROOT"/eslint.config.* >/dev/null 2>&1 && [ -x "$ROOT/node_modules/.bin/eslint" ]; then
-  LINT_KIND="eslint"
-  LINT_CMD=("$ROOT/node_modules/.bin/eslint")   # check-only is eslint's default; --fix is never passed here
 else
-  exit 0
+  # ls with both globs in one call fails non-zero the instant EITHER family has
+  # no match (the unmatched glob passes through literally and ls errors on it) —
+  # a flat-config-only repo (eslint.config.js, no .eslintrc*, the modern
+  # majority) silently fell through to the `else: exit 0` below and never got
+  # linted. Detect each family independently instead; bash-3.2-safe, no
+  # nullglob assumption.
+  _has_eslint_cfg=0
+  for f in "$ROOT"/.eslintrc* "$ROOT"/eslint.config.*; do
+    [ -e "$f" ] && { _has_eslint_cfg=1; break; }
+  done
+  if [ "$_has_eslint_cfg" -eq 1 ] && [ -x "$ROOT/node_modules/.bin/eslint" ]; then
+    LINT_KIND="eslint"
+    LINT_CMD=("$ROOT/node_modules/.bin/eslint")   # check-only is eslint's default; --fix is never passed here
+  else
+    exit 0
+  fi
 fi
 
 # Hard time bound: type-aware eslint configs can take 10-30s+ per file; the

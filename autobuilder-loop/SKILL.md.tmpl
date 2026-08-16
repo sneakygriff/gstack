@@ -252,6 +252,21 @@ follow-ups (see the follow-ups contract in Quick reference). Ship-unit boundarie
 CEILING: the runtime meter may end a unit early (move a ship boundary forward), but never
 skips a planned checkpoint or merges two units.
 
+**Worktree preflight (ONCE, here at kickoff — before any milestone work starts).** The
+milestone-commit sites below run unconditional `git add -A`. Started in a worktree carrying
+unrelated modified/untracked files — secrets, a stray `.env`, someone else's WIP — those ride
+along into the first milestone commit, and the loop's own later review/ship steps can then
+publish them. This is the one point the user is present to catch it; the loop runs unattended
+after this. Run `git status --porcelain`; if non-empty, STOP and AskUserQuestion ONCE
+(decision-brief format from the preamble):
+- **A) Stash unrelated changes (recommended)** — a subagent runs
+  `git stash push -u -m "autobuilder-preflight"`; note in the run report to `git stash pop`
+  after the loop finishes.
+- **B) Proceed and include them in milestone commits** — explicit user consent to fold the
+  existing dirty state into this run's commits.
+- **C) Abort** — surface `BLOCKED`.
+A clean `git status --porcelain` needs no question — proceed straight to step 1.
+
 ### 1. Build the next milestone
 
 **1.0. Re-parse from disk.** Each iteration, dispatch the **Haiku (or Sonnet-low)** parse subagent to
@@ -297,7 +312,10 @@ milestone the plan explicitly labels non-code (docs-only) — judged from the pl
 decided on the fly. **First, commit the milestone's work**: dispatch the step-e marker subagent
 to `git add -A && git commit` a WIP commit on the feature branch — every reviewer below diffs
 `<base>...HEAD`, which sees ONLY committed state; uncommitted or untracked work would sail
-through the gate unreviewed. Then run every review in the gate — eng-review, /review, and the
+through the gate unreviewed. The Worktree preflight gate (step 0) is what makes `-A` safe here:
+starting from a clean `git status --porcelain` means everything `-A` now picks up was produced
+by this loop's own tasks — the general rule against a blind `git add -A` at a checkpoint still
+holds everywhere outside this loop. Then run every review in the gate — eng-review, /review, and the
 Codex + Grok adversarial forum — then dispatch model-routed fix subagents until CLEAN (CLEAN =
 zero `[P1]`; surviving `[P2]`s are recorded as follow-ups, per the Gate verdict). Fix commits
 land the same way before any re-review.

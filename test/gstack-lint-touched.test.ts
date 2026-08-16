@@ -104,6 +104,25 @@ describe('gstack-lint-touched (fail-open contract)', () => {
     expect(r.stderr).toContain('a.ts');
   });
 
+  test('flat config only (eslint.config.js, no .eslintrc*): still runs the linter', () => {
+    // Regression: `ls "$ROOT"/.eslintrc* "$ROOT"/eslint.config.*` fails non-zero the
+    // instant EITHER glob has no match (the unmatched one passes through literally
+    // and ls errors on it), so a repo with only flat config used to silently skip
+    // linting — the majority case for modern eslint setups.
+    const dir = repo();
+    writeFileSync(join(dir, 'eslint.config.js'), 'export default [];\n');
+    const binDir = join(dir, 'node_modules', '.bin');
+    mkdirSync(binDir, { recursive: true });
+    const fakeEslint = join(binDir, 'eslint');
+    writeFileSync(fakeEslint, '#!/bin/sh\necho "lint problem here"\nexit 1\n');
+    chmodSync(fakeEslint, 0o755);
+    const f = join(dir, 'a.ts');
+    writeFileSync(f, 'const x = 1\n');
+    const r = hook({ tool_input: { file_path: f } });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('a.ts');
+  });
+
   test('tool crash: local eslint exits 2 → hook exits 0 (fail-open, not treated as findings)', () => {
     const dir = repo();
     writeFileSync(join(dir, '.eslintrc.json'), '{}\n');
