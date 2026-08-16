@@ -23,6 +23,14 @@ set -u
 _BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 _GSTACK_HOME="${GSTACK_HOME:-$HOME/.gstack}"
 
+# Egress receipt helpers (_receipted_git): receipt-before-send, fail-closed.
+# This script performs the same daily GSTACK_HOME `git fetch` that used to
+# be rendered as skill PROSE (scripts/resolvers/preamble/generate-brain-sync-block.ts,
+# still true for non-Claude hosts) — agent-typed instructions are exempt,
+# but this now runs automatically as a real binary, so it is a genuine sink
+# and shares brain-sync's own sink name + polarity (it's the same operation).
+. "$_BIN_DIR/gstack-egress-lib.sh"
+
 # Prefer the v1.27.0.0 artifacts file; fall back to brain file for users
 # upgrading mid-stream before the migration script runs.
 if [ -f "$HOME/.gstack-artifacts-remote.txt" ]; then
@@ -32,6 +40,14 @@ else
 fi
 _BRAIN_SYNC_BIN="$_BIN_DIR/gstack-brain-sync"
 _BRAIN_CONFIG_BIN="$_BIN_DIR/gstack-config"
+
+# Host for the egress receipt (mirrors bin/gstack-brain-sync's remote_host).
+_artifacts_preamble_remote_host() {
+  local url host
+  url=$(git -C "$_GSTACK_HOME" remote get-url origin 2>/dev/null || echo "")
+  host="${url#*://}"; host="${host#*@}"; host="${host%%[/:]*}"
+  echo "${host:-unknown}"
+}
 
 # GBrain context-load hint: teach the agent to use gbrain when it's available.
 # Per-worktree pin via .gbrain-source in the git toplevel (kubectl-style) so
@@ -100,7 +116,11 @@ if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
     [ "$_BRAIN_AGE" -lt 86400 ] && _BRAIN_DO_PULL=0
   fi
   if [ "$_BRAIN_DO_PULL" = "1" ]; then
-    ( cd "$_GSTACK_HOME" && git fetch origin >/dev/null 2>&1 && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
+    _PREAMBLE_PULL_HOST=$(_artifacts_preamble_remote_host)
+    if GSTACK_HOME="$_GSTACK_HOME" _receipted_git closed brain-sync "$_PREAMBLE_PULL_HOST" curated-memory-git-fetch "artifacts_sync_mode!=off" \
+        bash -c 'git -C "$1" fetch origin >/dev/null 2>&1' _ "$_GSTACK_HOME"; then
+      git -C "$_GSTACK_HOME" merge --ff-only "origin/$(git -C "$_GSTACK_HOME" rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 || true
+    fi
     echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
   fi
   "$_BRAIN_SYNC_BIN" --once 2>/dev/null || true
