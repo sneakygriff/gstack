@@ -80,6 +80,10 @@ else
 fi
 _BRAIN_SYNC_BIN="${quoteSafePath(ctx.paths.binDir)}/gstack-brain-sync"
 _BRAIN_CONFIG_BIN="${quoteSafePath(ctx.paths.binDir)}/gstack-config"
+# Egress receipt lib (host parity with the Claude twin bin/gstack-artifacts-preamble):
+# source it when present so the daily fetch below is receipt-wrapped like the twin.
+_EGRESS_LIB="$(dirname "$_BRAIN_CONFIG_BIN")/gstack-egress-lib.sh"
+[ -f "$_EGRESS_LIB" ] && . "$_EGRESS_LIB"
 
 # /sync-gbrain context-load: teach the agent to use gbrain when it's available.
 # Per-worktree pin: post-spike redesign uses kubectl-style \`.gbrain-source\` in the
@@ -110,6 +114,10 @@ if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
 fi
 
 _BRAIN_SYNC_MODE=$("$_BRAIN_CONFIG_BIN" get artifacts_sync_mode 2>/dev/null || echo off)
+# Allowlist before this synced-config value is interpolated into the agent-consumed
+# ARTIFACTS_SYNC status line below — a crafted mode could otherwise forge a control
+# line (siblings last-push/queue/url/host are already sanitized) (#48 forum F5).
+case "$_BRAIN_SYNC_MODE" in off|artifacts-only|full) ;; *) _BRAIN_SYNC_MODE=off ;; esac
 
 # Detect remote-MCP mode (Path 4 of /setup-gbrain). Local artifacts sync is
 # a no-op in remote mode; the brain server pulls from GitHub/GitLab on its
@@ -150,8 +158,21 @@ if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
     [ "$_BRAIN_AGE" -lt 86400 ] && _BRAIN_DO_PULL=0
   fi
   if [ "$_BRAIN_DO_PULL" = "1" ]; then
-    ( cd "$_GSTACK_HOME" && git fetch origin >/dev/null 2>&1 && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
-    echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+    # Host parity with the twin: receipt-wrap the fetch (curated-memory-git-fetch)
+    # when the egress lib is loaded; either way stamp the 24h cooldown ONLY after a
+    # SUCCESSFUL fetch, so a failed fetch retries at the next skill start instead of
+    # being silenced for 24h by a stamp that reflects no real sync (#48 forum F4).
+    _PULL_URL=$(git -C "$_GSTACK_HOME" remote get-url origin 2>/dev/null || echo "")
+    _PULL_HOST="\${_PULL_URL#*://}"; _PULL_HOST="\${_PULL_HOST#*@}"; _PULL_HOST="\${_PULL_HOST%%[/:]*}"; _PULL_HOST="\${_PULL_HOST:-unknown}"
+    if command -v _receipted_git >/dev/null 2>&1; then
+      if GSTACK_HOME="$_GSTACK_HOME" _receipted_git closed brain-sync "$_PULL_HOST" curated-memory-git-fetch "artifacts_sync_mode!=off" bash -c 'git -C "$1" fetch origin >/dev/null 2>&1' _ "$_GSTACK_HOME"; then
+        git -C "$_GSTACK_HOME" merge --ff-only "origin/$(git -C "$_GSTACK_HOME" rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 || true
+        echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+      fi
+    elif ( cd "$_GSTACK_HOME" && git fetch origin >/dev/null 2>&1 ); then
+      ( cd "$_GSTACK_HOME" && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
+      echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+    fi
   fi
   "$_BRAIN_SYNC_BIN" --once 2>/dev/null || true
 fi

@@ -465,6 +465,10 @@ else
 fi
 _BRAIN_SYNC_BIN="$GSTACK_BIN/gstack-brain-sync"
 _BRAIN_CONFIG_BIN="$GSTACK_BIN/gstack-config"
+# Egress receipt lib (host parity with the Claude twin bin/gstack-artifacts-preamble):
+# source it when present so the daily fetch below is receipt-wrapped like the twin.
+_EGRESS_LIB="$(dirname "$_BRAIN_CONFIG_BIN")/gstack-egress-lib.sh"
+[ -f "$_EGRESS_LIB" ] && . "$_EGRESS_LIB"
 
 # /sync-gbrain context-load: teach the agent to use gbrain when it's available.
 # Per-worktree pin: post-spike redesign uses kubectl-style `.gbrain-source` in the
@@ -495,6 +499,10 @@ if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
 fi
 
 _BRAIN_SYNC_MODE=$("$_BRAIN_CONFIG_BIN" get artifacts_sync_mode 2>/dev/null || echo off)
+# Allowlist before this synced-config value is interpolated into the agent-consumed
+# ARTIFACTS_SYNC status line below — a crafted mode could otherwise forge a control
+# line (siblings last-push/queue/url/host are already sanitized) (#48 forum F5).
+case "$_BRAIN_SYNC_MODE" in off|artifacts-only|full) ;; *) _BRAIN_SYNC_MODE=off ;; esac
 
 # Detect remote-MCP mode (Path 4 of /setup-gbrain). Local artifacts sync is
 # a no-op in remote mode; the brain server pulls from GitHub/GitLab on its
@@ -535,8 +543,21 @@ if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
     [ "$_BRAIN_AGE" -lt 86400 ] && _BRAIN_DO_PULL=0
   fi
   if [ "$_BRAIN_DO_PULL" = "1" ]; then
-    ( cd "$_GSTACK_HOME" && git fetch origin >/dev/null 2>&1 && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
-    echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+    # Host parity with the twin: receipt-wrap the fetch (curated-memory-git-fetch)
+    # when the egress lib is loaded; either way stamp the 24h cooldown ONLY after a
+    # SUCCESSFUL fetch, so a failed fetch retries at the next skill start instead of
+    # being silenced for 24h by a stamp that reflects no real sync (#48 forum F4).
+    _PULL_URL=$(git -C "$_GSTACK_HOME" remote get-url origin 2>/dev/null || echo "")
+    _PULL_HOST="${_PULL_URL#*://}"; _PULL_HOST="${_PULL_HOST#*@}"; _PULL_HOST="${_PULL_HOST%%[/:]*}"; _PULL_HOST="${_PULL_HOST:-unknown}"
+    if command -v _receipted_git >/dev/null 2>&1; then
+      if GSTACK_HOME="$_GSTACK_HOME" _receipted_git closed brain-sync "$_PULL_HOST" curated-memory-git-fetch "artifacts_sync_mode!=off" bash -c 'git -C "$1" fetch origin >/dev/null 2>&1' _ "$_GSTACK_HOME"; then
+        git -C "$_GSTACK_HOME" merge --ff-only "origin/$(git -C "$_GSTACK_HOME" rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 || true
+        echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+      fi
+    elif ( cd "$_GSTACK_HOME" && git fetch origin >/dev/null 2>&1 ); then
+      ( cd "$_GSTACK_HOME" && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
+      echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+    fi
   fi
   "$_BRAIN_SYNC_BIN" --once 2>/dev/null || true
 fi
@@ -1303,36 +1324,38 @@ run_tool() { _b="$1"; _pkg="$2"; shift 2; \
 
 # Launch only the jobs this project actually has, and drop the others from the join list
 # below too: a job in that list with no status file is read as a failure, never as a skip.
-rm -f /tmp/ship_rc_*.txt
+# Per-run temp dir: a shared /tmp path let one /ship run's PASS clobber another's
+# FAIL under concurrent ships (fail-open). mktemp -d isolates each run.
+RC_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ship-gate.XXXXXX"); echo "gate temp: $RC_DIR"
 # tests + vitest stay wrapped in the evidence ledger (transparent, exit code passes
 # through) so Step 16 can cite the record; the rc file just mirrors that exit for the join.
-{ $GSTACK_ROOT/bin/gstack-evidence run --label tests -- 'bin/test-lane 2>&1'; echo $? >/tmp/ship_rc_tests.txt; } &
-{ $GSTACK_ROOT/bin/gstack-evidence run --label vitest -- 'npm run test 2>&1'; echo $? >/tmp/ship_rc_vitest.txt; } &
+{ $GSTACK_ROOT/bin/gstack-evidence run --label tests -- 'bin/test-lane 2>&1'; echo $? >"$RC_DIR/rc_tests"; } &
+{ $GSTACK_ROOT/bin/gstack-evidence run --label vitest -- 'npm run test 2>&1'; echo $? >"$RC_DIR/rc_vitest"; } &
 # Lint — first match wins: the project's own script, else a detected tool, else skip.
 { if has_script lint; then run_script lint ; \
   elif [ -f biome.json ] || [ -f biome.jsonc ]; then run_tool biome @biomejs/biome check . ; \
   elif { _ecfg=0; for _f in .eslintrc* eslint.config.*; do [ -e "$_f" ] && { _ecfg=1; break; }; done; [ "$_ecfg" -eq 1 ]; }; then run_tool eslint eslint . ; \
-  else echo "LINT: no lint script/config detected — skipped"; fi; echo $? >/tmp/ship_rc_lint.txt; } 2>&1 | tee /tmp/ship_lint.txt &
+  else echo "LINT: no lint script/config detected — skipped"; fi; echo $? >"$RC_DIR/rc_lint"; } 2>&1 | tee "$RC_DIR/lint.txt" &
 # (@biomejs/biome, never bare "biome" — the bare name is an unrelated squatted
 # package that exits 0 on anything, turning the lint gate into a silent false-clean.)
 # Typecheck — project's own script ("typecheck" or "type-check"), else tsc when a tsconfig exists, else skip.
 { if has_script typecheck; then run_script typecheck ; \
   elif has_script type-check; then run_script type-check ; \
   elif [ -f tsconfig.json ]; then run_tool tsc typescript --noEmit ; \
-  else echo "TYPECHECK: no typecheck script/tsconfig — skipped"; fi; echo $? >/tmp/ship_rc_typecheck.txt; } 2>&1 | tee /tmp/ship_typecheck.txt &
+  else echo "TYPECHECK: no typecheck script/tsconfig — skipped"; fi; echo $? >"$RC_DIR/rc_typecheck"; } 2>&1 | tee "$RC_DIR/typecheck.txt" &
 wait
 # Fail-closed join: tee'd output can read clean while the job exited nonzero (or died
 # before printing anything at all), so the gate is decided by exit codes, not by eyeballing.
 GATE=0
 for j in tests vitest lint typecheck; do
-  rc=$(cat "/tmp/ship_rc_$j.txt" 2>/dev/null)
+  rc=$(cat "$RC_DIR/rc_$j" 2>/dev/null)
   case "$rc" in
     0) echo "PASS $j" ;;
     "") echo "FAIL $j (no exit status — job died before reporting)"; GATE=1 ;;
     *) echo "FAIL $j (exit $rc)"; GATE=1 ;;
   esac
 done
-[ "$GATE" -eq 0 ] && echo "GATE: all four green" || echo "GATE: FAILED"
+if [ "$GATE" -eq 0 ]; then echo "GATE: all four green"; else echo "GATE: FAILED — logs in $RC_DIR"; exit 1; fi
 ```
 
 The join prints one PASS/FAIL line per job. Any FAIL — including a job that reported no
@@ -1340,8 +1363,8 @@ exit status — fails the gate; open that job's output file before anything else
 vitest are also recorded in the evidence ledger (`gstack-evidence: recorded label=...
 exit=... log=...` summary lines, each with a per-run log path and no shared /tmp
 collisions between concurrent ships) so Step 16 can cite them; lint and typecheck stream
-to `/tmp/ship_lint.txt` and `/tmp/ship_typecheck.txt`. Read the log/output files for
-counts and detail.
+to `$RC_DIR/lint.txt` and `$RC_DIR/typecheck.txt` (the gate prints `$RC_DIR` on its first
+line, and `exit 1`s on any FAIL). Read the log/output files for counts and detail.
 
 **If lint or typecheck fails:** fix in-branch findings now (or STOP if they can't be fixed
 cleanly). Never skip lint — a detected linter that errors is a gate failure, not a warning.

@@ -332,6 +332,19 @@ case "${1:-}" in
         exit 1
       fi
     fi
+    # Paid-call kill-switch safety (#48 forum F3): codex_reviews/grok_reviews
+    # recipes gate on the literal "disabled". set normalizes aliases, but a value
+    # hand-edited (or synced) into config.yaml as off/false/0 would otherwise read
+    # back verbatim and the caller — treating only "disabled" as off — would fire
+    # paid Codex/Grok calls. Normalize the same aliases on read.
+    case "$KEY" in
+      codex_reviews|grok_reviews)
+        case "$VALUE" in
+          off|false|0) VALUE="disabled" ;;
+          on|true|1)   VALUE="enabled" ;;
+        esac
+        ;;
+    esac
     printf '%s' "$VALUE"
     ;;
   has)

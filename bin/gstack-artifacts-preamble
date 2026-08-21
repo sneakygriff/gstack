@@ -87,6 +87,10 @@ if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
 fi
 
 _BRAIN_SYNC_MODE=$("$_BRAIN_CONFIG_BIN" get artifacts_sync_mode 2>/dev/null || echo off)
+# Allowlist before this synced-config value is interpolated into the agent-consumed
+# ARTIFACTS_SYNC status line below — a crafted mode could otherwise forge a control
+# line (siblings last-push/queue/url/host are already sanitized) (#48 forum F5).
+case "$_BRAIN_SYNC_MODE" in off|artifacts-only|full) ;; *) _BRAIN_SYNC_MODE=off ;; esac
 
 # Detect remote-MCP mode (Path 4 of /setup-gbrain). Local artifacts sync is a
 # no-op in remote mode; the brain server pulls from GitHub/GitLab on its own

@@ -92,7 +92,11 @@ describe('artifacts-preamble sync tripwire', () => {
     );
 
     const ts = read(TS);
-    const tsFetchIdx = ts.indexOf('git fetch origin');
+    // Both twins now route the daily fetch through the same receipted marker
+    // (#48 forum F4 gave the non-Claude generator host parity), so anchor on it
+    // rather than the raw `git fetch origin` — that literal now only appears in
+    // the egress-lib-absent fallback branch, which sits after the primary stamp.
+    const tsFetchIdx = ts.indexOf('_receipted_git closed brain-sync');
     const tsStampIdx = ts.indexOf('echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"');
     expect(tsFetchIdx, `${TS}: fetch attempt marker not found`).toBeGreaterThan(-1);
     expect(tsStampIdx, `${TS}: last-pull stamp write not found`).toBeGreaterThan(-1);
