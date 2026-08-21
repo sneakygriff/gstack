@@ -3,8 +3,9 @@ name: autoplan
 preamble-tier: 3
 version: 1.0.0
 description: |
-  Auto-review pipeline — reads the full CEO, design, eng, and DX review skills from disk
-  and runs them sequentially with auto-decisions using 6 decision principles. Surfaces
+  Auto-review pipeline — runs the full CEO, design, eng, and DX review skills
+  sequentially with auto-decisions using 6 decision principles, loading each
+  review skill at the start of its own phase. Surfaces
   taste decisions (close approaches, borderline scope, codex disagreements) at a final
   approval gate. One command, fully reviewed plan out.
   Use when asked to "auto review", "autoplan", "run all reviews", "review this plan
@@ -40,9 +41,9 @@ allowed-tools:
 
 One command. Rough plan in, fully reviewed plan out.
 
-/autoplan reads the full CEO, design, eng, and DX review skill files from disk and follows
-them at full depth — same rigor, same sections, same methodology as running each skill
-manually. The only difference: intermediate AskUserQuestion calls are auto-decided using
+/autoplan reads the full CEO, design, eng, and DX review skill files from disk — each at
+the start of its own phase — and follows them at full depth — same rigor, same sections,
+same methodology as running each skill manually. The only difference: intermediate AskUserQuestion calls are auto-decided using
 the 6 principles below. Taste decisions (where reasonable people could disagree) are
 surfaced at a final approval gate.
 
@@ -204,18 +205,24 @@ Then prepend a one-line HTML comment to the plan file:
   on top of) or if an AI agent is the primary user (OpenClaw actions, Claude Code skills,
   MCP servers).
 
-### Step 3: Load skill files from disk
+### Step 3: Review skill loading — lazy, one file per phase
 
-Read each file using the Read tool:
-- `~/.claude/skills/gstack/plan-ceo-review/SKILL.md`
-- `~/.claude/skills/gstack/plan-design-review/SKILL.md` (only if UI scope detected)
-- `~/.claude/skills/gstack/plan-eng-review/SKILL.md`
-- `~/.claude/skills/gstack/plan-devex-review/SKILL.md` (only if DX scope detected)
+Do NOT read any review skill file yet. Each phase below opens by reading its own
+skill file with the Read tool, at the moment that phase starts:
+- Phase 1 → `~/.claude/skills/gstack/plan-ceo-review/SKILL.md`
+- Phase 2 → `~/.claude/skills/gstack/plan-design-review/SKILL.md` (load only if UI scope detected; otherwise never read it)
+- Phase 3 → `~/.claude/skills/gstack/plan-eng-review/SKILL.md`
+- Phase 3.5 → `~/.claude/skills/gstack/plan-devex-review/SKILL.md` (load only if DX scope detected; otherwise never read it)
+
+Loading lazily keeps up to ~320 KB of review-skill text out of context until (and
+unless) its phase actually runs.
 
 **Section skip list — when following a loaded skill file, SKIP these sections
 (they are already handled by /autoplan):**
 - Preamble (run first)
 - Scope gate (the plan under review is already the target)
+- Preamble Section Index
+- Artifacts Sync (skill start)
 - AskUserQuestion Format
 - Completeness Principle — Boil the Ocean
 - Search Before Building
@@ -231,7 +238,7 @@ Read each file using the Read tool:
 Follow ONLY the review-specific methodology, sections, and required outputs.
 
 Output: "Here's what I'm working with: [plan summary]. UI scope: [yes/no]. DX scope: [yes/no].
-Loaded review skills from disk. Starting full review pipeline with auto-decisions."
+Review skills load lazily at each phase start. Starting full review pipeline with auto-decisions."
 
 ---
 
@@ -282,7 +289,8 @@ Claude subagent only — saves token spend on Codex prompts we can't use.
 
 ## Phase 1: CEO Review (Strategy & Scope)
 
-Follow plan-ceo-review/SKILL.md — all sections, full depth.
+**Load now:** Read `~/.claude/skills/gstack/plan-ceo-review/SKILL.md` with the Read tool.
+Follow it — all sections, full depth (minus the Phase 0 skip list).
 Override: every AskUserQuestion → auto-decide using the 6 principles.
 
 **Override rules:**
@@ -408,7 +416,11 @@ and the premise gate has been passed.
 
 ## Phase 2: Design Review (conditional — skip if no UI scope)
 
-Follow plan-design-review/SKILL.md — all 7 dimensions, full depth.
+**Skip condition:** If UI scope was NOT detected in Phase 0, skip this phase entirely —
+do NOT read the skill file. Log: "Phase 2 skipped — no UI scope detected."
+
+**Load now:** Read `~/.claude/skills/gstack/plan-design-review/SKILL.md` with the Read tool.
+Follow it — all 7 dimensions, full depth (minus the Phase 0 skip list).
 Override: every AskUserQuestion → auto-decide using the 6 principles.
 
 **Override rules:**
@@ -492,7 +504,8 @@ Do NOT begin Phase 3 until all Phase 2 outputs (if run) are written to the plan 
 
 ## Phase 3: Eng Review + Dual Voices
 
-Follow plan-eng-review/SKILL.md — all sections, full depth.
+**Load now:** Read `~/.claude/skills/gstack/plan-eng-review/SKILL.md` with the Read tool.
+Follow it — all sections, full depth (minus the Phase 0 skip list).
 Override: every AskUserQuestion → auto-decide using the 6 principles.
 
 **Override rules:**
@@ -603,11 +616,12 @@ Missing voice = N/A (not CONFIRMED). Single critical finding from one voice = fl
 
 ## Phase 3.5: DX Review (conditional — skip if no developer-facing scope)
 
-Follow plan-devex-review/SKILL.md — all 8 DX dimensions, full depth.
-Override: every AskUserQuestion → auto-decide using the 6 principles.
+**Skip condition:** If DX scope was NOT detected in Phase 0, skip this phase entirely —
+do NOT read the skill file. Log: "Phase 3.5 skipped — no developer-facing scope detected."
 
-**Skip condition:** If DX scope was NOT detected in Phase 0, skip this phase entirely.
-Log: "Phase 3.5 skipped — no developer-facing scope detected."
+**Load now:** Read `~/.claude/skills/gstack/plan-devex-review/SKILL.md` with the Read tool.
+Follow it — all 8 DX dimensions, full depth (minus the Phase 0 skip list).
+Override: every AskUserQuestion → auto-decide using the 6 principles.
 
 **Override rules:**
 - Mode selection: DX POLISH

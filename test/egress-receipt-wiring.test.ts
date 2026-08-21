@@ -17,7 +17,11 @@
  * sync block (scripts/resolvers/preamble/generate-brain-sync-block.ts)
  * renders a `git fetch` into skill PROSE that the agent executes — it is
  * agent-executed instructions, not a gstack binary, so it is covered by the
- * skill-prose exemption below rather than a receipt.
+ * skill-prose exemption below rather than a receipt. This still applies to
+ * non-Claude hosts; the Claude-host port of the same fetch now lives in the
+ * real binary bin/gstack-artifacts-preamble (#48 preamble carve) and IS
+ * wired below, in SHELL_SINKS, since a script that runs automatically is a
+ * genuine sink rather than agent-typed instructions.
  *
  * Pattern mirrors test/hermetic-wiring.test.ts: read source files as text,
  * assert invariants on their contents. Brittle by design — renaming a
@@ -94,6 +98,7 @@ const SHELL_SINKS = [
   'bin/gstack-artifacts-init',
   'bin/gstack-brain-restore',
   'bin/gstack-session-update',
+  'bin/gstack-artifacts-preamble',
 ];
 
 /** design files that talk to api.openai.com — all must use receiptedFetch. */

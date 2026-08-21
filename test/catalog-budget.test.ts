@@ -24,13 +24,16 @@ import { skillCensus } from './helpers/skill-census';
  *           line item, run parseFrontmatter() below and sum
  *           Buffer.byteLength(name) + Buffer.byteLength(description);
  *           token-equivalents = ceil(bytes / 4).
- *   result  53 authored skills = 4,371 bytes (1,093 token-equivalents);
- *           + root router alias 49 bytes = 4,420 bytes total
- *           = 1,105 token-equivalents (measured 2026-08-12)
- * Ceiling is 1,150 token-equivalents (4,600 bytes), so headroom is 180 bytes
+ *   result  55 authored skills = 4,762 bytes (1,191 token-equivalents);
+ *           + root router alias 49 bytes = 4,811 bytes total
+ *           = 1,203 token-equivalents (measured 2026-08-15, after restoring
+ *           /autobuilder-loop at 219 bytes and /plan-deliverables at 182
+ *           bytes name+description — the two skills that moved the ceiling
+ *           from 1,150)
+ * Ceiling is 1,250 token-equivalents (5,000 bytes), so headroom is 189 bytes
  * (~4%). Dominant skill: design-consultation at 229 bytes name+description.
  */
-const CATALOG_BUDGET_TOKEN_EQUIVALENTS = 1_150;
+const CATALOG_BUDGET_TOKEN_EQUIVALENTS = 1_250;
 
 // Largest today: design-consultation at 229 bytes. A description that needs
 // more than 260 bytes is a body paragraph, not a catalog entry.

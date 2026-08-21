@@ -22,26 +22,50 @@
 import { test, expect } from 'bun:test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const repoRoot = path.resolve(import.meta.dir, '..');
 
-// Matches a setTimeout whose arrow callback (with or without an argument)
-// immediately calls process.exit. Doesn't match its own escaped source text
-// (the backslashes in this regex literal prevent a literal-text match).
-const DELAYED_EXIT = /setTimeout\(\s*(?:\(\s*\)|\(?\w+\)?)\s*=>\s*process\.exit\(/;
+// Matches a setTimeout whose callback reaches process.exit in any common
+// spelling: bare reference (`setTimeout(process.exit, ...)`), concise-body
+// arrow, block-body arrow, or function expression — across line breaks.
+// Doesn't match its own escaped source text (the backslashes in this regex
+// literal prevent a literal-text match).
+const DELAYED_EXIT =
+  /setTimeout\(\s*(?:process\.exit\b|(?:\([^)]*\)|\w+)\s*=>\s*\{?\s*process\.exit\(|function[^)]*\)\s*\{\s*process\.exit\()/;
+
+test('guard regex catches every common delayed-exit spelling', () => {
+  const positives = [
+    'setTimeout(() => process.exit(0), 500);',
+    'setTimeout(() => { process.exit(0); }, 500);',
+    'setTimeout(process.exit, 500);',
+    'setTimeout((code) => process.exit(code), 500);',
+    'setTimeout(function () { process.exit(0) }, 500);',
+    'setTimeout(() => {\n  process.exit(0);\n}, 500);',
+  ];
+  for (const p of positives) expect(DELAYED_EXIT.test(p)).toBe(true);
+  // Immediate (non-delayed) exits and unrelated timers must not match.
+  expect(DELAYED_EXIT.test('process.exit(0);')).toBe(false);
+  expect(DELAYED_EXIT.test('setTimeout(() => resolve(), 500);')).toBe(false);
+});
 
 test('no test file schedules a delayed process.exit (kills the whole bun test run)', () => {
-  const glob = new Bun.Glob('**/*.test.ts');
+  // Enumerate via git so vendored trees (node_modules, .git) are never
+  // traversed — a repo-wide glob walk paid the node_modules directory scan
+  // on every suite run just to filter matches afterwards.
+  const tracked = execFileSync('git', ['ls-files', '*.test.ts'], { cwd: repoRoot, encoding: 'utf-8' })
+    .split('\n')
+    .filter(Boolean);
   const violations: string[] = [];
 
-  for (const rel of glob.scanSync({ cwd: repoRoot })) {
-    if (rel.includes('node_modules/')) continue;
+  for (const rel of tracked) {
+    // This file itself carries the outlawed spellings as regex fixtures above.
+    if (rel === 'test/no-suicide-exit.test.ts') continue;
     const source = fs.readFileSync(path.join(repoRoot, rel), 'utf-8');
-    const lines = source.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (DELAYED_EXIT.test(lines[i])) {
-        violations.push(`${rel}:${i + 1}: ${lines[i].trim()}`);
-      }
+    const m = DELAYED_EXIT.exec(source);
+    if (m) {
+      const line = source.slice(0, m.index).split('\n').length;
+      violations.push(`${rel}:${line}: ${m[0].split('\n')[0].trim()}`);
     }
   }
 

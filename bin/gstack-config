@@ -78,6 +78,10 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           # terse   = V0 prose style, no glosses, no outcome-framing layer
 #                           #           (for power users who know the terms)
 #                           # Unknown values default to "default" with a warning.
+#                           # RUNTIME switch only: skills still load the same
+#                           # SKILL.md bytes. To strip terse-gated sections from
+#                           # the generated files too, rebuild with
+#                           # `bun run gen:skill-docs --explain-level=terse`.
 #                           # See docs/designs/PLAN_TUNING_V1.md for rationale.
 #
 # ─── Artifacts sync (renamed from gbrain_sync_mode in v1.27.0.0) ─────
@@ -141,6 +145,7 @@ lookup_default() {
     checkpoint_push) echo "false" ;;
     explain_level) echo "default" ;;
     codex_reviews) echo "enabled" ;;
+    grok_reviews) echo "enabled" ;;
     gstack_contributor) echo "false" ;;
     skip_eng_review) echo "false" ;;
     workspace_root) echo "$HOME/conductor/workspaces" ;;
@@ -384,12 +389,30 @@ case "${1:-}" in
       echo "Warning: plan_tune_hooks '$VALUE' not recognized. Valid values: prompt, yes, no. Using prompt." >&2
       VALUE="prompt"
     fi
-    # codex_reviews controls PAID Codex calls. Unlike the warn-and-default keys above,
-    # an invalid value is REJECTED and the existing setting is left unchanged — a typo
-    # must never silently flip the switch and turn paid Codex calls on or off.
-    if [ "$KEY" = "codex_reviews" ] && [ "$VALUE" != "enabled" ] && [ "$VALUE" != "disabled" ]; then
-      echo "Error: codex_reviews '$VALUE' not recognized. Valid values: enabled, disabled. Existing value left unchanged." >&2
-      exit 1
+    # codex_reviews / grok_reviews are the kill-switches for PAID Codex/Grok forum-review
+    # calls. Recipes gate on the explicit negative (see autobuilder-loop SKILL.md.tmpl:
+    # "grok_reviews=disabled is the only run-durable disable"), so a common alias like
+    # off/false/0 must land as the literal "disabled" — not pass through as an
+    # unrecognized value that silently means "enabled" to the caller. Normalize aliases
+    # first, then apply the same reject-on-set treatment as before: unlike the
+    # warn-and-default keys above, anything outside enabled|disabled is REJECTED and the
+    # existing setting is left unchanged — a typo must never silently flip paid calls
+    # on or off.
+    if [ "$KEY" = "codex_reviews" ] || [ "$KEY" = "grok_reviews" ]; then
+      case "$VALUE" in
+        off|false|0)
+          echo "$KEY: normalizing '$VALUE' to 'disabled'."
+          VALUE="disabled"
+          ;;
+        on|true|1)
+          echo "$KEY: normalizing '$VALUE' to 'enabled'."
+          VALUE="enabled"
+          ;;
+      esac
+      if [ "$VALUE" != "enabled" ] && [ "$VALUE" != "disabled" ]; then
+        echo "Error: $KEY '$VALUE' not recognized. Valid values: enabled, disabled. Existing value left unchanged." >&2
+        exit 1
+      fi
     fi
     mkdir -p "$STATE_DIR"
     # Write annotated header on first creation
@@ -410,6 +433,17 @@ case "${1:-}" in
     if [ "$KEY" = "skill_prefix" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
       GSTACK_RELINK="$(dirname "$0")/gstack-relink"
       [ -x "$GSTACK_RELINK" ] && "$GSTACK_RELINK" || true
+    fi
+    # explain_level is a runtime behavior switch: the preamble echoes
+    # EXPLAIN_LEVEL and the model skips sections whose headings carry the
+    # terse gate. It does NOT shrink the generated SKILL.md files — that
+    # takes a rebuild with the matching --explain-level flag. Say so, so
+    # nobody sets the key expecting a token-cost reduction (#48).
+    if [ "$KEY" = "explain_level" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
+      echo "explain_level: $VALUE — runtime behavior switch, active on the next skill run."
+      echo "Generated SKILL.md files are unchanged (token cost is the same). To also strip"
+      echo "terse-gated sections from the files, rebuild:"
+      echo "  cd ~/.claude/skills/gstack && bun run gen:skill-docs --explain-level=$VALUE"
     fi
     ;;
   list)

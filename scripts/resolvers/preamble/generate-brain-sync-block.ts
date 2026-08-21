@@ -26,6 +26,10 @@
  *
  * Skill-end sync is handled by the completion-status generator via a call
  * to `gstack-brain-sync --discover-new` + `--once`.
+ *
+ * KEEP IN SYNC with bin/gstack-artifacts-preamble: the Claude host runs that
+ * script instead of this inline block (#48 carve). Behavioral changes here
+ * (checks, status lines, guards) must land in both, or the two hosts drift.
  */
 import type { TemplateContext } from '../types';
 import { quoteSafePath } from '../types';
@@ -124,7 +128,11 @@ if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
 fi
 
 if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
-  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
+  # Threat: this file lives in the git-SYNCED tree; a crafted multi-line or
+  # control-char value could otherwise forge extra ARTIFACTS_SYNC lines in
+  # this agent-consumed output. First line only, strip control/whitespace,
+  # cap length before it's echoed below.
+  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:][:cntrl:]' | cut -c1-120)
   if [ -n "$_BRAIN_NEW_URL" ]; then
     echo "ARTIFACTS_SYNC: artifacts repo detected: $_BRAIN_NEW_URL"
     echo "ARTIFACTS_SYNC: run 'gstack-brain-restore' to pull your cross-machine artifacts (or 'gstack-config set artifacts_sync_mode off' to dismiss forever)"
@@ -160,8 +168,19 @@ elif [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   [ -d "$_GSTACK_HOME/.brain-queue.d" ] && _BRAIN_QUEUE_DEPTH=$(find "$_GSTACK_HOME/.brain-queue.d" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
   [ -f "$_GSTACK_HOME/.brain-queue.jsonl" ] && _BRAIN_QUEUE_DEPTH=$(( _BRAIN_QUEUE_DEPTH + $(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl" | tr -d ' ') ))
   [ -f "$_GSTACK_HOME/.brain-queue.jsonl.migrating" ] && _BRAIN_QUEUE_DEPTH=$(( _BRAIN_QUEUE_DEPTH + $(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl.migrating" | tr -d ' ') ))
+  # Threat: the counts should already be numeric, but the counted files live
+  # in the git-SYNCED tree; enforce numeric before it's interpolated into this
+  # agent-consumed status line.
+  case "$_BRAIN_QUEUE_DEPTH" in ''|*[!0-9]*) _BRAIN_QUEUE_DEPTH=0 ;; esac
   _BRAIN_LAST_PUSH="never"
-  [ -f "$_GSTACK_HOME/.brain-last-push" ] && _BRAIN_LAST_PUSH=$(cat "$_GSTACK_HOME/.brain-last-push" 2>/dev/null || echo never)
+  if [ -f "$_GSTACK_HOME/.brain-last-push" ]; then
+    # Threat: this stamp file lives in the git-SYNCED tree; a crafted
+    # multi-line or control-char value could forge extra ARTIFACTS_SYNC lines
+    # in this agent-consumed output. First line only, timestamp-safe charset,
+    # cap length; empty/invalid falls back to "never".
+    _BRAIN_LAST_PUSH_RAW=$(head -1 "$_GSTACK_HOME/.brain-last-push" 2>/dev/null | tr -cd 'A-Za-z0-9TZ:+.-' | cut -c1-40)
+    [ -n "$_BRAIN_LAST_PUSH_RAW" ] && _BRAIN_LAST_PUSH="$_BRAIN_LAST_PUSH_RAW"
+  fi
   echo "ARTIFACTS_SYNC: mode=$_BRAIN_SYNC_MODE | last_push=$_BRAIN_LAST_PUSH | queue=$_BRAIN_QUEUE_DEPTH"
 else
   echo "ARTIFACTS_SYNC: off"

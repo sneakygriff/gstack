@@ -322,8 +322,14 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // v1.65 merge: provisional larger-of-both-waves budget; re-measured below.
     // v1.64.1.0: shared-preamble prose from the two parallel v1.64 waves lands
     // the skeleton at 69,022 B; +~1 KB headroom.
-    maxSkeletonBytes: 71_400, // v1.68 fix wave (#2402); measured 70,815
-    minUnionBytes: 72_000,
+    // #48 preamble carve: the onboarding chain, full AUQ spec, and artifacts-sync
+    // prose move OUT of the skeleton to shared preamble/sections/ files, so the
+    // skeleton shrinks ~18 KB and the union (skeleton+sections) also drops (the
+    // shared preamble mass is no longer counted per skill). Re-measured after the
+    // post-carve regen on v1.68.2.0 (carve + the v1.68 #2402 learnings-capture
+    // growth): skeleton 52,678 B; union clears the floor with headroom.
+    maxSkeletonBytes: 54_000, // measured 52,678 (post-carve regen, v1.68.2.0)
+    minUnionBytes: 69_000, // union > floor (post-carve regen, v1.68.2.0)
     mustContain: ['Typography', 'Color', 'Aesthetic Direction'],
     // Cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB +
     // the cross-session decision-memory nudge) lands this carved skeleton just over
@@ -362,8 +368,14 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    maxSkeletonBytes: 77_300, // v1.68 fix wave (#2402); measured 76,705
-    minUnionBytes: 72_000,
+    // #48 preamble carve: onboarding chain + full AUQ spec + artifacts-sync prose
+    // move to shared preamble/sections/, shrinking this skeleton ~18 KB and the
+    // union ~13 KB (cso union was ~83,808 → ~70,4xx B pre-#2402). Fork post-carve
+    // Re-measured after the post-carve regen on v1.68.2.0 (carve + the v1.68
+    // #2402 learnings-capture growth): skeleton 58,568 B; union clears the floor
+    // with headroom.
+    maxSkeletonBytes: 60_000, // measured 58,568 (post-carve regen, v1.68.2.0)
+    minUnionBytes: 68_000, // union > floor (post-carve regen, v1.68.2.0)
     mustContain: ['OWASP', 'STRIDE', 'daily', 'comprehensive', 'verif'],
     // cso keeps its mode-dispatch + FP-filtering phases always-loaded, so the
     // cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB + the

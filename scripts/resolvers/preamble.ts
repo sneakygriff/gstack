@@ -62,6 +62,13 @@ import { generateRepoModeSection } from './preamble/generate-repo-mode-section';
 import { generateSearchBeforeBuildingSection } from './preamble/generate-search-before-building';
 import { generateMakePdfSetup } from './make-pdf';
 
+// Claude-host lazy carve (#48): shared preamble sections + compact inline stubs
+import {
+  generatePreambleSectionIndex,
+  generateAskUserFormatCompact,
+  generateArtifactsSyncInline,
+} from './preamble/carved-sections';
+
 // Standalone export used directly by the resolver registry
 export { generateTestFailureTriage } from './preamble/generate-test-failure-triage';
 
@@ -86,6 +93,12 @@ export function generatePreamble(ctx: TemplateContext): string {
   if (tier < 1 || tier > 4) {
     throw new Error(`Invalid preamble-tier: ${tier} in ${ctx.tmplPath}. Must be 1-4.`);
   }
+  // Claude-host lazy carve (#48): runtime-conditional mass (onboarding chain,
+  // full AUQ spec, artifacts-sync rare paths) moves to shared files under
+  // preamble/sections/, referenced by a compact index + in-place pointers.
+  // Every other host keeps the full inline preamble — same host split as the
+  // per-skill sections carve ({{SECTION:id}} inlines on non-Claude hosts).
+  const carve = ctx.host === 'claude';
   const sections = [
     generatePreambleBash(ctx),
     ...(ctx.skillName === 'make-pdf' ? [generateMakePdfSetup(ctx)] : []),
@@ -95,22 +108,30 @@ export function generatePreamble(ctx: TemplateContext): string {
     // end-of-turn" rule before any other instruction. Renders for all skills
     // (not interactive-gated); the text applies universally.
     generatePlanModeInfo(ctx),
+    ...(carve ? [generatePreambleSectionIndex(ctx)] : []),
     generateUpgradeCheck(ctx),
+    // Writing-style migration is a one-time prompt not carried by the shared
+    // onboarding.md section, so it stays inline on every host to preserve
+    // upstream behavior (see port note: fork dropped it; kept for parity).
     generateWritingStyleMigration(ctx),
-    generateLakeIntro(ctx),
-    generateTelemetryPrompt(ctx),
-    generateProactivePrompt(ctx),
-    generateFirstRunGuidance(ctx),
-    generateRoutingInjection(ctx),
-    generateVendoringDeprecation(ctx),
+    ...(carve ? [] : [
+      generateLakeIntro(ctx),
+      generateTelemetryPrompt(ctx),
+      generateProactivePrompt(ctx),
+      generateFirstRunGuidance(ctx),
+      generateRoutingInjection(ctx),
+      generateVendoringDeprecation(ctx),
+    ]),
     generateSpawnedSessionCheck(),
     generateBrainHealthInstruction(ctx),
     // AskUserQuestion Format renders BEFORE the model overlay so the pacing rule
     // is the ambient default; the overlay's behavioral nudges land as subordinate
     // patches. Opus 4.7 reads top-to-bottom and absorbs the first pacing directive
     // it hits; reversing this order regresses plan-review cadence (v1.6.4.0 bug).
-    ...(tier >= 2 ? [generateAskUserFormat(ctx)] : []),
-    generateBrainSyncBlock(ctx),
+    // Carve keeps the heading + every mandatory marker inline (compact contract);
+    // the full spec loads from preamble/sections/ask-user-questions.md.
+    ...(tier >= 2 ? [carve ? generateAskUserFormatCompact(ctx) : generateAskUserFormat(ctx)] : []),
+    carve ? generateArtifactsSyncInline(ctx) : generateBrainSyncBlock(ctx),
     generateModelOverlay(ctx),
     generateVoiceDirective(tier),
     ...(tier >= 2 ? [

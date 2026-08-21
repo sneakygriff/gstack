@@ -148,6 +148,20 @@ In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`co
 
 If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; any AskUserQuestion the skill fires is the workflow operating within plan mode, not a violation of it — and a skill whose instructions resolve a question themselves (e.g. a plan-mode auto-select) may legitimately not ask it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
+## Preamble Section Index — shared sections, read on demand
+
+Heavy preamble guidance is carved into shared files under `~/.claude/skills/gstack/preamble/sections/` (one copy
+for the whole skill suite). Read a file IN FULL the moment its trigger applies —
+never act on its topic from memory. If that base doesn't exist on this machine
+(vendored or non-standard install), resolve the same filename relative to this
+skill file's own installed location instead — `../../preamble/sections/` from
+a skill dir, or the gstack repo root's `preamble/sections/`.
+
+| When | Read |
+|------|------|
+| the preamble echo shows a pending onboarding flag — `LAKE_INTRO: no`, `TEL_PROMPTED: no`, `PROACTIVE_PROMPTED: no`, `ACTIVATED: no`, `FIRST_LOOP_SHOWN: no`, `HAS_ROUTING: no` (unless `ROUTING_DECLINED: true`), or `VENDORED_GSTACK: yes`. Skip entirely when `SPAWNED_SESSION: true`. | `~/.claude/skills/gstack/preamble/sections/onboarding.md` |
+| the Artifacts Sync output shows `artifacts repo detected` or `ARTIFACTS_SYNC_PROMPT: needed` | `~/.claude/skills/gstack/preamble/sections/artifacts-sync.md` |
+
 If `PROACTIVE` is `"false"`, do not auto-invoke or proactively suggest skills. If a skill seems useful, ask: "I think /skillname might help here — want me to run it?"
 
 If `SKILL_PREFIX` is `"true"`, suggest/invoke `/gstack-*` names. Disk paths stay `~/.claude/skills/gstack/[skill-name]/SKILL.md`.
@@ -183,146 +197,6 @@ touch ~/.gstack/.writing-style-prompted
 
 Skip if `WRITING_STYLE_PENDING` is `no`.
 
-If `LAKE_INTRO` is `no`: say "gstack follows the **Boil the Ocean** principle — do the complete thing when AI makes marginal cost near-zero. Read more: https://garryslist.org/posts/boil-the-ocean" Offer to open:
-
-```bash
-open https://garryslist.org/posts/boil-the-ocean
-touch ~/.gstack/.completeness-intro-seen
-```
-
-Only run `open` if yes. Always run `touch`.
-
-If `TEL_PROMPTED` is `no` AND `LAKE_INTRO` is `yes`: ask telemetry once via AskUserQuestion:
-
-> Help gstack get better. Share usage data only: skill, duration, crashes, stable device ID. No code or file paths. Your repo name is recorded locally only and stripped before any upload.
-
-Options:
-- A) Help gstack get better! (recommended)
-- B) No thanks
-
-If A: run `~/.claude/skills/gstack/bin/gstack-config set telemetry community`
-
-If B: ask follow-up:
-
-> Anonymous mode sends only aggregate usage, no unique ID.
-
-Options:
-- A) Sure, anonymous is fine
-- B) No thanks, fully off
-
-If B→A: run `~/.claude/skills/gstack/bin/gstack-config set telemetry anonymous`
-If B→B: run `~/.claude/skills/gstack/bin/gstack-config set telemetry off`
-
-Always run:
-```bash
-touch ~/.gstack/.telemetry-prompted
-```
-
-Skip if `TEL_PROMPTED` is `yes`.
-
-If `PROACTIVE_PROMPTED` is `no` AND `TEL_PROMPTED` is `yes`: ask once:
-
-> Let gstack proactively suggest skills, like /qa for "does this work?" or /investigate for bugs?
-
-Options:
-- A) Keep it on (recommended)
-- B) Turn it off — I'll type /commands myself
-
-If A: run `~/.claude/skills/gstack/bin/gstack-config set proactive true`
-If B: run `~/.claude/skills/gstack/bin/gstack-config set proactive false`
-
-Always run:
-```bash
-touch ~/.gstack/.proactive-prompted
-```
-
-Skip if `PROACTIVE_PROMPTED` is `yes`.
-
-## First-run guidance (one-time)
-
-If `ACTIVATED` is `no` (first skill run on this machine) AND the preamble printed a non-empty `FIRST_TASK:` value that is NOT `nongit`: show ONE short, project-specific line mapped from the token, as a heads-up, then CONTINUE with whatever the user actually asked — do NOT halt their task. Map the token: `greenfield` → "Fresh repo — shape it first with `/spec` or `/office-hours`." `code_node`/`code_python`/`code_rust`/`code_go`/`code_ruby`/`code_ios` → "There's code here — `/qa` to see it work, or `/investigate` if something's off." `branch_ahead` → "Unshipped work on this branch — `/review` then `/ship`." `dirty_default` → "Uncommitted changes — `/review` before committing." `clean_default` → "Pick one: `/spec`, `/investigate`, or `/qa`." Then substitute the token you saw for TASK_TOKEN and run (best-effort), and mark activated:
-```bash
-~/.claude/skills/gstack/bin/gstack-telemetry-log --event-type first_task_scaffold_shown --skill "TASK_TOKEN" --outcome shown 2>/dev/null || true
-touch ~/.gstack/.activated 2>/dev/null || true
-```
-
-If `ACTIVATED` is `no` but `FIRST_TASK:` is empty or `nongit` (headless, non-git, or nothing actionable): show nothing, just run `touch ~/.gstack/.activated 2>/dev/null || true`.
-
-Else if `ACTIVATED` is `yes` AND `FIRST_LOOP_SHOWN` is `no`: say once as a heads-up (then continue):
-
-> Tip: gstack pays off when you complete one loop — **plan → review → ship**. A common first loop: `/office-hours` or `/spec` to shape it, `/plan-eng-review` to lock it, then `/ship`.
-
-Then run `touch ~/.gstack/.first-loop-tip-shown 2>/dev/null || true`.
-
-Skip this section if `ACTIVATED` and `FIRST_LOOP_SHOWN` are both `yes`.
-
-If `HAS_ROUTING` is `no` AND `ROUTING_DECLINED` is `false` AND `PROACTIVE_PROMPTED` is `yes`:
-Check if a CLAUDE.md file exists in the project root. If it does not exist, create it.
-
-Use AskUserQuestion:
-
-> gstack works best when your project's CLAUDE.md includes skill routing rules.
-
-Options:
-- A) Add routing rules to CLAUDE.md (recommended)
-- B) No thanks, I'll invoke skills manually
-
-If A: Append this section to the end of CLAUDE.md:
-
-```markdown
-
-## Skill routing
-
-When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
-
-Key routing rules:
-- Product ideas/brainstorming → invoke /office-hours
-- Strategy/scope → invoke /plan-ceo-review
-- Architecture → invoke /plan-eng-review
-- Design system/plan review → invoke /design-consultation or /plan-design-review
-- Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
-- QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
-- Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
-- Save progress → invoke /context-save
-- Resume context → invoke /context-restore
-- Author a backlog-ready spec/issue → invoke /spec
-```
-
-Then commit the change: `git add CLAUDE.md && git commit -m "chore: add gstack skill routing rules to CLAUDE.md"`
-
-If B: run `~/.claude/skills/gstack/bin/gstack-config set routing_declined true` and say they can re-enable with `gstack-config set routing_declined false`.
-
-This only happens once per project. Skip if `HAS_ROUTING` is `yes` or `ROUTING_DECLINED` is `true`.
-
-If `VENDORED_GSTACK` is `yes`, warn once via AskUserQuestion unless `~/.gstack/.vendoring-warned-$SLUG` exists:
-
-> This project has gstack vendored in `.claude/skills/gstack/`. Vendoring is deprecated.
-> Migrate to team mode?
-
-Options:
-- A) Yes, migrate to team mode now
-- B) No, I'll handle it myself
-
-If A:
-1. Run `git rm -r .claude/skills/gstack/`
-2. Run `echo '.claude/skills/gstack/' >> .gitignore`
-3. Run `~/.claude/skills/gstack/bin/gstack-team-init required` (or `optional`)
-4. Run `git add .claude/ .gitignore CLAUDE.md && git commit -m "chore: migrate gstack from vendored to team mode"`
-5. Tell the user: "Done. Each developer now runs: `cd ~/.claude/skills/gstack && ./setup --team`"
-
-If B: say "OK, you're on your own to keep the vendored copy up to date."
-
-Always run (regardless of choice):
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" 2>/dev/null || true
-touch ~/.gstack/.vendoring-warned-${SLUG:-unknown}
-```
-
-If marker exists, skip.
-
 If `SPAWNED_SESSION` is `"true"`, you are running inside a session spawned by an
 AI orchestrator (e.g., OpenClaw). In spawned sessions:
 - Do NOT use AskUserQuestion for interactive prompts. Auto-choose the recommended option.
@@ -333,134 +207,17 @@ AI orchestrator (e.g., OpenClaw). In spawned sessions:
 ## Artifacts Sync (skill start)
 
 ```bash
-_GSTACK_HOME="${GSTACK_HOME:-$HOME/.gstack}"
-# Prefer the v1.27.0.0 artifacts file; fall back to brain file for users
-# upgrading mid-stream before the migration script runs.
-if [ -f "$HOME/.gstack-artifacts-remote.txt" ]; then
-  _BRAIN_REMOTE_FILE="$HOME/.gstack-artifacts-remote.txt"
-else
-  _BRAIN_REMOTE_FILE="$HOME/.gstack-brain-remote.txt"
-fi
-_BRAIN_SYNC_BIN="$HOME/.claude/skills/gstack/bin/gstack-brain-sync"
-_BRAIN_CONFIG_BIN="$HOME/.claude/skills/gstack/bin/gstack-config"
-
-# /sync-gbrain context-load: teach the agent to use gbrain when it's available.
-# Per-worktree pin: post-spike redesign uses kubectl-style `.gbrain-source` in the
-# git toplevel to scope queries. Look for the pin in the worktree (not a global
-# state file) so that opening worktree B without a pin doesn't claim "indexed"
-# just because worktree A was synced. Empty string when gbrain is not
-# configured (zero context cost for non-gbrain users).
-_GBRAIN_CONFIG="$HOME/.gbrain/config.json"
-if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
-  _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ' || echo 0)
-  if [ "$_GBRAIN_VERSION_OK" -gt 0 ] 2>/dev/null; then
-    _GBRAIN_PIN_PATH=""
-    _REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
-    if [ -n "$_REPO_TOP" ] && [ -f "$_REPO_TOP/.gbrain-source" ]; then
-      _GBRAIN_PIN_PATH="$_REPO_TOP/.gbrain-source"
-    fi
-    if [ -n "$_GBRAIN_PIN_PATH" ]; then
-      echo "GBrain configured. Prefer \`gbrain search\`/\`gbrain query\` over Grep for"
-      echo "semantic questions; use \`gbrain code-def\`/\`code-refs\`/\`code-callers\` for"
-      echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in CLAUDE.md."
-      echo "Run /sync-gbrain to refresh."
-    else
-      echo "GBrain configured but this worktree isn't pinned yet. Run \`/sync-gbrain --full\`"
-      echo "before relying on \`gbrain search\` for code questions in this worktree."
-      echo "Falls back to Grep until pinned."
-    fi
-  fi
-fi
-
-_BRAIN_SYNC_MODE=$("$_BRAIN_CONFIG_BIN" get artifacts_sync_mode 2>/dev/null || echo off)
-
-# Detect remote-MCP mode (Path 4 of /setup-gbrain). Local artifacts sync is
-# a no-op in remote mode; the brain server pulls from GitHub/GitLab on its
-# own cadence. Read claude.json directly to keep this preamble fast (no
-# subprocess to claude CLI on every skill start). Both registration scopes
-# are read (#2499): user scope, then the nearest-ancestor project scope.
-_GBRAIN_MCP_MODE="none"
-_GBRAIN_MCP_ENTRY=""
-if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
-  _GBRAIN_MCP_ENTRY=$(jq -c --arg cwd "$PWD" '((.projects // {}) | to_entries | map(select((.key as $k | $cwd == $k or ($cwd | startswith($k + "/")) or ($cwd | startswith($k + "\\"))) and ((try .value.mcpServers.gbrain catch null) != null))) | sort_by(.key | length) | last | .value.mcpServers.gbrain) // .mcpServers.gbrain // empty' "$HOME/.claude.json" 2>/dev/null)
-  _GBRAIN_MCP_TYPE=$(printf '%s' "$_GBRAIN_MCP_ENTRY" | jq -r '.type // .transport // empty' 2>/dev/null)
-  case "$_GBRAIN_MCP_TYPE" in
-    url|http|sse) _GBRAIN_MCP_MODE="remote-http" ;;
-    stdio) _GBRAIN_MCP_MODE="local-stdio" ;;
-  esac
-fi
-
-if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
-  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
-  if [ -n "$_BRAIN_NEW_URL" ]; then
-    echo "ARTIFACTS_SYNC: artifacts repo detected: $_BRAIN_NEW_URL"
-    echo "ARTIFACTS_SYNC: run 'gstack-brain-restore' to pull your cross-machine artifacts (or 'gstack-config set artifacts_sync_mode off' to dismiss forever)"
-  fi
-fi
-
-if [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
-  _BRAIN_LAST_PULL_FILE="$_GSTACK_HOME/.brain-last-pull"
-  _BRAIN_NOW=$(date +%s)
-  _BRAIN_DO_PULL=1
-  if [ -f "$_BRAIN_LAST_PULL_FILE" ]; then
-    _BRAIN_LAST=$(cat "$_BRAIN_LAST_PULL_FILE" 2>/dev/null || echo 0)
-    case "$_BRAIN_LAST" in ''|*[!0-9]*) _BRAIN_LAST=0 ;; esac
-    _BRAIN_AGE=$(( _BRAIN_NOW - _BRAIN_LAST ))
-    [ "$_BRAIN_AGE" -lt 86400 ] && _BRAIN_DO_PULL=0
-  fi
-  if [ "$_BRAIN_DO_PULL" = "1" ]; then
-    ( cd "$_GSTACK_HOME" && git fetch origin >/dev/null 2>&1 && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
-    echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
-  fi
-  "$_BRAIN_SYNC_BIN" --once 2>/dev/null || true
-fi
-
-if [ "$_GBRAIN_MCP_MODE" = "remote-http" ]; then
-  # Remote-MCP mode: local artifacts sync is a no-op (brain admin's server
-  # pulls from GitHub/GitLab). Show the user this is by design, not broken.
-  _GBRAIN_HOST=$(printf '%s' "${_GBRAIN_MCP_ENTRY:-}" | jq -r '.url // empty' 2>/dev/null | sed -E 's|^https?://([^/:]+).*|\1|' | head -1 | tr -cd 'A-Za-z0-9._-')
-  echo "ARTIFACTS_SYNC: remote-mode (managed by brain server ${_GBRAIN_HOST:-remote})"
-elif [ -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
-  _BRAIN_QUEUE_DEPTH=0
-  # Spool-dir queue (one file per record); legacy .brain-queue.jsonl lines are
-  # counted too until the drain migrates them.
-  [ -d "$_GSTACK_HOME/.brain-queue.d" ] && _BRAIN_QUEUE_DEPTH=$(find "$_GSTACK_HOME/.brain-queue.d" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
-  [ -f "$_GSTACK_HOME/.brain-queue.jsonl" ] && _BRAIN_QUEUE_DEPTH=$(( _BRAIN_QUEUE_DEPTH + $(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl" | tr -d ' ') ))
-  [ -f "$_GSTACK_HOME/.brain-queue.jsonl.migrating" ] && _BRAIN_QUEUE_DEPTH=$(( _BRAIN_QUEUE_DEPTH + $(wc -l < "$_GSTACK_HOME/.brain-queue.jsonl.migrating" | tr -d ' ') ))
-  _BRAIN_LAST_PUSH="never"
-  [ -f "$_GSTACK_HOME/.brain-last-push" ] && _BRAIN_LAST_PUSH=$(cat "$_GSTACK_HOME/.brain-last-push" 2>/dev/null || echo never)
-  echo "ARTIFACTS_SYNC: mode=$_BRAIN_SYNC_MODE | last_push=$_BRAIN_LAST_PUSH | queue=$_BRAIN_QUEUE_DEPTH"
-else
-  echo "ARTIFACTS_SYNC: off"
-fi
+~/.claude/skills/gstack/bin/gstack-artifacts-preamble 2>/dev/null || echo "ARTIFACTS_SYNC: off"
 ```
 
-
-
-Privacy stop-gate: if output shows `ARTIFACTS_SYNC: off`, `artifacts_sync_mode_prompted` is `false`, and gbrain is on PATH or `gbrain doctor --fast --json` works, ask once:
-
-> gstack can publish your artifacts (CEO plans, designs, reports) to a private GitHub repo that GBrain indexes across machines. How much should sync?
-
-Options:
-- A) Everything allowlisted (recommended)
-- B) Only artifacts
-- C) Decline, keep everything local
-
-After answer:
-
-```bash
-# Chosen mode: full | artifacts-only | off
-"$_BRAIN_CONFIG_BIN" set artifacts_sync_mode <choice>
-"$_BRAIN_CONFIG_BIN" set artifacts_sync_mode_prompted true
-```
-
-If A/B and `~/.gstack/.git` is missing, ask whether to run `gstack-artifacts-init`. Do not block the skill.
+If the output includes `artifacts repo detected` or `ARTIFACTS_SYNC_PROMPT: needed`,
+Read `~/.claude/skills/gstack/preamble/sections/artifacts-sync.md` and follow it before continuing. Otherwise continue.
 
 At skill END before telemetry:
 
 ```bash
-"$HOME/.claude/skills/gstack/bin/gstack-brain-sync" --discover-new 2>/dev/null || true
-"$HOME/.claude/skills/gstack/bin/gstack-brain-sync" --once 2>/dev/null || true
+~/.claude/skills/gstack/bin/gstack-brain-sync --discover-new 2>/dev/null || true
+~/.claude/skills/gstack/bin/gstack-brain-sync --once 2>/dev/null || true
 ```
 
 

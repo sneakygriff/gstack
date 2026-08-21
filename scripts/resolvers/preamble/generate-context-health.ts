@@ -2,7 +2,7 @@ import type { TemplateContext } from '../types';
 
 export function generateContextHealth(ctx?: TemplateContext): string {
   if (ctx?.explainLevel === 'terse') return '';
-  return `## Context Health (soft directive)
+  return `## Context Health (soft directive; skip entirely if \`EXPLAIN_LEVEL: terse\` appears in the preamble echo)
 
 During long-running skill sessions, periodically write a brief \`[PROGRESS]\` summary: done, next, surprises.
 
