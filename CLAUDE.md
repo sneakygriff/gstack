@@ -158,7 +158,7 @@ gstack/
 ├── investigate/     # /investigate skill (systematic root-cause debugging)
 ├── spec/            # /spec skill (five-phase spec → GitHub issue, optional agent spawn, /ship auto-closes)
 ├── retro/           # Retrospective skill (includes /retro global cross-project mode)
-├── bin/             # CLI utilities (gstack-repo-mode, gstack-slug, gstack-config, gstack-wtree, gstack-evidence, gstack-issue-guard, etc.)
+├── bin/             # CLI utilities (gstack-repo-mode, gstack-slug, gstack-config, gstack-wtree, gstack-evidence, gstack-issue-guard, gstack-panel, gstack-vote, etc.)
 ├── document-release/ # /document-release skill (post-ship doc updates + Diataxis coverage map)
 ├── document-generate/ # /document-generate skill (Diataxis doc generator: tutorial/how-to/reference/explanation)
 ├── cso/             # /cso skill (OWASP Top 10 + STRIDE security audit)
@@ -171,7 +171,7 @@ gstack/
 │   ├── test/        # Integration tests
 │   └── dist/        # Compiled binary
 ├── extension/       # Chrome extension (side panel + activity feed + CSS inspector)
-├── lib/             # Shared libraries (worktree.ts, egress-receipt.ts, context-bill.ts, redact-engine.ts, tracker-guard.ts, version-source.ts, code-intelligence/)
+├── lib/             # Shared libraries (worktree.ts, egress-receipt.ts, context-bill.ts, redact-engine.ts, tracker-guard.ts, version-source.ts, outside-voices/, code-intelligence/)
 ├── patches/         # bun `patchedDependencies` patches (playwright-core windowsHide)
 ├── docs/designs/    # Design documents
 ├── setup-deploy/    # /setup-deploy skill (one-time deploy config)

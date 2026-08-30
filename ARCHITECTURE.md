@@ -285,7 +285,7 @@ Templates contain the workflows, tips, and examples that require human judgment.
 | `{{DESIGN_METHODOLOGY}}` | `gen-skill-docs.ts` | Shared design audit methodology for /plan-design-review and /design-review |
 | `{{REVIEW_DASHBOARD}}` | `gen-skill-docs.ts` | Review Readiness Dashboard for /ship pre-flight |
 | `{{TEST_BOOTSTRAP}}` | `gen-skill-docs.ts` | Test framework detection, bootstrap, CI/CD setup for /qa, /ship, /design-review |
-| `{{CODEX_PLAN_REVIEW}}` | `gen-skill-docs.ts` | Optional cross-model plan review (Codex or Claude subagent fallback) for /plan-ceo-review and /plan-eng-review |
+| `{{OUTSIDE_VOICES}}` | `resolvers/outside-voices.ts` | Cross-vendor advisory panel for /plan-ceo-review, /plan-eng-review, /plan-devex-review. External CLI voices run through `bin/gstack-panel` (codex on by default; grok/gemini ship off pending live write-denial canaries); the Fable subagent and a native Claude pass are dispatched by the orchestrator; `bin/gstack-vote` tallies every `<voice>.result.json` into one recommendation. Advisory only: it routes into the existing human gate and never sets the verdict. `{{CODEX_PLAN_REVIEW}}` still resolves as a thin alias for out-of-tree templates. |
 | `{{DESIGN_SETUP}}` | `resolvers/design.ts` | Discovery pattern for `$D` design binary, mirrors `{{BROWSE_SETUP}}` |
 | `{{DESIGN_SHOTGUN_LOOP}}` | `resolvers/design.ts` | Shared comparison board feedback loop for /design-shotgun, /plan-design-review, /design-consultation |
 | `{{UX_PRINCIPLES}}` | `resolvers/design.ts` | User behavioral foundations (scanning, satisficing, goodwill reservoir, trunk test) for /design-html, /design-shotgun, /design-review, /plan-design-review |
