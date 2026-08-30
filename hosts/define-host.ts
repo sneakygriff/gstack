@@ -28,7 +28,7 @@ export const CROSS_MODEL_RESOLVERS: string[] = [
   'DESIGN_OUTSIDE_VOICES',  // design.ts — invokes Codex for outside voices
   'ADVERSARIAL_STEP',       // review.ts — invokes Codex adversarially
   'CODEX_SECOND_OPINION',   // review.ts — invokes Codex
-  'CODEX_PLAN_REVIEW',      // review.ts — invokes Codex
+  'CODEX_PLAN_REVIEW',      // index.ts alias → outside-voices.ts panel (self-gates codex host)
   'REVIEW_ARMY',            // review-army.ts — multi-model orchestration
 ];
 

@@ -2281,18 +2281,6 @@ Shipped: Default model changed to Sonnet for structure tests (~30), Opus retaine
 
 Shipped as v0.5.0 on main. Includes `/plan-design-review` (report-only design audit), `/qa-design-review` (audit + fix loop), and `/design-consultation` (interactive DESIGN.md creation). `{{DESIGN_METHODOLOGY}}` resolver provides shared 80-item design audit checklist.
 
-### Design outside voices in /plan-eng-review
-
-**What:** Extend the parallel dual-voice pattern (Codex + Claude subagent) to /plan-eng-review's architecture review section.
-
-**Why:** The design beachhead (v0.11.3.0) proves cross-model consensus works for subjective reviews. Architecture reviews have similar subjectivity in tradeoff decisions.
-
-**Context:** Depends on learnings from the design beachhead. If the litmus scorecard format proves useful, adapt it for architecture dimensions (coupling, scaling, reversibility).
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** Design outside voices shipped (v0.11.3.0)
-
 ### Outside voices in /qa visual regression detection
 
 **What:** Add Codex design voice to /qa for detecting visual regressions during bug-fix verification.
@@ -2785,6 +2773,12 @@ needs one paid run to validate, so it didn't ride the ship.
 **Effort:** S (human ~2h, CC ~15min + one paid run).
 
 ## Completed
+
+### ✅ DONE (fork: outside-voices panel M1, 2026-08-30): Design outside voices in /plan-eng-review
+
+**What:** Extend the parallel dual-voice pattern (Codex + Claude subagent) to /plan-eng-review's architecture review section.
+
+**Completed:** Unreleased fork milestone M1 (feat/outside-voices-panel, 2026-08-30). Superseded by the N-voice `{{OUTSIDE_VOICES:surface=eng}}` advisory panel: external CLI voices via `bin/gstack-panel` (codex default-on; grok/gemini default-off pending live write-denial canaries), plus the Fable subagent and a native Claude pass dispatched by the orchestrator, all tallied by `bin/gstack-vote`. Wired into /plan-eng-review, /plan-ceo-review, and /plan-devex-review. Advisory only; routes into the existing human gate. See docs/designs/OUTSIDE_VOICES_PANEL.md.
 
 ### ✅ DONE (v1.68.1.0): Stop-hook registration pins the setup-time absolute path
 

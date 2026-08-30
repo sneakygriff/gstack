@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased — fork: outside-voices panel M1] - 2026-08-30
+
+**Every plan review now gets a cross-vendor advisory panel: independent second
+opinions from other AI systems, tabulated into one recommendation that can
+never block — the user still decides.**
+
+Fork-local milestone (feat/outside-voices-panel, M1 of 3) on top of the ported
+upstream v1.68.2.0 — VERSION deliberately unchanged: this fork tracks upstream
+release numbers, so fork work ships as CHANGELOG entries, not version bumps.
+
+### Added
+- `bin/gstack-panel` — the invocation primitive for external CLI voices
+  (codex/grok/gemini): sequential-foreground, per-voice 540s timeout ladder
+  bounded by the remaining wall-clock, one `<voice>.result.json` per voice on
+  every path, `--collect` salvage, `--redact-only`, and the full per-voice
+  security pipeline (kill-switches, auth preflight, under-codex guard,
+  first-use per-vendor egress consent, redaction gate, fail-closed egress
+  receipts, read-only sandboxes, `panel_budget_usd` projection).
+- `bin/gstack-vote` — the ONLY tabulation path: filename-bound attribution
+  (only canonical `<voice>.result.json` basenames, each voice at most once),
+  mandatory per-run nonce authentication (an un-nonced ready verdict is
+  demoted, fail-closed), repo-aware finding-location resolution, and the
+  per-voice consensus table (vendor-collapsed median, dissents, appendix).
+- `lib/outside-voices/{registry,vote}.ts` — voice registry with mandatory
+  security fields per adapter, the strict `parseVoiceResult` (schema/enum/
+  size/nonce/spoof validation), and `tallyVoices()` per the design's §5
+  truth table.
+- `{{OUTSIDE_VOICES}}` resolver wired into the ceo/eng/devex plan reviews
+  (replaces the codex-only `{{CODEX_PLAN_REVIEW}}` block) — panel runs
+  default-on as a standard, advisory, non-blocking step.
+- Config keys: `gemini_reviews`, `fable_reviews` (free), `panel_budget_usd`
+  (fail-closed on present-but-empty), `grok_reviews_consent`,
+  `gemini_reviews_consent`; `gstack-config has` now prints the raw stored
+  value for provenance-aware callers.
+- Security/invariant test suites (+~1,000 assertions): nonce, redaction,
+  egress-receipt, sandbox-canary (periodic tier), budget, consent, vote
+  truth-table, and ship-review regression pins.
+
+### Changed
+- Roster safe-default: `grok_reviews`/`gemini_reviews` ship **disabled**
+  (design said all-four-on) until each CLI passes a live write-denial canary
+  — grok's sandbox did not deny writes live; gemini is auth-blocked.
+- gemini sandbox pinned to `--approval-mode plan` (`-s read-only` is invalid
+  against the real CLI).
+
 ## [1.68.2.0] - 2026-08-20
 
 **Revoking a paired agent now revokes everything it holds, and the**

@@ -91,14 +91,43 @@ describe('under-codex wiring renders (#2519)', () => {
     expect(rendered).toContain('GSTACK_FORCE_CODEX_REVIEW=1');
   });
 
-  test('all three codexPreflight consumers render the probe', () => {
+  test('the inline codexPreflight consumers render the probe', () => {
+    // ship (diff adversarial) and document-release (doc review) still emit the
+    // codexPreflight bash block inline, so the under_codex mode is rendered
+    // verbatim in their sections.
     for (const file of [
       path.join(ROOT, 'ship', 'sections', 'adversarial.md'),
-      path.join(ROOT, 'plan-ceo-review', 'sections', 'review-sections.md'),
       path.join(ROOT, 'document-release', 'sections', 'release-body.md'),
     ]) {
       const rendered = fs.readFileSync(file, 'utf-8');
       expect(rendered).toContain('under_codex');
+    }
+  });
+
+  test('the panel codex path carries the under-codex nested-self-invocation guard', () => {
+    // The three plan-review surfaces (ceo/eng/devex) migrated from the inline
+    // codexPreflight block to the outside-voices panel (#2519 guard moved with
+    // them). REAL protection now lives in bin/gstack-panel: it must refuse to
+    // spawn a nested `codex exec` when running inside a live Codex session
+    // (CODEX_THREAD_ID / CODEX_SANDBOX present), honoring GSTACK_FORCE_CODEX_REVIEW=1.
+    const panel = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-panel'), 'utf-8');
+    expect(panel).toContain('CODEX_THREAD_ID');
+    expect(panel).toContain('CODEX_SANDBOX');
+    expect(panel).toContain('GSTACK_FORCE_CODEX_REVIEW');
+    expect(panel).toContain('under-codex');
+    // The guard must gate the codex voice specifically, before the codex exec spawn.
+    expect(panel).toContain('_panel_under_codex');
+  });
+
+  test('the plan-review sections reference the panel under-codex guard', () => {
+    // The plan-review sections delegate the codex preflight to gstack-panel, but
+    // still surface the guard so the orchestrator knows why the codex voice may
+    // come back ABSENT(under-codex) and how to force it.
+    for (const skill of ['plan-ceo-review', 'plan-eng-review', 'plan-devex-review']) {
+      const rendered = fs.readFileSync(
+        path.join(ROOT, skill, 'sections', 'review-sections.md'), 'utf-8');
+      expect(rendered).toContain('under-codex');
+      expect(rendered).toContain('GSTACK_FORCE_CODEX_REVIEW');
     }
   });
 });
