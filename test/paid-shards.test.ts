@@ -38,6 +38,9 @@ describe('paid test enumeration', () => {
     expect(isPaidTestFile('test/codex-e2e.test.ts')).toBe(true);
     expect(isPaidTestFile('test/codex-e2e-sol-scope.test.ts')).toBe(true);
     expect(isPaidTestFile('test/skill-e2e-triage-audit.test.ts')).toBe(true);
+    // FIX2 gate P0: the outside-voices sandbox canary spawns real CLIs, so it
+    // is a paid file too — same regression class as the two below it.
+    expect(isPaidTestFile('test/outside-voices-sandbox.test.ts')).toBe(true);
     // Outside the globs: no dash, extra suffix, or a free test.
     // 'test/skill-e2e.test.ts' is the DELETED pre-split monolith's name,
     // kept here as a regression pin: its glob-invisibility is exactly how
@@ -51,7 +54,7 @@ describe('paid test enumeration', () => {
     const files = collectPaidTestFiles();
     expect(files.length).toBeGreaterThan(0);
     expect(files.every(isPaidTestFile)).toBe(true);
-    expect(PAID_TEST_GLOBS.length).toBe(6);
+    expect(PAID_TEST_GLOBS.length).toBe(7);
 
     const shards = planPaidShards(files);
     expect(shards.flat().sort()).toEqual([...files].sort());
@@ -97,7 +100,13 @@ describe('tier classification', () => {
     // Synthetic guard shapes above can drift from the actual files — the
     // inert-demotion defect class. Pin the real sources: a guard-shape edit
     // in either file that silently runs it in gate fails here.
-    for (const file of ['test/codex-e2e.test.ts', 'test/codex-e2e-sol-scope.test.ts']) {
+    for (const file of [
+      'test/codex-e2e.test.ts',
+      'test/codex-e2e-sol-scope.test.ts',
+      // FIX2 gate P0: the sandbox write-denial canary — must never leak into
+      // the gate tier (full agentic-CLI spawns, not a ship-blocking check).
+      'test/outside-voices-sandbox.test.ts',
+    ]) {
       const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
       expect(classifyPaidTestFile(source, 'gate').included, `${file} leaked into gate tier`).toBe(false);
       expect(classifyPaidTestFile(source, 'periodic').included, `${file} dropped from periodic tier`).toBe(true);

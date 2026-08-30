@@ -1,0 +1,472 @@
+#!/usr/bin/env bun
+/**
+ * gstack-vote — the ONLY tabulation path for the Outside Voices panel.
+ *
+ * Reads per-voice `<voice>.result.json` files (the same files `bin/gstack-panel`
+ * writes), re-validates each through `parseVoiceResult`, tallies them with
+ * `tallyVoices()` (lib/outside-voices/vote.ts — IMPORTED, never re-implemented;
+ * design doc §5: "`bin/gstack-vote` is the ONLY tabulation path" / OV-5), and
+ * renders the per-voice-row consensus table from
+ * docs/designs/OUTSIDE_VOICES_PANEL.md's "## Consensus table (terminal-width)"
+ * mockup.
+ *
+ * Usage:
+ *   gstack-vote --dir <result-dir> [--json] [--surface NAME] [--budget-usd N]
+ *   gstack-vote <file-or-glob> [<file-or-glob> ...] [--json] [...]
+ *
+ * Input is EITHER `--dir DIR` (reads `DIR/*.result.json`, non-recursive) OR one
+ * or more positional file paths / glob patterns — a shell-expanded glob arrives
+ * as ordinary file paths; an unexpanded/quoted glob (e.g. a single `dir/*.json`
+ * argv token, as a test harness might pass without a shell) is expanded here.
+ *
+ * `--json` prints the raw `tallyVoices()` result (a `TallyResult`) as JSON —
+ * nothing else. Otherwise the human consensus table renders.
+ *
+ * Exit: always 0 — this is advisory and never blocks (§5). A directory/glob
+ * that matches nothing tallies as NO_VOICES (§5 guard 1), the same "proceed
+ * exactly as today with zero outside input" case, not an error.
+ *
+ * FOLD-IN from T2's report: `tallyVoices()`'s `dissents[]` is scoped to
+ * NON-anthropic voices per OV-6's literal wording. The design's consensus-table
+ * mockup additionally surfaces an anthropic voice (fable PASS) as a dissent when
+ * its own ordinal differs from the recommendation. Per T2's note, that fable-
+ * dissents-too behavior is computed LOCALLY here from `perVoice` — it does NOT
+ * change `tallyVoices()` or its `dissents[]` semantics. See `localDissents()`.
+ */
+import * as fs from 'fs';
+import * as path from 'path';
+import {
+  parseVoiceResult,
+  VERDICT_ORDINAL,
+  RESULT_VOICES,
+  type ResultVoice,
+  type VoiceResult,
+  type VoiceFinding,
+} from '../lib/outside-voices/registry';
+import { tallyVoices, type TallyResult, type PerVoiceEntry } from '../lib/outside-voices/vote';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Argument parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VALUE_FLAGS = new Set(['--dir', '--surface', '--budget-usd', '--nonce']);
+const BOOL_FLAGS = new Set(['--json', '--help', '-h']);
+
+interface ParsedArgs {
+  values: Record<string, string>;
+  bools: Record<string, boolean>;
+  positionals: string[];
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const values: Record<string, string> = {};
+  const bools: Record<string, boolean> = {};
+  const positionals: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (VALUE_FLAGS.has(a)) {
+      values[a] = argv[++i] ?? '';
+    } else if (BOOL_FLAGS.has(a)) {
+      bools[a] = true;
+    } else {
+      positionals.push(a);
+    }
+  }
+  return { values, bools, positionals };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File discovery — `--dir DIR` or positional file paths / glob patterns
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isGlobPattern(s: string): boolean {
+  return /[*?[\]]/.test(s);
+}
+
+/** Match a flat (non-recursive) basename glob (`*`/`?` only) against DIR's entries. */
+function expandGlobInDir(dir: string, pattern: string): string[] {
+  const re = new RegExp(
+    '^' +
+      pattern
+        .replace(/[.+^${}()|\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.') +
+      '$',
+  );
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((e) => re.test(e))
+    .map((e) => path.join(dir, e))
+    .sort();
+}
+
+function discoverFiles(values: Record<string, string>, positionals: string[]): string[] {
+  if (values['--dir'] !== undefined) {
+    const dir = values['--dir'];
+    if (!fs.existsSync(dir)) {
+      process.stderr.write(`gstack-vote: warning: --dir "${dir}" does not exist (tallying as no results)\n`);
+      return [];
+    }
+    return expandGlobInDir(dir, '*.result.json');
+  }
+  const files: string[] = [];
+  for (const p of positionals) {
+    if (fs.existsSync(p)) {
+      const st = fs.statSync(p);
+      if (st.isDirectory()) {
+        files.push(...expandGlobInDir(p, '*.result.json'));
+      } else {
+        files.push(p);
+      }
+      continue;
+    }
+    // Not an existing literal path — treat as an unexpanded glob (dir + pattern).
+    const dir = path.dirname(p) || '.';
+    const pattern = path.basename(p);
+    if (isGlobPattern(pattern)) {
+      files.push(...expandGlobInDir(dir === '' ? '.' : dir, pattern));
+    }
+    // Otherwise: a literal path that doesn't exist. Skip silently — the voice
+    // it would have named simply doesn't appear in the tally (§5 guard 1 covers
+    // the all-missing case as NO_VOICES, not an error).
+  }
+  return Array.from(new Set(files)).sort();
+}
+
+function voiceFromFilename(file: string): ResultVoice | undefined {
+  const base = path.basename(file).replace(/\.result\.json$/, '');
+  return (RESULT_VOICES as readonly string[]).includes(base) ? (base as ResultVoice) : undefined;
+}
+
+/** Canonical display order (§Consensus table mockup): codex, grok, gemini, fable, claude. */
+function sortByCanonicalVoiceOrder(results: VoiceResult[]): VoiceResult[] {
+  const rank = (v: ResultVoice): number => {
+    const i = (RESULT_VOICES as readonly string[]).indexOf(v);
+    return i === -1 ? RESULT_VOICES.length : i;
+  };
+  return [...results].sort((a, b) => rank(a.voice) - rank(b.voice));
+}
+
+/**
+ * Read + re-validate every discovered file through `parseVoiceResult` (T6 task
+ * brief: "read `*.result.json`, `parseVoiceResult`-revalidate, `tallyVoices()`").
+ * A file's content IS a serialized VoiceResult object (not raw CLI stdout with
+ * verdict fences); `parseVoiceResult`'s fallback extraction path (last top-level
+ * `{...}` object) finds it directly, so re-validation is a single call. The
+ * voice hint comes from the filename, so a misnamed/renamed file is caught by
+ * `parseVoiceResult`'s spoof check rather than silently trusted.
+ */
+function loadResults(files: string[], nonce?: string): VoiceResult[] {
+  const out: VoiceResult[] = [];
+  const haveNonce = typeof nonce === 'string' && nonce !== '';
+  let unauthenticatedReady = 0;
+  for (const file of files) {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      process.stderr.write(`gstack-vote: warning: could not read ${file}: ${(e as Error).message}\n`);
+      continue;
+    }
+    const voice = voiceFromFilename(file);
+    // Natural parse (no nonce enforcement) — establishes the record's REAL status
+    // and attribution. A misnamed/renamed file is still caught by the parser's
+    // own spoof check rather than silently trusted.
+    const base = voice ? parseVoiceResult(raw, { voice }) : parseVoiceResult(raw);
+
+    // MANDATORY nonce authentication at the ONLY tabulation path (§5, OV-5). A
+    // `ready` verdict — CLI voices (panel-stamped) AND the Anthropic voices
+    // (fable/claude, whose result files the orchestrator writes) — is
+    // authenticated ONLY if the SAME extraction the parser runs finds the exact
+    // per-run nonce in its `datamark`. This is FAIL-CLOSED: without a usable
+    // `--nonce`, no ready verdict can be authenticated and EVERY one is demoted
+    // to `error` (never tallied) — a missing/empty nonce no longer silently skips
+    // the check. absent/error carry no verdict to authenticate and pass through
+    // unchanged. Authenticating via a re-parse (not a raw JSON.parse of the outer
+    // file) means an envelope-wrapped result is checked on its EXTRACTED verdict
+    // block, never the wrapper. The generated recipe (Step 4) always passes
+    // --nonce, so only a direct/misconfigured invocation hits the fail-closed
+    // demotion — the safe "proceed as before this feature existed" (NO_VOICES)
+    // direction, not an accepted-unauthenticated verdict.
+    if (base.status === 'ready') {
+      const authenticated =
+        haveNonce &&
+        parseVoiceResult(raw, { voice: base.voice, datamark: nonce, requireDatamark: true }).status === 'ready';
+      if (!authenticated) {
+        unauthenticatedReady++;
+        out.push({
+          schema: base.schema,
+          voice: base.voice,
+          vendor: base.vendor,
+          status: 'error',
+          verdict: null,
+          findings: [],
+          tokens: null,
+          cost_usd: null,
+          reason: haveNonce
+            ? 'datamark mismatch — verdict unauthenticated at tabulation (per-run nonce not echoed)'
+            : 'no --nonce supplied at tabulation — a ready verdict cannot be authenticated (fail-closed; pass the per-run --nonce)',
+        });
+        continue;
+      }
+    }
+
+    out.push(base);
+  }
+  if (unauthenticatedReady > 0 && !haveNonce) {
+    process.stderr.write(
+      `gstack-vote: WARNING — ${unauthenticatedReady} ready verdict(s) demoted to error: no --nonce was supplied ` +
+        'and nonce authentication is MANDATORY at tabulation (fail-closed). Pass --nonce "<the per-run token>".\n',
+    );
+  }
+  return sortByCanonicalVoiceOrder(out);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local (non-tallyVoices) rendering helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SEVERITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, Math.max(0, max - 1)) + '…';
+}
+
+/** Pick the single most-severe, preferably-located finding to show in TOP FINDING. */
+function pickTopFinding(findings: VoiceFinding[]): VoiceFinding {
+  return [...findings].sort((a, b) => {
+    const rankDiff = (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9);
+    if (rankDiff !== 0) return rankDiff;
+    return Number(!!a.unlocated) - Number(!!b.unlocated);
+  })[0];
+}
+
+/** The TOP FINDING (promoted) column's cell content for one voice's row. */
+function topFindingCell(pv: PerVoiceEntry, result: VoiceResult | undefined): string {
+  if (pv.status === 'absent') return result?.reason ?? 'absent (no reason given)';
+  if (pv.status === 'error') return result?.reason ? `unparseable — ${result.reason}` : 'unparseable output';
+  const findings = result?.findings ?? [];
+  if (findings.length === 0) return 'no findings reported';
+  // An UNLOCATED finding CANNOT be promoted to the main table (registry invariant
+  // §7: unlocated findings drop to the appendix). The promoted column shows only
+  // a LOCATED finding; when a voice has only unlocated findings, say so and point
+  // to the appendix instead of promoting an unlocated claim. (gate P2 / eng-review)
+  const located = findings.filter((f) => !f.unlocated);
+  if (located.length === 0) {
+    return `no promotable findings (${findings.length} in appendix)`;
+  }
+  const top = pickTopFinding(located);
+  const claim = truncate(top.claim, 60);
+  // "(repro claimed)" — the repro_command is voice-supplied and has NOT been run
+  // (§7 reproduction-ranking is deferred). A "✓" would imply verification that
+  // never happened on attacker-influenceable text. (gate P2 / eng-review)
+  const tag = top.repro_command ? ' (repro claimed)' : top.location ? ' (located)' : '';
+  return `${top.severity} ${claim}${tag}`;
+}
+
+interface DisplayDissent {
+  voice: ResultVoice;
+  vendor: string;
+  verdict: string;
+}
+
+/**
+ * `tallyVoices().dissents` is scoped to non-anthropic voices (T2's documented,
+ * deliberate reading of OV-6). The mockup ALSO shows an anthropic voice (fable
+ * PASS) surfaced as a dissent, computed here — see the module doc's FOLD-IN
+ * note. `tallyVoices()` itself is never asked to change.
+ */
+function displayDissents(tally: TallyResult): DisplayDissent[] {
+  const out: DisplayDissent[] = tally.dissents.map((d) => ({ voice: d.voice, vendor: d.vendor, verdict: d.verdict }));
+  const rec = tally.recommendation;
+  if (rec === null) return out;
+  const recOrdinal = VERDICT_ORDINAL[rec];
+  for (const pv of tally.perVoice) {
+    if (pv.vendor !== 'anthropic') continue; // non-anthropic already covered above
+    if (pv.status !== 'ready' || pv.ordinal === null || pv.verdict === null) continue;
+    if (pv.ordinal === recOrdinal) continue;
+    out.push({ voice: pv.voice, vendor: pv.vendor, verdict: pv.verdict });
+  }
+  return out;
+}
+
+function computeAppendixCount(results: VoiceResult[]): number {
+  let n = 0;
+  for (const r of results) {
+    if (r.status !== 'ready') continue;
+    for (const f of r.findings) if (f.unlocated) n++;
+  }
+  return n;
+}
+
+function fmtUsd(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
+function recommendationLine(tally: TallyResult): string {
+  let line: string;
+  switch (tally.status) {
+    case 'OK': {
+      const anthropicVendor = tally.perVendor.find((v) => v.vendor === 'anthropic');
+      const collapsedNote =
+        anthropicVendor && anthropicVendor.readyVoices.length > 1 ? '; anthropic collapsed to one ordinal' : '';
+      line = `RECOMMENDATION: ${tally.recommendation}   (vendor-median across ${tally.quorum.readyVendors} vendors${collapsedNote})`;
+      break;
+    }
+    case 'SINGLE_VENDOR_ANTHROPIC':
+      line = `RECOMMENDATION: ${tally.recommendation}   (single-vendor — anthropic only; low cross-vendor diversity)`;
+      break;
+    case 'INSUFFICIENT_QUORUM':
+      line = 'RECOMMENDATION: none   (insufficient quorum — 1 voice ready; informational only)';
+      break;
+    case 'NO_VOICES':
+    default:
+      line = 'RECOMMENDATION: none   (no voices ready — proceeding exactly as before this feature existed)';
+      break;
+  }
+  if (tally.diversityFlags.includes('claude-voice-errored')) line += ' [claude-voice-errored]';
+  return line;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Table rendering — docs/designs/OUTSIDE_VOICES_PANEL.md
+// "## Consensus table (terminal-width)"
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DIVIDER = '─'.repeat(77);
+
+function renderTable(opts: {
+  results: VoiceResult[];
+  tally: TallyResult;
+  surface: string;
+  budgetCapUsd: number | null;
+}): string {
+  const { results, tally, surface, budgetCapUsd } = opts;
+  const resultsByVoice = new Map(results.map((r) => [r.voice, r]));
+  const lines: string[] = [];
+
+  lines.push('Outside Voices — advisory panel (recommendation only; the user decides)');
+
+  // cost_usd is model-reported (best-effort, CLI-only) and is used for DISPLAY
+  // ONLY — never for the spend gate (bin/gstack-panel gates on its own flat
+  // pre-estimate). Clamp each to >= 0 so an injected/negative value can't show a
+  // nonsensical or negative "spent" total. (gate P1/P2 budget)
+  const spentValues = results
+    .map((r) => r.cost_usd)
+    .filter((c): c is number => c !== null)
+    .map((c) => Math.max(0, c));
+  const spent = spentValues.reduce((a, b) => a + b, 0);
+  const spentStr = spentValues.length > 0 ? fmtUsd(spent) : 'n/a';
+  const budgetStr = budgetCapUsd !== null ? `${spentStr} / ${fmtUsd(budgetCapUsd)}` : spentStr;
+  lines.push(
+    `Surface: ${surface}    Budget: ${budgetStr}    Quorum: ${tally.quorum.readyVoices} ready · ${tally.quorum.readyVendors} vendors`,
+  );
+
+  lines.push(DIVIDER);
+  lines.push(`  ${'VOICE'.padEnd(8)}${'VENDOR'.padEnd(11)}${'STATUS'.padEnd(9)}${'VERDICT'.padEnd(11)}TOP FINDING (promoted)`);
+  lines.push(DIVIDER);
+
+  for (const pv of tally.perVoice) {
+    const verdictStr = pv.verdict ?? '—';
+    const top = topFindingCell(pv, resultsByVoice.get(pv.voice));
+    lines.push(`  ${pv.voice.padEnd(8)}${pv.vendor.padEnd(11)}${pv.status.padEnd(9)}${verdictStr.padEnd(11)}${top}`);
+  }
+
+  lines.push(DIVIDER);
+  lines.push(`  ${recommendationLine(tally)}`);
+
+  // Diversity/Dissent only makes sense once a recommendation was actually
+  // emitted (OK or SINGLE_VENDOR_ANTHROPIC) — NO_VOICES/INSUFFICIENT_QUORUM
+  // have no cross-vendor comparison to report.
+  if (tally.status === 'OK' || tally.status === 'SINGLE_VENDOR_ANTHROPIC') {
+    const dissents = displayDissents(tally);
+    const diversityLabel = tally.status === 'OK' ? 'OK' : 'LOW';
+    const vendorList = tally.perVendor.map((v) => v.vendor).join(' + ');
+    const dissentStr = dissents.length > 0 ? `${dissents.map((d) => `${d.voice}(${d.verdict})`).join(', ')} noted` : 'none';
+    lines.push(`  Diversity: ${diversityLabel} (${vendorList})     Dissent: ${dissentStr}`);
+  }
+
+  lines.push('  → Routed to the existing fix-first pipeline + human gate.  NON-BLOCKING.');
+  lines.push(DIVIDER);
+
+  const appendixCount = computeAppendixCount(results);
+  lines.push(`  Appendix (unreproduced / unlocated): ${appendixCount} findings — see gstack-review-log`);
+
+  return lines.join('\n') + '\n';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// main
+// ─────────────────────────────────────────────────────────────────────────────
+
+function printUsage(code: number): never {
+  const out = code === 0 ? process.stdout : process.stderr;
+  out.write(
+    'gstack-vote — tally Outside Voices results and render the consensus table.\n' +
+      '\n' +
+      'The ONLY tabulation path (design doc §5, OV-5): reads <voice>.result.json\n' +
+      'files (the same files bin/gstack-panel writes), re-validates each via\n' +
+      'parseVoiceResult, and tallies via tallyVoices() (lib/outside-voices/vote.ts)\n' +
+      '— never re-implemented here.\n' +
+      '\n' +
+      'Usage:\n' +
+      '  gstack-vote --dir <result-dir> [--json] [--surface NAME] [--budget-usd N] [--nonce TOKEN]\n' +
+      '  gstack-vote <file-or-glob> [<file-or-glob> ...] [--json] [...]\n' +
+      '\n' +
+      'Flags:\n' +
+      '  --dir DIR        Read DIR/*.result.json (non-recursive)\n' +
+      '  --json           Print the raw tallyVoices() result as JSON, no table\n' +
+      '  --surface NAME   Label for the Surface: line (default: "unspecified")\n' +
+      '  --budget-usd N   Budget cap shown as "spent / N" on the header line\n' +
+      '  --nonce TOKEN    Per-run datamark. Nonce authentication is MANDATORY: a\n' +
+      '                   ready verdict (CLI + Anthropic) is tallied ONLY if it\n' +
+      '                   echoes this exact token in its `datamark` field. A ready\n' +
+      '                   verdict that does not — OR any ready verdict when --nonce\n' +
+      '                   is omitted/empty — is demoted to error (fail-closed),\n' +
+      '                   never tallied. absent/error records need no nonce.\n' +
+      '\n' +
+      'Exit: always 0 — advisory, never blocking. Missing/unmatched input tallies\n' +
+      'as NO_VOICES (§5 guard 1), the same "zero outside input" case as today.\n',
+  );
+  process.exit(code);
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--help') || argv.includes('-h')) printUsage(0);
+
+  const { values, bools, positionals } = parseArgs(argv);
+  const files = discoverFiles(values, positionals);
+  // --nonce: the per-run datamark. Authentication is MANDATORY — loadResults
+  // demotes any unauthenticated ready verdict to error, and a missing/empty
+  // --nonce fails CLOSED (every ready verdict demoted), never silently skipped.
+  const nonce = values['--nonce'];
+  const results = loadResults(files, nonce);
+  const tally = tallyVoices(results);
+
+  if (bools['--json']) {
+    process.stdout.write(JSON.stringify(tally, null, 2) + '\n');
+    process.exit(0);
+  }
+
+  const surface = values['--surface'] ?? 'unspecified';
+  let budgetCapUsd: number | null = null;
+  if (values['--budget-usd'] !== undefined) {
+    const n = Number(values['--budget-usd']);
+    if (Number.isFinite(n)) {
+      budgetCapUsd = n;
+    } else {
+      process.stderr.write(`gstack-vote: warning: --budget-usd "${values['--budget-usd']}" is not numeric, ignoring\n`);
+    }
+  }
+
+  process.stdout.write(renderTable({ results, tally, surface, budgetCapUsd }));
+  process.exit(0);
+}
+
+main();

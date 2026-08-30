@@ -56,6 +56,13 @@ const POLARITY: Record<string, 'fail-closed' | 'fail-open'> = {
   'browse-tunnel (ngrok)': 'fail-closed',
   'gbrain-mcp-verify': 'fail-closed',
   'supabase-provision': 'fail-closed',
+  // Outside Voices panel (bin/gstack-panel): three external-CLI review voices.
+  // T5 writes a fail-closed outside-voice:<voice> receipt immediately before
+  // each spawn — no receipt -> no send. Untrusted review content leaving the
+  // machine unrecorded is worse than the reviewer being ABSENT.
+  'outside-voice:codex': 'fail-closed',
+  'outside-voice:gemini': 'fail-closed',
+  'outside-voice:grok': 'fail-closed',
   // fail-open: user-facing operations that must not die over an audit-log
   // hiccup; they warn on stderr and proceed.
   'design-openai': 'fail-open',
@@ -99,6 +106,11 @@ const SHELL_SINKS = [
   'bin/gstack-brain-restore',
   'bin/gstack-session-update',
   'bin/gstack-artifacts-preamble',
+  // Outside Voices panel: sources gstack-egress-lib.sh (T9 sourcing invariant).
+  // Its three external-CLI spawns are NOT curl/git, so the tree-wide NEW-SINK
+  // SCANNER cannot see them — the bespoke spot-check test below is the real
+  // enforcement for those spawn sites.
+  'bin/gstack-panel',
 ];
 
 /** design files that talk to api.openai.com — all must use receiptedFetch. */
@@ -266,6 +278,59 @@ describe('egress receipt wiring tripwire', () => {
     ).toEqual([]);
   });
 
+  test('outside voices: each external-CLI spawn in bin/gstack-panel is preceded by its own-voice receipt write', () => {
+    // The tree-wide NEW-SINK SCANNER only matches curl/git/fetch — it CANNOT
+    // see CLI subprocess spawns (codex exec / grok -p / gemini -p). This
+    // bespoke spot-check is the actual enforcement for T5's three
+    // receipt-before-spawn sites: a fail-closed `outside-voice:<voice>`
+    // receipt write must appear before each spawn, no receipt -> no send.
+    // Brittle by design (mirrors the file header) — renaming/reordering a
+    // spawn site here without carrying its receipt must fail this test.
+    const rel = 'bin/gstack-panel';
+    const src = read(rel);
+    const lines = src.split('\n');
+
+    const SPAWN_PATTERN: Record<string, RegExp> = {
+      codex: /\bcodex\s+exec\b/,
+      grok: /\bgrok\s+-p\b/,
+      gemini: /\bgemini\s+-p\b/,
+    };
+
+    for (const [voice, pattern] of Object.entries(SPAWN_PATTERN)) {
+      const spawnLines: number[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trimStart();
+        if (/^(#|\/\/)/.test(trimmed)) continue; // header/comment prose, not executed code
+        if (pattern.test(lines[i])) spawnLines.push(i);
+      }
+      expect(spawnLines.length, `${rel}: expected an executed CLI spawn site for ${voice}`).toBeGreaterThan(0);
+
+      // Sink must name THIS voice — a copy-paste receipt for a different
+      // voice must not satisfy the check.
+      const ownVoiceReceipt = new RegExp(
+        `gstack-egress-receipt["']?\\s+write\\b[^\\n]*--sink\\s+outside-voice:${voice}\\b`,
+      );
+      // The receipt write must gate the send: an empty/failed receipt id
+      // refuses (fail-closed), never falls through to the spawn.
+      const failClosedGuard = /receipt-failed/;
+
+      for (const i of spawnLines) {
+        const context = lines.slice(Math.max(0, i - 15), i).join('\n');
+        expect(
+          ownVoiceReceipt.test(context),
+          `${rel}:${i + 1}: ${voice} spawn is not preceded (within 15 lines) by a ` +
+            `gstack-egress-receipt write --sink outside-voice:${voice}`,
+        ).toBe(true);
+        expect(
+          failClosedGuard.test(context),
+          `${rel}:${i + 1}: ${voice} spawn site has no visible fail-closed guard ` +
+            '("receipt-failed") between the receipt write and the spawn — a failed ' +
+            'receipt must refuse the send, not fall through to it',
+        ).toBe(true);
+      }
+    }
+  });
+
   test('browse tunnel: every ngrok.forward() has a writeReceipt in the 30 preceding lines', () => {
     const lines = read('browse/src/server.ts').split('\n');
     const offenders: string[] = [];
@@ -323,6 +388,9 @@ describe('egress receipt wiring tripwire', () => {
       'gbrain-mcp-verify',
       'gbrain-sync',
       'memory-ingest',
+      'outside-voice:codex',
+      'outside-voice:gemini',
+      'outside-voice:grok',
       'supabase-provision',
       'telemetry-sync',
     ]);

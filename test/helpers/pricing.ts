@@ -32,6 +32,9 @@ export const PRICING: Record<string, ModelPricing> = {
   // Google
   'gemini-2.5-pro':     { input_per_mtok: 1.25,  output_per_mtok: 5.00,  as_of: '2026-04' },
   'gemini-2.5-flash':   { input_per_mtok: 0.30,  output_per_mtok: 1.20,  as_of: '2026-04' },
+
+  // xAI
+  'grok-3':             { input_per_mtok: 3.50,  output_per_mtok: 12.00, as_of: '2026-08' },
 };
 
 const WARNED = new Set<string>();

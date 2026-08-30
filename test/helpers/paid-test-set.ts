@@ -17,6 +17,14 @@ export const PAID_TEST_GLOBS = [
   'test/codex-e2e.test.ts',
   'test/codex-e2e-sol-scope.test.ts',
   'test/gemini-e2e.test.ts',
+  // Outside Voices OS-level write-denial sandbox canary (FIX2 gate P0): spawns
+  // real codex/grok/gemini CLIs, so it belongs in the paid tier like the files
+  // above. Self-gates on EVALS_TIER === 'periodic' (test/outside-voices-sandbox.test.ts
+  // header) — never runs under test:gate. Was previously in NO tier at all
+  // (gate-eng-review's core finding: M1 shipped green while this canary's
+  // safety property was untested on the build machine); this line is what
+  // makes `bun run test:periodic`/`test:periodic:sharded` actually re-run it.
+  'test/outside-voices-sandbox.test.ts',
 ] as const;
 
 /** True when a repo-relative path (either slash style) is a paid test file. */

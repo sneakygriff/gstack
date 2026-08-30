@@ -1464,19 +1464,32 @@ describe('Codex skill', () => {
     expect(content).toContain('codex exec');
   });
 
-  // D5 regression guard: the Codex outside voice is default-on, not opt-in. A future
+  // D5 regression guard: the outside-voices panel is default-on, not opt-in. A future
   // gen-skill-docs change must not silently reintroduce the "Want an outside voice?"
-  // AskUserQuestion. The CODEX_PLAN_REVIEW content renders into each skill's
+  // AskUserQuestion. The {{OUTSIDE_VOICES:surface=…}} panel (which superseded the
+  // codex-only {{CODEX_PLAN_REVIEW}} block, T11/T12) renders into each skill's
   // sections/review-sections.md (the skeleton points at it). plan-design-review uses
-  // DESIGN_OUTSIDE_VOICES, not CODEX_PLAN_REVIEW, so it is excluded here.
-  test('plan reviews run the Codex outside voice default-on (no opt-in question)', () => {
+  // DESIGN_OUTSIDE_VOICES, so it is excluded here.
+  //
+  // The Codex under-codex nested-self-invocation guard (#2519) that the legacy
+  // codex-only block rendered inline now lives in bin/gstack-panel (the panel's
+  // invocation primitive owns the codex preflight); this section references it via
+  // GSTACK_FORCE_CODEX_REVIEW. The guard's real semantics are asserted in
+  // test/codex-under-codex-detection.test.ts against bin/gstack-panel.
+  test('plan reviews run the outside-voices panel default-on (no opt-in question)', () => {
     for (const skill of ['plan-eng-review', 'plan-ceo-review', 'plan-devex-review']) {
       const content = fs.readFileSync(
         path.join(ROOT, skill, 'sections', 'review-sections.md'), 'utf-8');
       expect(content).not.toContain('Want an outside voice');
-      expect(content).toContain('Outside Voice — Independent Plan Challenge (default-on)');
-      expect(content).toContain('CODEX_MODE');
-      expect(content).toContain('command -v codex'); // preflight install check (e2e relies on it)
+      // Default-on, not opt-in — the core invariant this guard protects.
+      expect(content).toContain('Outside Voices — Advisory Panel');
+      expect(content).toContain('not an opt-in');
+      // The default roster is codex + fable + native Claude (grok/gemini are
+      // default-off until each passes a live write-denial canary — gate roster
+      // decision); the panel is still a standard, non-opt-in step.
+      expect(content).toContain('default roster is');
+      // The codex under-codex guard override, surfaced by the panel reference.
+      expect(content).toContain('GSTACK_FORCE_CODEX_REVIEW');
     }
   });
 

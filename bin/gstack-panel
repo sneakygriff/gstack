@@ -1,0 +1,911 @@
+#!/usr/bin/env bash
+# gstack-panel — the Outside Voices invocation primitive (external CLI voices).
+#
+# SECURITY-CRITICAL. This is the ONE place gstack sends untrusted-by-definition
+# review content (any-author diffs, plan docs, dependency READMEs) to third-party
+# agentic CLIs (codex/grok/gemini). Design: docs/designs/OUTSIDE_VOICES_PANEL.md
+# §2 (invocation primitive) + §Security & Threat Model. Frozen contract: T1's
+# lib/outside-voices/registry.ts + m1-decompose.md frozen contract #1.
+#
+# It runs ONLY the three external CLI voices, SEQUENTIAL-FOREGROUND, each wrapped
+# in _gstack_codex_timeout_wrapper with a per-voice ladder < 600s − slop (540s),
+# file-based transport ("$(cat FILE)"), stdin </dev/null. The `fable` subagent
+# and the native Claude pass are dispatched by the orchestrator (Claude), NOT
+# here — a subagent cannot be spawned from bash (design §2 step 5).
+#
+# Per external voice, IN ORDER (codex → grok → gemini), the mandatory pre-send
+# pipeline is (each gate that fails records the voice ABSENT loudly and never
+# sends):
+#   1. kill-switch gate  — explicit-negative on <voice>_reviews (+ binary probe)
+#   2. preflight         — codex: _gstack_codex_auth_probe; grok/gemini: fresh
+#   3. first-use consent — private/client repo + no <voice>_reviews_consent →
+#                          ABSENT(consent-missing) + a NEEDS_CONSENT line (codex
+#                          exempt — already consented via codex_reviews)
+#   4. budget projection — flat byte-based pre-estimate; over panel_budget_usd →
+#                          this + remaining external voices ABSENT(budget-capped)
+#   5. redaction pass    — (run ONCE up front; same content for all voices) a
+#                          HIGH-tier hit is masked, or if it cannot be masked the
+#                          voice(s) are ABSENT(redaction-high) — NEVER sent
+#   6. egress receipt    — fail-closed: gstack-egress-receipt write BEFORE send;
+#                          no receipt → no send → ABSENT(receipt-failed)
+#   7. invoke            — CLI with the VERBATIM registry sandbox flag; the
+#                          auto-approve tool mode is FORBIDDEN on every reviewer
+#                          path; grok --always-approve OMITTED (see below)
+#   8. output validation — parse stdout via the registry's outside-voice/v2 fence
+#                          (parse-fail → status:error, never a silent guess)
+#   9. review-log        — one bin/gstack-review-log entry per voice
+#  10. wall-clock        — any voice past --wall-clock-s is ABSENT(wall-clock)
+#
+# It is advisory: exit is 0 even when every voice is ABSENT. Per-voice status
+# lines print on stdout; tabulation is bin/gstack-vote's job, not this script's.
+#
+# grok --always-approve DECISION: OMITTED. T1 froze the reviewer contract with
+# `--sandbox read-only` as the sole security guarantee and `--always-approve`
+# deliberately absent (integration-surprise #6). This script keeps it OMITTED;
+# T7's OS-level write-denial canary owns the empirical decision to ever add it.
+#
+# grok WRITE-DENIAL: UNVERIFIED (gate FAIL P1-1). The live canary showed grok
+# WROTE a sentinel despite `--sandbox read-only`, and it wrote WITHOUT
+# `--always-approve` — so re-adding that flag would not help and must not be
+# re-added. grok's read-only sandbox is not fixable from gstack, so `grok_reviews`
+# is DEFAULT-OFF (bin/gstack-config) and grok must not go default-on until an
+# OS-level isolation that actually denies writes lands and the canary passes.
+# gemini (P1-2) and grok are BOTH default-off pending a live write-denial canary.
+#
+# Hygiene: no `set -e` (many intentional non-zero returns — gate misses, CLI
+# failures — are captured, not fatal), mirroring the autobuilder grok recipe.
+
+set -o pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+gstack-panel — run the external Outside Voices (codex/grok/gemini).
+
+  gstack-panel --surface <s> --prompt-file <abs> --out-dir <abs> \
+      [--untrusted-file <abs>] [--datamark <nonce>] \
+      [--budget-usd <n>] [--wall-clock-s <n>] [--redact-only] [--collect]
+
+  --surface        review surface id (plan-ceo|plan-eng|plan-devex|…) — logged.
+  --prompt-file    the assembled review prompt (boundary + fences already in it
+                   when the orchestrator assembled it, per design §2 step 1).
+  --out-dir        where <voice>.result.json / <voice>.raw / panel.payload.txt go.
+  --untrusted-file OPTIONAL raw untrusted content the PANEL fences+datamarks (via
+                   the registry's wrapUntrusted) and appends to the prompt. Omit
+                   when the caller pre-assembled the fences.
+  --datamark       OPTIONAL per-run nonce; stamped on the fences (with
+                   --untrusted-file) and required to be echoed back in the verdict.
+  --budget-usd     external-spend cap (default: gstack-config panel_budget_usd).
+  --wall-clock-s   per-surface wall-clock budget (default 1500).
+  --redact-only    assemble + redact + report REDACT: masked|clean|voice-absent;
+                   no preflight, consent, receipt, or CLI invoke (T8's entry).
+  --collect        salvage: read whatever <voice>.result.json exist; synthesize
+                   ABSENT for missing external voices; print summary. No invokes.
+
+Exit 0 even when voices are ABSENT (advisory).
+USAGE
+  exit 2
+}
+
+# ── argument parsing ────────────────────────────────────────────────────────
+SURFACE=""; PROMPT_FILE=""; OUT_DIR=""; UNTRUSTED_FILE=""; DATAMARK=""
+BUDGET_USD=""; WALL_CLOCK_S=""; REDACT_ONLY=0; COLLECT=0
+BUDGET_FLAG_SET=0   # 1 once --budget-usd is seen (distinguishes unset from set-but-empty)
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --surface)        SURFACE="$2"; shift 2 ;;
+    --prompt-file)    PROMPT_FILE="$2"; shift 2 ;;
+    --out-dir)        OUT_DIR="$2"; shift 2 ;;
+    --untrusted-file) UNTRUSTED_FILE="$2"; shift 2 ;;
+    --datamark)       DATAMARK="$2"; shift 2 ;;
+    --budget-usd)     BUDGET_USD="$2"; BUDGET_FLAG_SET=1; shift 2 ;;
+    --wall-clock-s)   WALL_CLOCK_S="$2"; shift 2 ;;
+    --redact-only)    REDACT_ONLY=1; shift ;;
+    --collect)        COLLECT=1; shift ;;
+    -h|--help)        usage ;;
+    *) echo "gstack-panel: unknown option: $1" >&2; usage ;;
+  esac
+done
+
+# ── locate siblings + shared libs ───────────────────────────────────────────
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REGISTRY="$BIN_DIR/../lib/outside-voices/registry.ts"
+REDACT_BIN="$BIN_DIR/gstack-redact"
+CONFIG_BIN="$BIN_DIR/gstack-config"
+REVIEW_LOG_BIN="$BIN_DIR/gstack-review-log"
+
+# Timeout wrapper + codex auth probe (defines functions only; safe to source).
+[ -f "$BIN_DIR/gstack-codex-probe" ] && . "$BIN_DIR/gstack-codex-probe"
+# Shared egress-receipt helpers. Sourced to satisfy the SHELL_SINKS sourcing
+# invariant (test/egress-receipt-wiring.test.ts) and for _gstack_egress_home;
+# the actual pre-send receipt is written by calling the bridge directly, because
+# the transport here is a CLI-arg spawn, not an HTTP body _receipted_curl wraps.
+[ -f "$BIN_DIR/gstack-egress-lib.sh" ] && . "$BIN_DIR/gstack-egress-lib.sh"
+# Last-resort timeout fallback (mirrors the autobuilder grok recipe): degrades
+# to unwrapped if the probe could not be sourced. The real wrapper is preferred.
+if ! command -v _gstack_codex_timeout_wrapper >/dev/null 2>&1; then
+  _gstack_codex_timeout_wrapper() { shift; "$@"; }
+fi
+
+# ── config-derived defaults ─────────────────────────────────────────────────
+# Budget: distinguish UNSET from explicitly-SET-but-empty (gate FAIL P1 — an
+# empty cap must FAIL CLOSED, not silently become the default).
+#   * No --budget-usd flag  → fall back to config, then the built-in $1.50. An
+#     UNSET budget legitimately uses the default.
+#   * --budget-usd PASSED (even as "" or whitespace) → keep it VERBATIM. It is an
+#     explicit request, so an EMPTY/whitespace value is a MISCONFIG, not a request
+#     for the default. It flows unchanged into _panel_validate_budget (run_panel),
+#     which fails it CLOSED to a $0 cap — which caps every external voice.
+#
+# ROUND-5 (config present-but-empty, gate FAIL P1 continued): round-4 fixed the
+# CLI-flag case above but NOT this one. `gstack-config get panel_budget_usd`
+# folds a PRESENT-BUT-EMPTY config value (a bare `panel_budget_usd:` line) into
+# the same $1.50 default it returns for an ABSENT key — both read back as "" —
+# so a hand-edited/synced empty line silently granted the full default cap
+# instead of failing closed. Use `gstack-config has panel_budget_usd` instead:
+# it exits 0 iff the key is literally present and prints the RAW stored value
+# (possibly empty), so presence and value are no longer conflated:
+#   * has exits 1 (absent)           → legitimately fall back to the $1.50
+#                                       built-in default.
+#   * has exits 0 (present), ANY raw value → keep it VERBATIM (may be empty or
+#                                       garbage). It flows unchanged into
+#                                       _panel_validate_budget (run_panel) below,
+#                                       which fails an empty/malformed value
+#                                       CLOSED to a $0 cap — same contract as the
+#                                       explicit --budget-usd "" case above — and
+#                                       passes a valid number through untouched.
+if [ "$BUDGET_FLAG_SET" != "1" ]; then
+  if [ -z "$BUDGET_USD" ]; then
+    if BUDGET_USD="$("$CONFIG_BIN" has panel_budget_usd 2>/dev/null)"; then
+      :  # present (possibly empty/garbage) — kept verbatim, validated in run_panel
+    else
+      BUDGET_USD="1.50"
+    fi
+  fi
+fi
+[ -z "$WALL_CLOCK_S" ] && WALL_CLOCK_S="1500"
+LADDER_S="540"                    # per-voice ladder cap < 600s − slop
+OUTPUT_ALLOWANCE_TOKENS="8000"    # flat per-call output ceiling for the estimate
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+SELF_EMAIL="$(git config user.email 2>/dev/null || echo "")"
+START_TS="$(date +%s 2>/dev/null || echo 0)"
+SPENT_USD="0"
+BUDGET_BLOWN=0
+REDACTION_BLOCKED=0
+REDACT_RESULT=""
+REDACT_CAUSE=""          # specific block cause: redaction-high|redaction-medium|redaction-oversize|redaction-scan-failure|redaction-engine-missing
+PAYLOAD_FILE=""
+
+# ── mandatory verdict nonce when the PANEL wraps untrusted content ───────────
+# SECURITY (gate FAIL P1): the per-run datamark nonce is the ONE thing that
+# authenticates a verdict — it is stamped on the UNTRUSTED fences and REQUIRED
+# back in every verdict (parseVoiceResult rejects a verdict whose datamark does
+# not match). When the panel itself wraps untrusted content (--untrusted-file),
+# that authentication must NOT depend on the recipe remembering to pass
+# --datamark: without a nonce, wrapUntrusted stamps nothing and the parser is
+# not asked to enforce anything, so a verdict PLANTED in the reviewed content
+# could be accepted as the voice's real answer. If untrusted content is present
+# but no --datamark was supplied, mint a per-run nonce HERE so the fences are
+# stamped and every verdict is authenticated regardless of what the caller
+# passed. The generated recipe always passes --datamark, so this only fires on a
+# misconfigured or direct invocation — and it fails CLOSED (never sends
+# un-nonced untrusted content, never accepts an unauthenticated verdict).
+#
+# The OTHER un-nonced lane — a pre-assembled --prompt-file with NO --untrusted-file
+# and NO --datamark — cannot be closed by minting here (the fences are already
+# baked into the prompt, so a freshly-minted nonce would not appear in them and
+# every real verdict would fail authentication). It is instead REFUSED in
+# run_panel (see below), so a real review run can never proceed unauthenticated.
+if [ -n "$UNTRUSTED_FILE" ] && [ -z "$DATAMARK" ]; then
+  DATAMARK="$(openssl rand -hex 8 2>/dev/null || head -c16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  if [ -z "$DATAMARK" ]; then
+    echo "gstack-panel: FATAL — untrusted content supplied without --datamark and no way to mint a nonce (openssl/urandom unavailable); refusing to send unauthenticated content (fail-closed)." >&2
+    exit 2
+  fi
+  echo "gstack-panel: WARNING — --untrusted-file given without --datamark; minted an internal per-run nonce so wrapped content is fenced and every verdict is authenticated (the recipe should pass --datamark)." >&2
+fi
+
+# The three external CLI voices, in the frozen dispatch order (codex proven
+# first). fable/claude are Anthropic subagents dispatched by the orchestrator.
+CLI_VOICES="codex grok gemini"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VoiceResult JSON construction — single-sourced through the TS registry so the
+# schema id, vendor derivation, and output validation cannot drift from T1.
+# ─────────────────────────────────────────────────────────────────────────────
+_PANEL_BUN_SCRIPT='
+const reg = await import(process.env.PANEL_REGISTRY);
+const mode = process.env.PANEL_MODE;
+const voice = process.env.PANEL_VOICE;
+const absent = (status, reason) => ({
+  schema: reg.VOICE_SCHEMA_ID, voice, vendor: reg.VENDOR_OF[voice],
+  status, verdict: null, findings: [], tokens: null, cost_usd: null,
+  ...(reason ? { reason } : {}),
+});
+if (mode === "absent") {
+  process.stdout.write(JSON.stringify(absent(process.env.PANEL_STATUS || "absent", process.env.PANEL_REASON || "")));
+} else if (mode === "parse") {
+  const raw = await Bun.stdin.text();
+  // Nonce authentication is MANDATORY for a CLI verdict — run_panel guarantees a
+  // non-empty PANEL_DATAMARK (given, or minted for --untrusted-file; the
+  // pre-assembled --prompt-file path is REFUSED without one). requireDatamark
+  // makes parseVoiceResult reject any ready verdict that does not echo the exact
+  // nonce, and fail CLOSED even if PANEL_DATAMARK were somehow empty.
+  const opts = { voice, requireDatamark: true };
+  if (process.env.PANEL_DATAMARK) opts.datamark = process.env.PANEL_DATAMARK;
+  const result = reg.parseVoiceResult(raw, opts);
+  // Persist the authenticated per-run nonce into the result so the ONLY
+  // tabulation path (gstack-vote --nonce) can code-enforce verdict
+  // authentication on EVERY voice (CLI + Anthropic), not just at panel parse
+  // time. parseVoiceResult already REQUIRED obj.datamark === PANEL_DATAMARK for
+  // a "ready" verdict (opts.datamark was set), so stamping PANEL_DATAMARK here
+  // records the exact value that was verified. absent/error records carry no
+  // verdict to authenticate, so they get no datamark.
+  if (result.status === "ready" && process.env.PANEL_DATAMARK) {
+    result.datamark = process.env.PANEL_DATAMARK;
+  }
+  process.stdout.write(JSON.stringify(result));
+} else {
+  process.stderr.write("gstack-panel bun helper: unknown mode\n"); process.exit(2);
+}
+'
+
+# Bash-only fallback vendor map (used ONLY when bun is unavailable — a broken
+# environment). Vendor is otherwise always derived from the registry's VENDOR_OF.
+_panel_vendor_fallback() {
+  case "$1" in codex) echo openai ;; grok) echo xai ;; gemini) echo google ;; fable) echo anthropic ;; claude) echo anthropic ;; *) echo unknown ;; esac
+}
+
+_panel_json() { # <mode> <voice> [status] [reason]   (raw via stdin for parse)
+  PANEL_REGISTRY="$REGISTRY" PANEL_MODE="$1" PANEL_VOICE="$2" \
+  PANEL_STATUS="${3:-}" PANEL_REASON="${4:-}" PANEL_DATAMARK="${DATAMARK:-}" \
+    bun -e "$_PANEL_BUN_SCRIPT" 2>/dev/null
+}
+
+_panel_bash_absent_json() { # <voice> <status> <reason>  — bun-less fallback
+  local voice="$1" status="$2" reason="$3" vendor
+  vendor="$(_panel_vendor_fallback "$voice")"
+  # reason is our own text (never untrusted output), but escape the basics.
+  reason="$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  printf '{"schema":"outside-voice/v2","voice":"%s","vendor":"%s","status":"%s","verdict":null,"findings":[],"tokens":null,"cost_usd":null,"reason":"%s"}' \
+    "$voice" "$vendor" "$status" "$reason"
+}
+
+_panel_review_log() { # <voice> <status> <verdict-json>
+  local voice="$1" status="$2" verdict="$3" ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+  [ -x "$REVIEW_LOG_BIN" ] || return 0
+  "$REVIEW_LOG_BIN" "$(printf '{"skill":"outside-voices-panel","surface":"%s","voice":"%s","status":"%s","verdict":%s,"timestamp":"%s"}' \
+    "$SURFACE" "$voice" "$status" "$verdict" "$ts")" >/dev/null 2>&1 || true
+}
+
+_panel_write_absent() { # <voice> <status> <reason>
+  local voice="$1" status="$2" reason="$3" json
+  json="$(_panel_json absent "$voice" "$status" "$reason")"
+  [ -z "$json" ] && json="$(_panel_bash_absent_json "$voice" "$status" "$reason")"
+  printf '%s\n' "$json" > "$OUT_DIR/$voice.result.json"
+  _panel_review_log "$voice" "$status" "null"
+  echo "  $voice: ABSENT — $reason"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Repo visibility (mirrors scripts/resolvers/redact-doc.ts): local config
+# override → gh → glab → unknown(=public-strict). Cached once per run.
+# ─────────────────────────────────────────────────────────────────────────────
+VIS_CACHE=""
+_panel_repo_visibility() {
+  if [ -z "$VIS_CACHE" ]; then
+    VIS_CACHE="$("$CONFIG_BIN" get redact_repo_visibility 2>/dev/null)"
+    [ -z "$VIS_CACHE" ] && VIS_CACHE="$(gh repo view --json visibility -q .visibility 2>/dev/null | tr 'A-Z' 'a-z')"
+    [ -z "$VIS_CACHE" ] && VIS_CACHE="$(glab repo view -F json 2>/dev/null | grep -o '"visibility":"[^"]*"' | head -1 | sed 's/.*:"//;s/"//' | tr 'A-Z' 'a-z')"
+    [ -z "$VIS_CACHE" ] && VIS_CACHE="unknown"
+  fi
+  printf '%s' "$VIS_CACHE"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Assembly — build the final prompt into $OUT_DIR/panel.assembled.txt. When
+# --untrusted-file is given the PANEL fences+datamarks it via the registry's
+# wrapUntrusted (single-sourced fences); otherwise --prompt-file is used as-is
+# (the caller/orchestrator already assembled boundary + fences, design §2 step 1).
+# ─────────────────────────────────────────────────────────────────────────────
+_panel_assemble() {
+  local assembled="$OUT_DIR/panel.assembled.txt"
+  if [ -n "$UNTRUSTED_FILE" ]; then
+    PANEL_REGISTRY="$REGISTRY" PANEL_PROMPT="$PROMPT_FILE" PANEL_UNTRUSTED="$UNTRUSTED_FILE" \
+    PANEL_OUT="$assembled" PANEL_DATAMARK="${DATAMARK:-}" bun -e '
+      const reg = await import(process.env.PANEL_REGISTRY);
+      const fs = await import("node:fs");
+      const prompt = fs.readFileSync(process.env.PANEL_PROMPT, "utf8");
+      const untrusted = fs.readFileSync(process.env.PANEL_UNTRUSTED, "utf8");
+      const mark = process.env.PANEL_DATAMARK || undefined;
+      fs.writeFileSync(process.env.PANEL_OUT, prompt + "\n" + reg.wrapUntrusted(untrusted, { datamark: mark }));
+    ' || return 1
+  else
+    cp "$PROMPT_FILE" "$assembled" || return 1
+  fi
+  printf '%s' "$assembled"
+}
+
+# Strip trailing newlines so the receipt-hashed bytes match exactly what the CLI
+# receives via "$(cat FILE)" (POSIX command substitution strips trailing \n).
+# Implemented with the SAME "$(cat FILE)" substitution used at invoke time
+# (not an awk RS="\0" trick): macOS's default /usr/bin/awk (onetrueawk) does
+# not honor RS="\0" as "whole file, one record" the way GNU awk does — it
+# silently falls back to per-line records, so `sub(/\n+$/,"")` only ever sees
+# one line at a time and every INTERNAL newline is dropped too, not just the
+# trailing ones. `$(cat FILE)` is POSIX-guaranteed to strip only trailing
+# newlines, and it is byte-for-byte what "$(cat "$payload")" reads at send
+# time, so the written file and the sent bytes cannot drift apart.
+_panel_write_stripped() { # <src-file> <dst-file>
+  printf '%s' "$(cat "$1")" > "$2"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redaction gate (design §Security mitigation #5, HARDENED past the spec — see
+# below). Runs ONCE on the assembled prompt (identical content for every voice).
+# Sets REDACT_RESULT to clean|masked|voice-absent (+ REDACT_CAUSE on a block) and,
+# on clean/masked, writes the canonical trailing-newline-stripped payload to
+# $PAYLOAD_FILE. On voice-absent NO payload is produced (nothing is ever sent).
+#
+# DEVIATION-TOWARD-SAFETY (gate FAIL: MEDIUM egress). The spec gated only on HIGH
+# and delegated MEDIUM to an orchestrator AskUserQuestion — but the generated
+# recipe never ran that AUQ, so MEDIUM secrets/PII (JWTs, Google `AIza` keys,
+# Stripe `pk_live_`, env `*_KEY=`, bearer tokens — all tier MEDIUM/category
+# secret in lib/redact-patterns.ts — plus emails/hostnames) egressed SILENTLY to
+# OpenAI/xAI/Google. This gate now treats MEDIUM as blocking too: it attempts to
+# mask EVERY HIGH+MEDIUM finding, RE-SCANS, and adopts the masked payload ONLY if
+# the re-scan is fully clean (rc 0). Maskable MEDIUM PII (email/phone/ssn/cc) is
+# auto-redacted and the voice proceeds on the masked body; a NON-maskable MEDIUM
+# secret/hit that survives masking (JWT/API key/bearer/hostname — none are
+# autoRedactable) fails CLOSED → voice-absent(redaction-medium). Nothing MEDIUM
+# leaves the machine unmasked or unnoticed. This is the ONLY masking path; it
+# never emits a payload still carrying a HIGH or MEDIUM hit (it re-scans to prove
+# it). On the MASKABLE path the external voices proceed on the masked body, so
+# the panel degrades to fewer external voices, never a broken gate. On a HARD
+# BLOCK (voice-absent) NO $PAYLOAD_FILE is written — and because the free
+# Anthropic voices (fable/native claude) reuse that same payload (resolver Step
+# 3), they are marked ABSENT too rather than sent an un-redacted prompt: the
+# review degrades to NO outside voices this run (the block messages say so). An
+# Anthropic-only redacted-or-absent payload path is a deferred design item, not
+# a silent fall-through here.
+# ─────────────────────────────────────────────────────────────────────────────
+_panel_redact_gate() { # <assembled-file>
+  local assembled="$1" vis json rc has_high has_secret gate_ids masked rescan_rc oversize autoredact_rc
+  PAYLOAD_FILE="$OUT_DIR/panel.payload.txt"
+  rm -f "$PAYLOAD_FILE"
+  vis="$(_panel_repo_visibility)"
+
+  if ! command -v bun >/dev/null 2>&1 && [ ! -x "$REDACT_BIN" ]; then
+    REDACT_RESULT="voice-absent"; REDACTION_BLOCKED=1; REDACT_CAUSE="redaction-engine-missing"
+    echo "  redaction: gstack-redact unavailable — refusing all external sends (fail-closed) ABSENT(redaction-engine-missing)"
+    return 0
+  fi
+
+  json="$("$REDACT_BIN" --from-file "$assembled" --repo-visibility "$vis" --self-email "$SELF_EMAIL" --json 2>/dev/null)"
+  rc=$?
+  # exit: 0 clean · 2 MEDIUM (no HIGH) · 3 HIGH (or oversize synthetic HIGH) · 1 usage error
+  case "$rc" in
+    0)
+      REDACT_RESULT="clean"; _panel_write_stripped "$assembled" "$PAYLOAD_FILE"
+      echo "  redaction: clean (repo=$vis)"; return 0 ;;
+    2|3)
+      # HIGH and/or MEDIUM present. Both gate now (see the deviation note above).
+      oversize="$(printf '%s' "$json" | bun -e 'try{const j=JSON.parse(await Bun.stdin.text());console.log(j.oversize?"1":"0")}catch{console.log("0")}' 2>/dev/null)"
+      if [ "$oversize" = "1" ]; then
+        rm -f "$assembled"   # do not leave an unsendable secret-bearing intermediate
+        REDACT_RESULT="voice-absent"; REDACTION_BLOCKED=1; REDACT_CAUSE="redaction-oversize"
+        echo "  redaction: input too large to scan safely (fail-closed) — external voices ABSENT(redaction-oversize)"
+        return 0
+      fi
+      has_high="$([ "$rc" = "3" ] && echo 1 || echo 0)"
+      # Any credential (category:secret) at HIGH or MEDIUM? A secret must NEVER be
+      # mask-and-adopted: masking a maskable PII SUBSPAN of a secret (e.g. the
+      # digit run inside `xoxb-1234567890-…`, or a JWT's `iat` claim) partially
+      # mangles it — the re-scan can then read a lower tier or even "clean" while
+      # partial secret bytes remain in the payload. So when a secret is present we
+      # fail CLOSED outright (block by original tier), never masking.
+      has_secret="$(printf '%s' "$json" | bun -e 'try{const j=JSON.parse(await Bun.stdin.text());console.log((j.findings||[]).some(f=>f.category==="secret"&&(f.severity==="HIGH"||f.severity==="MEDIUM"))?"1":"0")}catch{console.log("1")}' 2>/dev/null)"
+      if [ "$has_secret" = "1" ]; then
+        rm -f "$PAYLOAD_FILE" "$assembled"
+        REDACT_RESULT="voice-absent"; REDACTION_BLOCKED=1
+        if [ "$has_high" = "1" ]; then
+          REDACT_CAUSE="redaction-high"
+          echo "  redaction: HIGH-tier secret cannot be masked without gutting the review — external voices ABSENT(redaction-high). Rotate + redact at source, then re-run."
+        else
+          REDACT_CAUSE="redaction-medium"
+          echo "  redaction: MEDIUM-tier secret cannot be masked (non-autoRedactable — e.g. a JWT / API key / bearer token / \`*_KEY=\`) — refusing external egress ABSENT(redaction-medium). The Anthropic voices reuse this same blocked payload (Step 3), so the whole panel is skipped this run — redact at source, then re-run."
+        fi
+        return 0
+      fi
+      # No secrets — only non-secret gate-tier hits (PII / internal / legal). Mask
+      # the maskable ones (PII email/phone/ssn/cc) into a NEW file, RE-SCAN, and
+      # adopt ONLY if the re-scan is fully clean. A non-maskable non-secret hit
+      # (internal hostname, named criticism, …) that survives → fail closed.
+      gate_ids="$(printf '%s' "$json" | bun -e 'try{const j=JSON.parse(await Bun.stdin.text());console.log((j.findings||[]).filter(f=>f.severity==="HIGH"||f.severity==="MEDIUM").map(f=>f.id).join(","))}catch{console.log("")}' 2>/dev/null)"
+      masked="$OUT_DIR/panel.masked.txt"
+      "$REDACT_BIN" --from-file "$assembled" --repo-visibility "$vis" --self-email "$SELF_EMAIL" --auto-redact "$gate_ids" >"$masked" 2>/dev/null
+      autoredact_rc=$?
+      # Fail CLOSED if the auto-redact command itself FAILED or produced an EMPTY
+      # mask (gate P2). The redact scan above succeeded, but the masking pass is
+      # a SEPARATE invocation that can die mid-write (disk-full, engine crash) and
+      # leave $masked empty — and an EMPTY file re-scans "clean" (rc 0), which
+      # would then adopt+send an EMPTY payload to every voice (wasted spend,
+      # garbage results). A crashed masker must never degrade to "clean": require
+      # a successful, non-empty mask before the re-scan can adopt it.
+      if [ "$autoredact_rc" != "0" ] || [ ! -s "$masked" ]; then
+        rm -f "$masked" "$PAYLOAD_FILE" "$assembled"
+        REDACT_RESULT="voice-absent"; REDACTION_BLOCKED=1
+        if [ "$has_high" = "1" ]; then
+          REDACT_CAUSE="redaction-high"
+          echo "  redaction: auto-redact failed or produced empty output (fail-closed) — external voices ABSENT(redaction-high). Redact at source, then re-run."
+        else
+          REDACT_CAUSE="redaction-medium"
+          echo "  redaction: auto-redact failed or produced empty output (fail-closed) — refusing external egress ABSENT(redaction-medium). Redact at source, then re-run."
+        fi
+        return 0
+      fi
+      "$REDACT_BIN" --from-file "$masked" --repo-visibility "$vis" --self-email "$SELF_EMAIL" --json >/dev/null 2>&1
+      rescan_rc=$?
+      if [ "$rescan_rc" = "0" ]; then
+        REDACT_RESULT="masked"; _panel_write_stripped "$masked" "$PAYLOAD_FILE"; rm -f "$masked"
+        echo "  redaction: MEDIUM PII masked, re-scan clean (repo=$vis)"; return 0
+      fi
+      rm -f "$masked" "$PAYLOAD_FILE" "$assembled"
+      REDACT_RESULT="voice-absent"; REDACTION_BLOCKED=1
+      if [ "$has_high" = "1" ]; then
+        REDACT_CAUSE="redaction-high"
+        echo "  redaction: HIGH-tier hit cannot be masked — external voices ABSENT(redaction-high). Redact at source, then re-run."
+      else
+        REDACT_CAUSE="redaction-medium"
+        echo "  redaction: MEDIUM-tier PII/internal content cannot be masked (non-autoRedactable — e.g. an internal hostname) — refusing external egress ABSENT(redaction-medium). The Anthropic voices reuse this same blocked payload (Step 3), so the whole panel is skipped this run — redact at source, then re-run."
+      fi
+      return 0 ;;
+    *)
+      # Usage error / unexpected — fail closed.
+      rm -f "$assembled"
+      REDACT_RESULT="voice-absent"; REDACTION_BLOCKED=1; REDACT_CAUSE="redaction-scan-failure"
+      echo "  redaction: scan failed (exit $rc) — refusing all external sends (fail-closed) ABSENT(redaction-scan-failure)"
+      return 0 ;;
+  esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Budget projection (design §Roster,Cost&Budget; integration-surprise #9). A
+# DOCUMENTED FLAT byte-based pre-estimate — "bounded decay", not accounting,
+# because real tokens/cost are only known AFTER a call (OV-18):
+#
+#   est_input_tokens  = payload_bytes / 4               (≈4 bytes/token)
+#   est_output_tokens = OUTPUT_ALLOWANCE_TOKENS (8000)  (fixed per-call ceiling)
+#   est_usd = est_input_tokens/1e6 × INPUT_RATE[voice]
+#           + est_output_tokens/1e6 × OUTPUT_RATE[voice]
+#
+# Rates (USD/MTok) are flat per-voice constants anchored to test/helpers/pricing.ts
+# (T4): codex 2.50/10.00 (GPT-5.x), grok 3.50/12.00 (grok-3), gemini 1.25/5.00
+# (gemini-2.5-pro). Deliberately conservative so the cap errs toward STOPPING
+# spend. Before each external invoke: if SPENT + est > cap, this and every
+# remaining external voice are ABSENT(budget-capped).
+# ─────────────────────────────────────────────────────────────────────────────
+_panel_rate_in()  { case "$1" in codex) echo 2.50 ;; grok) echo 3.50 ;; gemini) echo 1.25 ;; *) echo 3.50 ;; esac; }
+_panel_rate_out() { case "$1" in codex) echo 10.00 ;; grok) echo 12.00 ;; gemini) echo 5.00 ;; *) echo 12.00 ;; esac; }
+
+_panel_cost_estimate() { # <voice>  → prints est USD (needs $PAYLOAD_FILE)
+  local voice="$1" bytes ir or
+  bytes="$(wc -c < "$PAYLOAD_FILE" 2>/dev/null | tr -d ' ')"
+  [ -z "$bytes" ] && bytes=0
+  ir="$(_panel_rate_in "$voice")"; or="$(_panel_rate_out "$voice")"
+  awk -v b="$bytes" -v ir="$ir" -v orr="$or" -v oa="$OUTPUT_ALLOWANCE_TOKENS" \
+    'BEGIN{ printf "%.6f", (b/4.0/1000000.0)*ir + (oa/1000000.0)*orr }'
+}
+
+# Validate the external-spend cap. A MALFORMED value (non-numeric, negative,
+# multi-dot, empty, digit-less) must FAIL CLOSED — never silently disable the
+# cap (gate FAIL P1: a crafted panel_budget_usd/--budget-usd must not bypass the
+# gate). awk would coerce a non-number to 0 on its own, but a NEGATIVE value
+# (`-5`) would be honored by awk as a negative ceiling — `(s+e) > -5` is always
+# true only after the first voice, but `s+e > c` with c<0 disables nothing
+# cleanly, so reject it explicitly. Mirrors bin/gstack-config's own
+# panel_budget_usd rule so the contract is identical on write and here. Prints
+# the validated cap (a bare non-negative decimal), or "0" on any invalid input —
+# a zero cap budget-caps EVERY external voice (est is always > 0), the safe
+# direction.
+_panel_validate_budget() { # <raw-budget>  → prints the validated cap
+  case "$1" in
+    ''|*[!0-9.]*|*.*.*) printf '%s' "0" ;;   # empty, non-[0-9.] char (incl. '-'), or 2+ dots
+    *[0-9]*)            printf '%s' "$1" ;;   # has a digit, ≤1 dot, only [0-9.] → valid
+    *)                  printf '%s' "0" ;;    # e.g. a bare "." — no digit
+  esac
+}
+
+_panel_over_budget() { # <est>  → exit 0 (true) when SPENT + est > cap
+  awk -v s="$SPENT_USD" -v e="$1" -v c="$BUDGET_USD" 'BEGIN{ exit !((s+e) > c) }'
+}
+
+_panel_add_spend() { # <voice> <est>  — accumulate the FLAT PRE-ESTIMATE only
+  # Gate FIX (P1/P2 budget): the spend cap must gate on the deterministic,
+  # byte-based pre-estimate ONLY — never on a model-reported `cost_usd`. That
+  # field originates in the voice's own stdout verdict block (attacker-
+  # influenceable: `cost_usd:0` keeps SPENT_USD flat so every remaining voice
+  # still fires; `cost_usd:-1e9` drives it negative and disables the cap for the
+  # rest of the run). The estimate is the one spend rail; it is what the
+  # _panel_over_budget projection compares against, so it is what accumulates
+  # here. The model-reported cost is used for DISPLAY ONLY (bin/gstack-vote,
+  # clamped >= 0), never for the gate.
+  local est="$2"
+  SPENT_USD="$(awk -v s="$SPENT_USD" -v a="$est" 'BEGIN{ printf "%.6f", s + a }')"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Consent gate (design §Security mitigation #7; T3). Private/client repo ⇒
+# first-use per-vendor consent for the NEW vendors (grok, gemini). codex is
+# EXEMPT (already consented via codex_reviews). "No consent" is treated as
+# EMPTY/ABSENT (T3), never the literal string "unset". Only a definitively
+# PUBLIC repo skips the gate — private OR unknown require consent (fail-closed:
+# a repo gh/glab cannot confirm public may be a local/private one).
+# ─────────────────────────────────────────────────────────────────────────────
+_panel_consent_ok() { # <voice>  → 0 when the send may proceed, 1 when consent is missing
+  local voice="$1" vis consent
+  [ "$voice" = "codex" ] && return 0        # exempt
+  vis="$(_panel_repo_visibility)"
+  [ "$vis" = "public" ] && return 0         # public repo → no per-vendor consent
+  consent="$("$CONFIG_BIN" get "${voice}_reviews_consent" 2>/dev/null)"
+  # Gate FIX (P1/P2-3 consent): require an EXPLICIT POSITIVE grant, fail-closed
+  # on everything else. The old `[ -n "$consent" ]` treated ANY non-empty value
+  # as permission, so a hand-edited/synced `disabled`/`denied`/`revoked`/`no`
+  # ENABLED egress instead of failing closed. Accepted grants: the literal
+  # `enabled` (what the recipe writes) or `granted`/`granted:<date>` (the config
+  # header's documented shape). Anything else = NO consent.
+  case "$consent" in
+    enabled|granted|granted:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output validation + result persistence for a voice that RAN.
+# ─────────────────────────────────────────────────────────────────────────────
+_panel_finish_run() { # <voice> <rc> <raw-file>
+  local voice="$1" rc="$2" rawfile="$3" json status verdict
+  if [ "$rc" = "124" ]; then
+    _panel_write_absent "$voice" absent "CLI timed out after ${LADDER_S}s (exit 124)"
+    return 0
+  fi
+  json="$(_panel_json parse "$voice" < "$rawfile")"
+  if [ -z "$json" ]; then
+    # bun/registry unavailable, or parse crashed — fail to an error record.
+    json="$(_panel_bash_absent_json "$voice" error "voice ran (exit $rc) but output could not be parsed")"
+  fi
+  printf '%s\n' "$json" > "$OUT_DIR/$voice.result.json"
+  status="$(printf '%s' "$json" | bun -e 'try{const j=JSON.parse(await Bun.stdin.text());console.log(j.status)}catch{console.log("error")}' 2>/dev/null)"
+  [ -z "$status" ] && status="error"
+  verdict="$(printf '%s' "$json" | bun -e 'try{const j=JSON.parse(await Bun.stdin.text());console.log(j.verdict==null?"null":JSON.stringify(j.verdict))}catch{console.log("null")}' 2>/dev/null)"
+  [ -z "$verdict" ] && verdict="null"
+  _panel_review_log "$voice" "$status" "$verdict"
+  case "$status" in
+    ready) echo "  $voice: READY — verdict $verdict (exit $rc)" ;;
+    error) echo "  $voice: ERROR — ran but output failed validation (exit $rc)" ;;
+    *)     echo "  $voice: $status (exit $rc)" ;;
+  esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-voice invoke sites — EXPLICIT per voice so (a) the verbatim registry
+# sandbox flag string is greppable for the T10 anti-drift invariant, and (b) the
+# fail-closed egress receipt for outside-voice:<v> provably precedes each spawn
+# for the T9 wiring spot-check. Each writes stdout to $OUT_DIR/<voice>.raw.
+# The receipt hashes $PAYLOAD_FILE — the EXACT bytes passed as "$(cat …)".
+# The auto-approve tool mode is FORBIDDEN on every path; grok --always-approve
+# is intentionally OMITTED (see header).
+# ─────────────────────────────────────────────────────────────────────────────
+_panel_invoke_codex() {
+  local payload="$PAYLOAD_FILE" rid rc
+  rid="$("$BIN_DIR/gstack-egress-receipt" write --sink outside-voice:codex --host api.openai.com \
+        --class review-prompt --payload-file "$payload" --consent "codex_reviews=enabled" 2>/dev/null)" || rid=""
+  if [ -z "$rid" ]; then
+    _panel_write_absent codex absent "egress receipt could not be written — refusing send (fail-closed): receipt-failed"
+    return 0
+  fi
+  _gstack_codex_timeout_wrapper "$LADDER_S" codex exec "$(cat "$payload")" -C "$REPO_ROOT" \
+    -s read-only -c 'model_reasoning_effort="high"' -c 'web_search="cached"' \
+    </dev/null >"$OUT_DIR/codex.raw" 2>"$OUT_DIR/codex.err"
+  rc=$?
+  "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "exit:$rc" 2>/dev/null || true
+  _panel_finish_run codex "$rc" "$OUT_DIR/codex.raw"
+}
+
+_panel_invoke_grok() {
+  local payload="$PAYLOAD_FILE" rid rc
+  rid="$("$BIN_DIR/gstack-egress-receipt" write --sink outside-voice:grok --host api.x.ai \
+        --class review-prompt --payload-file "$payload" --consent "grok_reviews=enabled" 2>/dev/null)" || rid=""
+  if [ -z "$rid" ]; then
+    _panel_write_absent grok absent "egress receipt could not be written — refusing send (fail-closed): receipt-failed"
+    return 0
+  fi
+  _gstack_codex_timeout_wrapper "$LADDER_S" grok -p "$(cat "$payload")" \
+    --sandbox read-only --output-format plain \
+    </dev/null >"$OUT_DIR/grok.raw" 2>"$OUT_DIR/grok.err"
+  rc=$?
+  "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "exit:$rc" 2>/dev/null || true
+  _panel_finish_run grok "$rc" "$OUT_DIR/grok.raw"
+}
+
+_panel_invoke_gemini() {
+  local payload="$PAYLOAD_FILE" rid rc
+  rid="$("$BIN_DIR/gstack-egress-receipt" write --sink outside-voice:gemini --host generativelanguage.googleapis.com \
+        --class review-prompt --payload-file "$payload" --consent "gemini_reviews=enabled" 2>/dev/null)" || rid=""
+  if [ -z "$rid" ]; then
+    _panel_write_absent gemini absent "egress receipt could not be written — refusing send (fail-closed): receipt-failed"
+    return 0
+  fi
+  _gstack_codex_timeout_wrapper "$LADDER_S" gemini -p "$(cat "$payload")" \
+    --approval-mode plan \
+    </dev/null >"$OUT_DIR/gemini.raw" 2>"$OUT_DIR/gemini.err"
+  rc=$?
+  "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "exit:$rc" 2>/dev/null || true
+  _panel_finish_run gemini "$rc" "$OUT_DIR/gemini.raw"
+}
+
+# ── auth preflight per voice ────────────────────────────────────────────────
+# codex has an authoritative probe. No grok/gemini reviewer probe exists (T1);
+# these are written fresh and fail-OPEN on uncertainty — the bounded (540s)
+# sandboxed invoke is the real auth test and any failure is recorded as a loud
+# `error` result, so a soft probe never wrongly withholds a working voice.
+_panel_auth_ok() { # <voice>  → 0 proceed, 1 definitively unauthed
+  case "$1" in
+    codex)
+      if command -v _gstack_codex_auth_probe >/dev/null 2>&1; then
+        _gstack_codex_auth_probe >/dev/null 2>&1 && return 0 || return 1
+      fi
+      return 0 ;;
+    grok|gemini) return 0 ;;   # fail-open; the sandboxed invoke is the real test
+    *) return 0 ;;
+  esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Under-codex nested-self-invocation guard (#2519, maintainer decision 7). A live
+# Codex session exports CODEX_THREAD_ID / CODEX_SANDBOX into every shell it spawns
+# (verified against a live `codex exec 'env | grep -i codex'` capture, codex
+# 0.147.0). Spawning `codex exec` from inside one is the same model reviewing
+# itself at multiplied token cost (observed: one /review = 15M tokens), so the
+# `codex` voice is marked ABSENT(under-codex) rather than invoked. This mirrors
+# the codexPreflight probe (scripts/resolvers/constants.ts) verbatim: the guard
+# fires only when GSTACK_FORCE_CODEX_REVIEW=1 is NOT set AND at least one of the
+# two env vars is present; GSTACK_FORCE_CODEX_REVIEW=1 forces the nested pass.
+# codex-specific: nested self-review is a codex-vs-codex risk; grok/gemini are
+# different vendors, so no equivalent guard applies to them.
+_panel_under_codex() { # → 0 (true) when the codex voice must be skipped
+  [ "${GSTACK_FORCE_CODEX_REVIEW:-0}" = "1" ] && return 1
+  [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# --collect : salvage. Read whatever <voice>.result.json exist; synthesize
+# ABSENT for missing external voices; print a summary. No invokes, no sends.
+# ─────────────────────────────────────────────────────────────────────────────
+run_collect() {
+  [ -n "$OUT_DIR" ] || { echo "gstack-panel --collect requires --out-dir" >&2; exit 2; }
+  [ -d "$OUT_DIR" ] || { echo "gstack-panel --collect: no such out-dir: $OUT_DIR" >&2; exit 2; }
+  echo "gstack-panel --collect (salvage) — $OUT_DIR"
+  local voice status
+  for voice in $CLI_VOICES; do
+    if [ -f "$OUT_DIR/$voice.result.json" ]; then
+      status="$(bun -e 'try{const fs=await import("node:fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));console.log(j.status||"?")}catch{console.log("unparseable")}' -- "$OUT_DIR/$voice.result.json" 2>/dev/null)"
+      [ -z "$status" ] && status="present"
+      echo "  $voice: $status (result file present)"
+    else
+      _panel_write_absent "$voice" absent "no result file recovered (salvage)"
+    fi
+  done
+  # Report any other result files (e.g. fable/claude the orchestrator wrote).
+  local f base
+  for f in "$OUT_DIR"/*.result.json; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f" .result.json)"
+    case " $CLI_VOICES " in *" $base "*) : ;; *) echo "  $base: (present, non-CLI voice)" ;; esac
+  done
+  exit 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# --redact-only : assemble + redact + report. No preflight/consent/receipt/send.
+# Prints REDACT: masked|clean|voice-absent and PAYLOAD: <path|none> (T8's entry).
+# ─────────────────────────────────────────────────────────────────────────────
+run_redact_only() {
+  [ -n "$PROMPT_FILE" ] || { echo "gstack-panel --redact-only requires --prompt-file" >&2; exit 2; }
+  [ -f "$PROMPT_FILE" ] || { echo "gstack-panel: no such prompt-file: $PROMPT_FILE" >&2; exit 2; }
+  if [ -z "$OUT_DIR" ]; then
+    OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gstack-panel-redact-XXXXXX")" || { echo "gstack-panel: mktemp failed" >&2; exit 2; }
+  fi
+  mkdir -p "$OUT_DIR"
+  local assembled
+  assembled="$(_panel_assemble)" || { echo "gstack-panel: assembly failed" >&2; exit 2; }
+  _panel_redact_gate "$assembled"
+  echo "REDACT: $REDACT_RESULT"
+  if [ "$REDACT_RESULT" = "voice-absent" ] || [ ! -f "$PAYLOAD_FILE" ]; then
+    echo "PAYLOAD: none"
+  else
+    echo "PAYLOAD: $PAYLOAD_FILE"
+  fi
+  exit 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default : run the external CLI voices sequential-foreground.
+# ─────────────────────────────────────────────────────────────────────────────
+run_panel() {
+  [ -n "$PROMPT_FILE" ] || { echo "gstack-panel requires --prompt-file" >&2; usage; }
+  [ -f "$PROMPT_FILE" ] || { echo "gstack-panel: no such prompt-file: $PROMPT_FILE" >&2; exit 2; }
+  [ -n "$OUT_DIR" ]     || { echo "gstack-panel requires --out-dir" >&2; usage; }
+  mkdir -p "$OUT_DIR"
+
+  # ── mandatory verdict nonce, incl. the pre-assembled prompt-file path (P1) ──
+  # By here the top-level block already MINTED a nonce for the --untrusted-file
+  # path. If DATAMARK is STILL empty we are on the pre-assembled --prompt-file
+  # path (no --untrusted-file) with no --datamark: the caller baked the fenced
+  # untrusted content into the prompt itself but gave no nonce to authenticate the
+  # verdict against, so a verdict PLANTED in that content could be accepted as the
+  # voice's real answer. Minting here would not help (the fences are already
+  # assembled — a new nonce would not appear in them), so FAIL CLOSED: refuse to
+  # run. A real review run always carries content that must be authenticated, and
+  # the generated recipe always passes --datamark (or --untrusted-file), so this
+  # only fires on a misconfigured or direct invocation. (--redact-only / --collect
+  # never send or parse a verdict, so this guard is scoped to run_panel only.)
+  if [ -z "$DATAMARK" ]; then
+    echo "gstack-panel: FATAL — this run carries content that must be authenticated but no --datamark was supplied, and none can be minted for the pre-assembled --prompt-file path. Refusing to send unauthenticated content / accept an unauthenticated verdict (fail-closed). Pass --datamark \"<per-run nonce>\", or use --untrusted-file so the panel fences + mints one." >&2
+    exit 2
+  fi
+
+  # Validate the spend cap — a malformed value must FAIL CLOSED (P1: cap bypass).
+  local _budget_raw="$BUDGET_USD"
+  BUDGET_USD="$(_panel_validate_budget "$BUDGET_USD")"
+  if [ "$BUDGET_USD" = "0" ] && [ "$_budget_raw" != "0" ]; then
+    echo "gstack-panel: WARNING — invalid budget cap '$_budget_raw' (must be a non-negative decimal); failing closed to \$0.00 (every external voice budget-capped)." >&2
+  fi
+
+  echo "gstack-panel — surface=$SURFACE budget=\$$BUDGET_USD wall=${WALL_CLOCK_S}s ladder=${LADDER_S}s"
+
+  # Assemble + redact ONCE (identical content for every voice). Redaction is the
+  # egress gate: a HIGH-tier hit that cannot be masked blocks ALL external sends.
+  local assembled
+  assembled="$(_panel_assemble)" || { echo "gstack-panel: assembly failed" >&2; exit 2; }
+  _panel_redact_gate "$assembled"
+
+  local voice enabled reason now elapsed est
+  for voice in $CLI_VOICES; do
+    # (10) wall-clock — any voice reached past the surface budget is ABSENT.
+    now="$(date +%s 2>/dev/null || echo 0)"
+    elapsed=$(( now - START_TS ))
+    if [ "$elapsed" -ge "$WALL_CLOCK_S" ]; then
+      _panel_write_absent "$voice" absent "wall-clock budget ${WALL_CLOCK_S}s exceeded (${elapsed}s elapsed): wall-clock"
+      continue
+    fi
+
+    # (1) kill-switch — explicit-negative on <voice>_reviews, per-voice named
+    # vars mirroring the autobuilder grok recipe (pinned by T10(d)). A missing
+    # binary is folded into the "absent" value so the ONE gate covers both the
+    # disabled-config and the not-installed cases.
+    enabled="$("$CONFIG_BIN" get "${voice}_reviews" 2>/dev/null)"
+    if [ -z "$enabled" ]; then
+      # config-read FAILED (gate FAIL P1: fail-OPEN fixed). gstack-config
+      # resolves a present-but-EMPTY value to its per-voice default
+      # (grok/gemini→disabled, codex→enabled), so an empty result here means the
+      # gstack-config BINARY itself produced nothing — missing, non-executable,
+      # or errored on a partial/broken install. The old fallback here was
+      # `enabled="enabled"`, which silently RE-ENABLED a default-off external
+      # voice (grok/gemini) on exactly that broken install and egressed to a
+      # third party. FAIL CLOSED instead: never default a voice to enabled on a
+      # config-read failure. Mark it absent and skip.
+      _panel_write_absent "$voice" absent "config read failed for ${voice}_reviews (gstack-config unavailable) — failing closed: config-unavailable"; continue
+    fi
+    command -v "$voice" >/dev/null 2>&1 || enabled="absent"
+    case "$voice" in
+      codex)
+        _CODEX_ENABLED="$enabled"
+        if [ "$_CODEX_ENABLED" = "absent" ] || [ "$_CODEX_ENABLED" = "disabled" ] || [ "$_CODEX_ENABLED" = "off" ]; then
+          reason="$([ "$_CODEX_ENABLED" = "absent" ] && echo "codex CLI not installed" || echo "codex_reviews=$_CODEX_ENABLED")"
+          _panel_write_absent codex absent "$reason: kill-switch"; continue
+        fi
+        # (1b) under-codex nested-self-invocation guard (#2519) — skip the codex
+        # voice when this session already runs inside a live Codex host (would be
+        # the same model reviewing itself at 15M-token cost). Runs BEFORE the
+        # egress receipt + `codex exec` spawn. GSTACK_FORCE_CODEX_REVIEW=1 forces.
+        if _panel_under_codex; then
+          _panel_write_absent codex absent "running inside a live Codex session (CODEX_THREAD_ID/CODEX_SANDBOX set) — nested codex passes skipped; set GSTACK_FORCE_CODEX_REVIEW=1 to force: under-codex"; continue
+        fi ;;
+      grok)
+        _GROK_ENABLED="$enabled"
+        # grok is DEFAULT-OFF (read-only sandbox not write-denial-verified). FAIL
+        # CLOSED with a WHITELIST: proceed ONLY on an explicit positive `enabled`
+        # (with the CLI installed). absent/disabled/off AND any unknown/garbage
+        # value (hand-edit or sync corruption) are ALL rejected — a garbage config
+        # must never re-enable a default-off, unverified-sandbox external voice.
+        if [ "$_GROK_ENABLED" != "enabled" ]; then
+          if [ "$_GROK_ENABLED" = "absent" ]; then
+            reason="grok CLI not installed"
+          elif [ "$_GROK_ENABLED" = "disabled" ] || [ "$_GROK_ENABLED" = "off" ]; then
+            reason="grok_reviews=$_GROK_ENABLED"
+          else
+            reason="grok_reviews=$_GROK_ENABLED (not an explicit 'enabled'; default-off fails closed)"
+          fi
+          _panel_write_absent grok absent "$reason: kill-switch"; continue
+        fi ;;
+      gemini)
+        _GEMINI_ENABLED="$enabled"
+        # gemini is DEFAULT-OFF: same fail-closed WHITELIST as grok — only an
+        # explicit positive `enabled` (CLI installed) proceeds; a garbage/unknown
+        # value never re-enables the voice.
+        if [ "$_GEMINI_ENABLED" != "enabled" ]; then
+          if [ "$_GEMINI_ENABLED" = "absent" ]; then
+            reason="gemini CLI not installed"
+          elif [ "$_GEMINI_ENABLED" = "disabled" ] || [ "$_GEMINI_ENABLED" = "off" ]; then
+            reason="gemini_reviews=$_GEMINI_ENABLED"
+          else
+            reason="gemini_reviews=$_GEMINI_ENABLED (not an explicit 'enabled'; default-off fails closed)"
+          fi
+          _panel_write_absent gemini absent "$reason: kill-switch"; continue
+        fi ;;
+    esac
+
+    # (5) redaction — resolved once, applied here: block every external send.
+    # REDACT_CAUSE carries the specific reason (redaction-high|redaction-medium|
+    # redaction-oversize|redaction-scan-failure|redaction-engine-missing).
+    if [ "$REDACTION_BLOCKED" = "1" ]; then
+      _panel_write_absent "$voice" absent "redaction gate blocked external egress: ${REDACT_CAUSE:-redaction-high}"; continue
+    fi
+
+    # (2) preflight (auth).
+    if ! _panel_auth_ok "$voice"; then
+      _panel_write_absent "$voice" absent "auth preflight failed: unauthenticated"; continue
+    fi
+
+    # (3) first-use per-vendor consent (private/client repo; codex exempt).
+    if ! _panel_consent_ok "$voice"; then
+      echo "NEEDS_CONSENT: $voice"
+      _panel_write_absent "$voice" absent "private/client repo, no ${voice}_reviews_consent recorded: consent-missing"; continue
+    fi
+
+    # (4) budget projection — flat pre-estimate; over cap → this + remaining capped.
+    if [ "$BUDGET_BLOWN" = "1" ]; then
+      _panel_write_absent "$voice" absent "external budget \$$BUDGET_USD reached earlier: budget-capped"; continue
+    fi
+    est="$(_panel_cost_estimate "$voice")"
+    if _panel_over_budget "$est"; then
+      BUDGET_BLOWN=1
+      _panel_write_absent "$voice" absent "projected \$$est would exceed cap \$$BUDGET_USD (spent \$$SPENT_USD): budget-capped"; continue
+    fi
+
+    # (6) receipt (fail-closed) → (7) invoke → (8) parse → (9) review-log.
+    echo "  $voice: invoking (est \$$est, spent \$$SPENT_USD)…"
+    case "$voice" in
+      codex)  _panel_invoke_codex ;;
+      grok)   _panel_invoke_grok ;;
+      gemini) _panel_invoke_gemini ;;
+    esac
+    _panel_add_spend "$voice" "$est"
+  done
+
+  # fable kill-switch — the panel does NOT dispatch the fable subagent (that is
+  # the orchestrator's job, design §2 step 5), but it HONORS fable_reviews: when
+  # the kill-switch is off and no fable result exists, record fable ABSENT so a
+  # disabled fable can never be dispatched-and-counted downstream. Explicit-
+  # negative shape, mirroring the grok/gemini gates above (pinned by T10(d)).
+  local _FABLE_ENABLED
+  _FABLE_ENABLED="$("$CONFIG_BIN" get fable_reviews 2>/dev/null)"
+  [ -z "$_FABLE_ENABLED" ] && _FABLE_ENABLED="enabled"
+  if [ "$_FABLE_ENABLED" = "absent" ] || [ "$_FABLE_ENABLED" = "disabled" ] || [ "$_FABLE_ENABLED" = "off" ]; then
+    [ -f "$OUT_DIR/fable.result.json" ] || _panel_write_absent fable absent "fable_reviews=$_FABLE_ENABLED (subagent; kill-switch off): disabled"
+  fi
+
+  echo "gstack-panel done — external spend estimate \$$SPENT_USD / cap \$$BUDGET_USD"
+  exit 0
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+if [ "$COLLECT" = "1" ]; then
+  run_collect
+elif [ "$REDACT_ONLY" = "1" ]; then
+  run_redact_only
+else
+  run_panel
+fi

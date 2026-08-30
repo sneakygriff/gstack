@@ -4,8 +4,13 @@
 # Usage:
 #   gstack-config get <key>          — read a config value (falls back to DEFAULTS)
 #   gstack-config has <key>          — exit 0 iff the key is literally present in the
-#                                      config file (get returns DEFAULTS for absent keys,
-#                                      so callers that need provenance use this instead)
+#                                      config file, and print the RAW stored value on
+#                                      stdout (possibly empty — a present-but-empty
+#                                      value prints ""); exit 1 (no output) when absent.
+#                                      (get returns DEFAULTS for absent keys AND folds a
+#                                      present-but-empty value into that same default, so
+#                                      callers that need provenance — telling "unset" from
+#                                      "set to empty" apart — use this instead)
 #   gstack-config set <key> <value>  — write a config value
 #   gstack-config list               — show all config (values + defaults)
 #   gstack-config defaults           — show just the defaults table
@@ -118,6 +123,45 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #   /document-release skip the outside-voice step entirely.
 #                           #   An invalid value is REJECTED (existing value preserved) so
 #                           #   a typo cannot silently turn paid Codex calls on or off.
+# grok_reviews: disabled    # Master switch for Grok (xAI) outside-voice review calls,
+#                           #   used by the outside-voices panel (/plan-ceo-review,
+#                           #   /plan-eng-review, /plan-devex-review). Same semantics as
+#                           #   codex_reviews: paid, alias-normalized on get/set, and an
+#                           #   invalid value is REJECTED (existing value preserved).
+#                           #   DEFAULT DISABLED: grok --sandbox read-only did not
+#                           #   deny writes in the live canary, so it must not go
+#                           #   default-on until real OS-level write isolation lands.
+#                           #   Run: gstack-config set grok_reviews enabled to opt in
+#                           #   anyway (its verdict parses correctly on plain output).
+# gemini_reviews: disabled  # Master switch for Gemini (Google) outside-voice review
+#                           #   calls, same panel as grok_reviews. Same semantics as
+#                           #   codex_reviews/grok_reviews: paid, alias-normalized on
+#                           #   get/set, invalid value REJECTED (existing value preserved).
+#                           #   DEFAULT DISABLED: the read-only invocation
+#                           #   (--approval-mode plan) was only just corrected and is
+#                           #   not yet verified against an authenticated gemini CLI.
+#                           #   Enable once its live write-denial canary passes.
+# fable_reviews: enabled    # Master switch for the Fable (Anthropic) outside voice —
+#                           #   dispatched as a Claude subagent, not an external API call,
+#                           #   so it is FREE. Deliberately NOT part of the paid-call
+#                           #   kill-switch safety above (codex_reviews/grok_reviews/
+#                           #   gemini_reviews) and not counted against panel_budget_usd.
+#                           #   An unrecognized value warns and falls back to enabled.
+# panel_budget_usd: 1.50    # Hard per-run USD cap on external (paid) outside-voice spend
+#                           #   for the outside-voices panel. Exceeding it marks the
+#                           #   remaining external voices ABSENT (budget-capped) rather
+#                           #   than invoking them. Must be a non-negative decimal number
+#                           #   (e.g. 1.50, 2, 0.75); an invalid value is REJECTED
+#                           #   (existing value preserved).
+# grok_reviews_consent:     # First-use per-vendor egress consent record for private/
+#                           #   client repos. A POSITIVE grant is the literal `enabled`
+#                           #   (what the panel recipe writes) or `granted:<date>` (e.g.
+#                           #   "granted:2026-08-29"). Empty/unset (the default) means no
+#                           #   consent recorded yet — the outside-voices panel asks before
+#                           #   the first Grok call on a private repo. ANY OTHER value
+#                           #   (disabled/denied/no/…) is treated as NO consent, fail-closed
+#                           #   — the gate accepts only an explicit positive grant.
+# gemini_reviews_consent:   # Same as grok_reviews_consent, for the Gemini voice.
 # gstack_contributor: false # true = file field reports when gstack misbehaves
 # skip_eng_review: false    # true = skip eng review gate in /ship (not recommended)
 #
@@ -145,7 +189,19 @@ lookup_default() {
     checkpoint_push) echo "false" ;;
     explain_level) echo "default" ;;
     codex_reviews) echo "enabled" ;;
-    grok_reviews) echo "enabled" ;;
+    # grok/gemini default DISABLED (gate roster decision): each stays off until it
+    # passes a LIVE write-denial canary AND parses correctly. grok's --sandbox
+    # read-only did not deny writes in the canary; gemini's read-only invocation
+    # was only just fixed (--approval-mode plan) and is unverified against an
+    # authenticated CLI. codex (verified sandbox-deny + plain-parse) and fable +
+    # native claude (Anthropic, free) are the default-on roster. Re-enable with
+    # `gstack-config set grok_reviews enabled` once its canary passes.
+    grok_reviews) echo "disabled" ;;
+    gemini_reviews) echo "disabled" ;;
+    fable_reviews) echo "enabled" ;; # FREE (Anthropic subagent) — see set-side warn-and-default below
+    panel_budget_usd) echo "1.50" ;; # first numeric key — see set-side reject-on-invalid below
+    grok_reviews_consent) echo "" ;; # intentionally empty → unset triggers first-use consent gate
+    gemini_reviews_consent) echo "" ;; # intentionally empty → unset triggers first-use consent gate
     gstack_contributor) echo "false" ;;
     skip_eng_review) echo "false" ;;
     workspace_root) echo "$HOME/conductor/workspaces" ;;
@@ -332,13 +388,17 @@ case "${1:-}" in
         exit 1
       fi
     fi
-    # Paid-call kill-switch safety (#48 forum F3): codex_reviews/grok_reviews
-    # recipes gate on the literal "disabled". set normalizes aliases, but a value
-    # hand-edited (or synced) into config.yaml as off/false/0 would otherwise read
-    # back verbatim and the caller — treating only "disabled" as off — would fire
-    # paid Codex/Grok calls. Normalize the same aliases on read.
+    # Paid-call kill-switch safety (#48 forum F3): codex_reviews/grok_reviews/
+    # gemini_reviews recipes gate on the literal "disabled". set normalizes
+    # aliases, but a value hand-edited (or synced) into config.yaml as
+    # off/false/0 would otherwise read back verbatim and the caller —
+    # treating only "disabled" as off — would fire paid Codex/Grok/Gemini
+    # calls. Normalize the same aliases on read.
+    # fable_reviews is deliberately EXCLUDED: it is a free Anthropic subagent
+    # call (OV-20), not a paid external API call, so it does not need this
+    # fail-closed treatment.
     case "$KEY" in
-      codex_reviews|grok_reviews)
+      codex_reviews|grok_reviews|gemini_reviews)
         case "$VALUE" in
           off|false|0) VALUE="disabled" ;;
           on|true|1)   VALUE="enabled" ;;
@@ -353,7 +413,16 @@ case "${1:-}" in
       echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
       exit 1
     fi
-    grep -qE "^${KEY}:" "$CONFIG_FILE" 2>/dev/null
+    # Presence check stays a plain grep (unchanged exit-code contract). On a
+    # hit, ALSO print the raw stored value — read_config_value never falls
+    # back to lookup_default, so a present-but-empty line prints "" here
+    # instead of get's default-coerced value. That is the provenance signal
+    # callers need (gate FAIL P1 — see bin/gstack-panel's budget resolution).
+    if grep -qE "^${KEY}:" "$CONFIG_FILE" 2>/dev/null; then
+      read_config_value "$KEY" || true
+    else
+      exit 1
+    fi
     ;;
   set)
     KEY="${2:?Usage: gstack-config set <key> <value>}"
@@ -402,16 +471,18 @@ case "${1:-}" in
       echo "Warning: plan_tune_hooks '$VALUE' not recognized. Valid values: prompt, yes, no. Using prompt." >&2
       VALUE="prompt"
     fi
-    # codex_reviews / grok_reviews are the kill-switches for PAID Codex/Grok forum-review
-    # calls. Recipes gate on the explicit negative (see autobuilder-loop SKILL.md.tmpl:
-    # "grok_reviews=disabled is the only run-durable disable"), so a common alias like
-    # off/false/0 must land as the literal "disabled" — not pass through as an
-    # unrecognized value that silently means "enabled" to the caller. Normalize aliases
-    # first, then apply the same reject-on-set treatment as before: unlike the
-    # warn-and-default keys above, anything outside enabled|disabled is REJECTED and the
-    # existing setting is left unchanged — a typo must never silently flip paid calls
-    # on or off.
-    if [ "$KEY" = "codex_reviews" ] || [ "$KEY" = "grok_reviews" ]; then
+    # codex_reviews / grok_reviews / gemini_reviews are the kill-switches for PAID
+    # Codex/Grok/Gemini outside-voice review calls. Recipes gate on the explicit negative
+    # (see autobuilder-loop SKILL.md.tmpl: "grok_reviews=disabled is the only run-durable
+    # disable"), so a common alias like off/false/0 must land as the literal "disabled" —
+    # not pass through as an unrecognized value that silently means "enabled" to the
+    # caller. Normalize aliases first, then apply the same reject-on-set treatment as
+    # before: unlike the warn-and-default keys above, anything outside enabled|disabled is
+    # REJECTED and the existing setting is left unchanged — a typo must never silently flip
+    # paid calls on or off.
+    # fable_reviews is intentionally NOT in this list (see its own warn-and-default block
+    # below) — it is a free Anthropic subagent call (OV-20), so a typo has no spend risk.
+    if [ "$KEY" = "codex_reviews" ] || [ "$KEY" = "grok_reviews" ] || [ "$KEY" = "gemini_reviews" ]; then
       case "$VALUE" in
         off|false|0)
           echo "$KEY: normalizing '$VALUE' to 'disabled'."
@@ -424,6 +495,29 @@ case "${1:-}" in
       esac
       if [ "$VALUE" != "enabled" ] && [ "$VALUE" != "disabled" ]; then
         echo "Error: $KEY '$VALUE' not recognized. Valid values: enabled, disabled. Existing value left unchanged." >&2
+        exit 1
+      fi
+    fi
+    # fable_reviews: FREE Anthropic-subagent outside voice (OV-20). It gets the same
+    # enabled/disabled value domain as the paid switches above, but NOT the reject-on-set
+    # treatment — there is no paid-call spend risk in silently coercing a typo, so an
+    # unrecognized value warns and falls back to the default (enabled) instead of REJECTING
+    # the write. Deliberately excluded from the paid-call block above and from get's
+    # alias-normalization case.
+    if [ "$KEY" = "fable_reviews" ] && [ "$VALUE" != "enabled" ] && [ "$VALUE" != "disabled" ]; then
+      echo "Warning: fable_reviews '$VALUE' not recognized. Valid values: enabled, disabled. Using enabled." >&2
+      VALUE="enabled"
+    fi
+    # panel_budget_usd: the FIRST numeric config key. Hard per-run USD cap on external
+    # (paid) outside-voice spend — a corrupt/garbage value here would let the outside-voices
+    # panel's budget-projection gate (bin/gstack-panel) either silently disable the cap or
+    # crash mid-run doing arithmetic on a non-number. So it gets the same reject-on-invalid
+    # treatment as the paid-call switches above: anything that is not a non-negative decimal
+    # number (e.g. 1.50, 2, 0.75 — no leading '-', no scientific notation, digits required
+    # before an optional '.') is REJECTED and the existing value is left unchanged.
+    if [ "$KEY" = "panel_budget_usd" ]; then
+      if ! printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+        echo "Error: panel_budget_usd '$VALUE' not recognized. Must be a non-negative decimal number (e.g. 1.50). Existing value left unchanged." >&2
         exit 1
       fi
     fi
@@ -467,7 +561,9 @@ case "${1:-}" in
     echo "# ─── Active values (including defaults for unset keys) ───"
     for KEY in proactive routing_declined telemetry auto_upgrade update_check \
                skill_prefix checkpoint_mode checkpoint_push explain_level \
-               codex_reviews gstack_contributor skip_eng_review workspace_root \
+               codex_reviews grok_reviews gemini_reviews fable_reviews panel_budget_usd \
+               grok_reviews_consent gemini_reviews_consent \
+               gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted plan_tune_hooks; do
       VALUE=$(read_config_value "$KEY" || true)
       SOURCE="default"
@@ -483,7 +579,9 @@ case "${1:-}" in
     echo "# gstack-config defaults"
     for KEY in proactive routing_declined telemetry auto_upgrade update_check \
                skill_prefix checkpoint_mode checkpoint_push explain_level \
-               codex_reviews gstack_contributor skip_eng_review workspace_root \
+               codex_reviews grok_reviews gemini_reviews fable_reviews panel_budget_usd \
+               grok_reviews_consent gemini_reviews_consent \
+               gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted plan_tune_hooks; do
       printf '  %-24s %s\n' "$KEY:" "$(lookup_default "$KEY")"
     done
