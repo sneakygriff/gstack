@@ -615,7 +615,7 @@ marker is the autobuilder selector — the loop builds the first `pending` miles
 to `complete` only when its gate is clean and its Deliverable passes.
 
 ### M1 — advisory primitive + safety rails + shared plan-review resolver
-<!-- status: pending -->
+<!-- status: complete -->
 - `lib/outside-voices/registry.ts` defines the voice registry; every adapter (codex, grok,
   gemini, fable) declares the four security fields (`sandbox`, `boundary`, `fences`,
   `transport`); `--yolo` appears in no reviewer path.
