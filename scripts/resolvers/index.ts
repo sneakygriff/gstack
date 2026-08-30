@@ -77,11 +77,10 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   DEPLOY_BOOTSTRAP: generateDeployBootstrap,
   // Shared N-voice advisory panel (OUTSIDE_VOICES_PANEL.md §6).
   OUTSIDE_VOICES: generateOutsideVoices,
-  // Thin alias — the 3 plan-review templates still reference {{CODEX_PLAN_REVIEW}}.
-  // It resolves to the shared resolver with the surface derived from the invoking
-  // skill (plan-ceo/eng/devex-review → ceo/eng/devex). T12 repoints those templates
-  // to {{OUTSIDE_VOICES:surface=…}}; T13 drops this alias once nothing references it.
-  // Kept RESOLVING here so generation never breaks in the interim.
+  // Thin alias — no in-tree template references {{CODEX_PLAN_REVIEW}} any more
+  // (T12 repointed all 3 plan-review templates to {{OUTSIDE_VOICES:surface=…}}
+  // in this same change). Kept RESOLVING for out-of-tree/vendored templates in
+  // the interim; M3's cleanup task (T13) drops it.
   CODEX_PLAN_REVIEW: (ctx) => generateOutsideVoices(ctx),
   CODEX_DOC_REVIEW: generateCodexDocReview,
   PLAN_COMPLETION_AUDIT_SHIP: generatePlanCompletionAuditShip,

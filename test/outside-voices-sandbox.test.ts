@@ -281,6 +281,22 @@ describeCanary('Outside Voices — sandbox write-denial canary', () => {
     }
 
     if (probe.verdict === 'blocked') {
+      // WROTE-WINS override (ship review P1): if the sentinel EXISTS, the
+      // sandbox demonstrably allowed a write — a CLI that then died with a
+      // nonzero exit / empty stdout must NOT launder that direct evidence
+      // into an "inconclusive" skip. The write is the security fact; the
+      // exit code is not.
+      if (probe.wrote) {
+        test(`${testName} — CLI wrote the sentinel then died (write-denial FAILED)`, () => {
+          expect(
+            probe.wrote,
+            `${voice.name} WROTE ${SENTINEL_NAME} despite "${voice.sandbox.flag}" (then exited ` +
+              `${probe.outcome.exitCode}) — the OS-level read-only sandbox did NOT hold; a post-write ` +
+              'CLI death never makes this inconclusive.',
+          ).toBe(false);
+        });
+        continue;
+      }
       // Arbiter — RAN-AT-ALL (gate P1-6 / P0 anti-vacuous-pass). The CLI
       // produced no evidence it ever processed the prompt: no clean exit
       // with real output. This is exactly the gemini live result (P1-2's

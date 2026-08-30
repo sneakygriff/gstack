@@ -567,7 +567,7 @@ describe('bin/gstack-vote CLI — full panel (5-voice mockup scenario)', () => {
         status: 'ready',
         verdict: 'CONCERNS',
         findings: [
-          { severity: 'P1', claim: 'race in queue.ts#drain', location: 'lib/queue.ts#drain', repro_command: 'bun test test/queue.test.ts' },
+          { severity: 'P1', claim: 'race in vote.ts#tallyVoices', location: 'lib/outside-voices/vote.ts#tallyVoices', repro_command: 'bun test test/outside-voices-vote.test.ts' },
         ],
         tokens: 1200,
         cost_usd: 0.21,
@@ -578,7 +578,7 @@ describe('bin/gstack-vote CLI — full panel (5-voice mockup scenario)', () => {
         vendor: 'xai',
         status: 'ready',
         verdict: 'CONCERNS',
-        findings: [{ severity: 'P1', claim: 'same race — corroborates codex', location: 'lib/queue.ts#drain', repro_command: null }],
+        findings: [{ severity: 'P1', claim: 'same race — corroborates codex', location: 'lib/outside-voices/vote.ts#tallyVoices', repro_command: null }],
         tokens: 900,
         cost_usd: 0.2,
       },
@@ -600,7 +600,7 @@ describe('bin/gstack-vote CLI — full panel (5-voice mockup scenario)', () => {
         vendor: 'anthropic',
         status: 'ready',
         verdict: 'CONCERNS',
-        findings: [{ severity: 'P1', claim: 'unbounded retry queue.ts#retry', location: 'lib/queue.ts#retry', repro_command: null }],
+        findings: [{ severity: 'P1', claim: 'unbounded retry in registry.ts', location: 'lib/outside-voices/registry.ts#parseVoiceResult', repro_command: null }],
         tokens: null,
         cost_usd: null,
       },
@@ -723,10 +723,9 @@ describe('bin/gstack-vote CLI — all-absent directory (NO_VOICES)', () => {
       cost_usd: null,
       reason: 'off',
     }));
-    // Ready fixtures carry the per-run nonce (the panel would have stamped it);
-    // absent records carry none. Every runVote below passes --nonce TABLE_NONCE,
-    // so the authenticated ready verdicts tally exactly as tallyVoices() sees the
-    // raw fixtures (tallyVoices ignores datamark; parse drops it).
+    // All-absent block: nothing is ready, so no fixture carries a nonce (the
+    // conditional stamp below is a no-op here) — absent records are exempt from
+    // nonce authentication by design.
     for (const f of fixtures) writeResultFile(dir, f.voice, f, f.status === 'ready' ? TABLE_NONCE : undefined);
     expectedTally = tallyVoices(fixtures);
   });

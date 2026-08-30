@@ -338,10 +338,13 @@ const SHARED_FENCES: FenceSpec = {
   datamarkInstruction: UNTRUSTED_DATAMARK_INSTRUCTION,
 };
 
-/** Bind {@link parseVoiceResult} to a specific voice for attribution. */
+/** Bind {@link parseVoiceResult} to a specific voice for attribution. The
+ * adapter's own voice is spread LAST so a caller's `opts.voice` can never
+ * override the binding — the whole point of a voice-bound parser is that its
+ * attribution is not caller-influenceable. (ship review) */
 function makeParse(voice: VoiceName) {
   return (raw: string, opts?: ParseOptions): VoiceResult =>
-    parseVoiceResult(raw, { voice, ...opts });
+    parseVoiceResult(raw, { ...opts, voice });
 }
 
 /** Compose a CLI adapter's argv from its own declarative fields (single source). */
@@ -579,10 +582,13 @@ export const VOICES: Record<VoiceName, VoiceAdapter> = {
 
 /** CLI adapters only (codex/grok/gemini) — the ones `bin/gstack-panel` runs. */
 export const CLI_VOICES: CliVoiceAdapter[] = [codexAdapter, grokAdapter, geminiAdapter];
-/** Subagent adapters only (fable) — dispatched by the orchestrator, not the panel. */
+/** Subagent adapters only (fable) — dispatched by the orchestrator, not the panel.
+ * Not yet consumed in-tree: reserved API surface for the M2 autoplan
+ * orchestrator (design doc §Milestones), which dispatches fable itself. */
 export const SUBAGENT_VOICES: SubagentVoiceAdapter[] = [fableAdapter];
 
-/** Type guard: narrow a VoiceAdapter to the CLI kind. */
+/** Type guard: narrow a VoiceAdapter to the CLI kind. Reserved for the M2
+ * orchestrator alongside SUBAGENT_VOICES. */
 export function isCliAdapter(a: VoiceAdapter): a is CliVoiceAdapter {
   return a.kind === 'cli';
 }

@@ -145,19 +145,16 @@ export function generateOutsideVoices(ctx: TemplateContext, args?: string[]): st
 
   return `## Outside Voices — Advisory Panel (recommendation only; the user decides)
 
-After the review sections above are complete, run the **outside-voices panel**: N independent
-second opinions from different AI systems, tabulated into one advisory recommendation. It is a
-standard part of this review, not an opt-in. Multiple models agreeing is stronger signal than
-one thorough pass — but the panel is **ADVISORY**: it routes a recommendation into the existing
-human gate and **sets nothing**. There is no new gate here and nothing it emits can block.
+After the review sections above are complete, run the **outside-voices panel**: independent
+second opinions from different AI systems, tabulated into one advisory recommendation. A standard
+part of this review, not an opt-in — but **ADVISORY**: it routes a recommendation into the existing
+human gate and **sets nothing**. Nothing it emits can block.
 
-The default roster is **codex + fable + native Claude**. \`codex\` (openai) is the one external CLI
-voice on by default (sandbox-verified, verdict parses). \`grok\` (xAI) and \`gemini\` (google) are
-**default-OFF** — their read-only sandboxes are not yet write-denial-verified against a live canary,
-so enable them only explicitly. \`fable\` (Anthropic subagent, free) and native Claude round out the
-roster. Each voice has an independent kill-switch; the panel runs whichever are enabled and degrades
-to fewer voices (never a broken gate) as any drop to ABSENT. Off-switches stay discoverable — print
-one line before running:
+The default roster is **codex + fable + native Claude**. \`grok\` (xAI) and \`gemini\` (google) are
+**default-OFF** — their read-only sandboxes are not yet write-denial-verified against a live
+canary — so enable them only explicitly. Every voice has an independent kill-switch; the panel
+runs whichever are enabled and degrades to fewer voices (never a broken gate) as any drop to
+ABSENT. Off-switches stay discoverable — print one line before running:
 "Running the outside-voices panel automatically (standard step). Toggle a voice: \`${bin}/gstack-config set <voice>_reviews enabled|disabled\` (codex/grok/gemini/fable; grok/gemini default-off); cap external spend: \`${bin}/gstack-config set panel_budget_usd <n>\`."
 
 **Surface:** \`${profile.label}\`.
@@ -174,9 +171,9 @@ file. **Echo every path and the nonce** — Bash-tool shell state does NOT persi
 substitute the LITERAL printed values into every later step (\`$PANEL_*\` vars are empty next block):
 
 \`\`\`bash
-PANEL_OUT_DIR=$(mktemp -d "\${TMPDIR:-/tmp}/gstack-panel-XXXXXXXX")     # fresh; one <voice>.result.json per voice lands here
-PANEL_PROMPT_FILE=$(mktemp -u "\${TMPDIR:-/tmp}/gstack-panel-prompt-XXXXXXXX")   # instructions ONLY — mktemp -u = uncreated name, so the Write tool can create it
-PANEL_UNTRUSTED_FILE=$(mktemp -u "\${TMPDIR:-/tmp}/gstack-panel-untrusted-XXXXXXXX")  # raw review target, unfenced (-u so Write succeeds)
+PANEL_OUT_DIR=$(mktemp -d "\${TMPDIR:-/tmp}/gstack-panel-XXXXXXXX")   # fresh 0700 dir; one <voice>.result.json per voice lands here
+PANEL_PROMPT_FILE="$PANEL_OUT_DIR/prompt.txt"        # instructions ONLY — uncreated path in the 0700 out-dir (Write creates it; no /tmp symlink race)
+PANEL_UNTRUSTED_FILE="$PANEL_OUT_DIR/untrusted.txt"  # raw review target, unfenced — same dir
 PANEL_NONCE=$(openssl rand -hex 8 2>/dev/null || head -c16 /dev/urandom | od -An -tx1 | tr -d ' \\n')
 echo "PANEL_OUT_DIR=$PANEL_OUT_DIR"
 echo "PANEL_PROMPT_FILE=$PANEL_PROMPT_FILE"
@@ -227,14 +224,14 @@ The datamark instruction is: "${UNTRUSTED_DATAMARK_INSTRUCTION}"
 
 ### Step 2 — Run the external CLI voices (\`bin/gstack-panel\`)
 
-\`gstack-panel\` runs the external voices sequential-foreground, and owns the entire per-voice
-security pipeline (this resolver **references** it, never re-implements it): per-voice kill-switch,
-auth preflight, the **codex under-codex guard** (#2519 — inside a live Codex host it marks \`codex\`
-ABSENT(under-codex); \`GSTACK_FORCE_CODEX_REVIEW=1\` forces), **first-use per-vendor egress consent**
-(private repos), the **redaction pass** (a HIGH/MEDIUM secret/PII hit is masked or that voice is
-marked ABSENT loudly — never silently sent), the **fail-closed egress receipt** (no receipt → no
-send), the **read-only sandbox** (each voice's verbatim flag; auto-approve tool modes FORBIDDEN),
-the **\`panel_budget_usd\`** projection, and the per-surface **wall-clock** budget.
+\`gstack-panel\` runs the external voices sequential-foreground and owns the entire per-voice
+security pipeline (this resolver **references** it, never re-implements it): kill-switches, auth
+preflight, the **codex under-codex guard** (#2519; \`GSTACK_FORCE_CODEX_REVIEW=1\` forces),
+**first-use per-vendor egress consent** (private repos), the **redaction pass** (a HIGH/MEDIUM
+secret/PII hit is masked or that voice goes ABSENT loudly — never silently sent), the
+**fail-closed egress receipt** (no receipt → no send), the **read-only sandbox** (verbatim
+per-voice flags; auto-approve modes FORBIDDEN), the **\`panel_budget_usd\`** projection, and the
+**wall-clock** budget.
 
 Substitute the LITERAL paths + nonce printed in Step 1 (not \`$PANEL_*\` — they do not survive to
 this Bash call):
@@ -245,9 +242,12 @@ ${bin}/gstack-panel --surface ${surface} \\
   --untrusted-file "<literal $PANEL_UNTRUSTED_FILE>" \\
   --datamark "<literal $PANEL_NONCE>" \\
   --out-dir "<literal $PANEL_OUT_DIR>" \\
-  --budget-usd "$(${bin}/gstack-config get panel_budget_usd 2>/dev/null || echo 1.50)" \\
   --wall-clock-s 560
 \`\`\`
+
+Do NOT pass \`--budget-usd\`: the panel resolves the cap itself via \`gstack-config has\`
+(present-but-empty fails CLOSED to $0; absent defaults $1.50) — a \`get\`-sourced flag would fold
+that misconfig back into the default.
 
 \`--untrusted-file\` + \`--datamark\` are what wire the anti-injection nonce end-to-end: the panel
 fences the untrusted target with your nonce and then REQUIRES that same nonce in each voice's
@@ -255,16 +255,17 @@ verdict (\`parseVoiceResult\` rejects a verdict whose \`datamark\` does not matc
 writes one
 \`<voice>.result.json\` (schema \`${VOICE_SCHEMA_ID}\`, with a \`reason\` for absent/error records)
 per external voice into the out-dir, logs a \`gstack-review-log\` audit entry per voice, and writes
-the redacted, nonce-stamped send prompt to \`<out-dir>/panel.payload.txt\` (Step 3 reuses it).
+the redacted, nonce-stamped send prompt to \`<out-dir>/panel.payload.txt\` (Step 3 reuses it). On an
+\`error\` record, read the voice's raw stderr at \`<out-dir>/<voice>.err\` first — auth failures
+surface there, not in the result file.
 
 **Timeout ceiling.** Each voice is timeout-wrapped at 540s. With the **default roster** (codex
-only) that is one ~540s voice — run ONE foreground Bash call with the tool \`timeout\` at \`600000\`
-(10 min); it fits. **If you enabled MORE than one external voice**, the sequential ladder can
-exceed 600s and a single call is harness-killed mid-run: run the same command as a **background**
-Bash call (\`run_in_background: true\`), poll \`<out-dir>\` with the **Monitor** tool until every
-enabled voice has written its \`<voice>.result.json\` or \`--wall-clock-s\` elapses, and set
-\`--wall-clock-s\` to \`(enabled external voices) × 560\`. Either way, finish with a salvage pass so
-any voice that never landed (mid-run over-budget / harness-killed) is recorded ABSENT, not dropped:
+only) run ONE foreground Bash call with the tool \`timeout\` at \`600000\` (10 min) — it fits. With
+**more than one external voice enabled**, the sequential ladder can exceed 600s and be
+harness-killed mid-run: run it as a **background** Bash call, poll \`<out-dir>\` with **Monitor**
+until every enabled voice has written its \`<voice>.result.json\` or \`--wall-clock-s\` elapses, and
+set \`--wall-clock-s\` to \`(enabled external voices) × 560\`. Either way, finish with a salvage pass
+so any voice that never landed is recorded ABSENT, not dropped:
 
 \`\`\`bash
 ${bin}/gstack-panel --collect --out-dir "<literal $PANEL_OUT_DIR>"
@@ -280,22 +281,21 @@ egress). Ask ONCE per such vendor with AskUserQuestion:
 > A) Yes — enable \`<voice>\` outside-voice reviews (persisted)
 > B) No — skip \`<voice>\` this time (stays ABSENT)
 
-On A: \`${bin}/gstack-config set <voice>_reviews_consent enabled\` (the gate accepts only an
-explicit positive grant — \`enabled\` or \`granted:<date>\`). Grant EVERY vendor you intend to use
-BEFORE re-running, then re-run Step 2 with a **fresh \`$PANEL_OUT_DIR\`**: \`run_panel\` re-runs
-every enabled external voice (it does NOT skip already-completed ones), so a fresh out-dir avoids
-overwriting prior results, and granting all consents first avoids re-spending on codex per grant.
-On B: leave it ABSENT — do NOT send. Never persist consent the user did not grant.
+On A: \`${bin}/gstack-config set <voice>_reviews_consent enabled\` (only an explicit positive
+grant — \`enabled\` or \`granted:<date>\` — satisfies the gate). Grant EVERY vendor you intend to
+use, then re-run Step 2 with a **fresh \`$PANEL_OUT_DIR\`** (\`run_panel\` re-runs every enabled
+voice, so granting all consents first avoids re-spending on codex per grant). On B: leave it
+ABSENT — do NOT send. Never persist consent the user did not grant.
 
 ---
 
 ### Step 3 — Dispatch the \`fable\` subagent + run the native Claude pass
 
 Both Anthropic voices are FREE (Agent-tool dispatch, not counted against \`panel_budget_usd\`) and
-need no egress consent. They use **the exact prompt the panel assembled and (already) redacted**:
-read \`<out-dir>/panel.payload.txt\` and use it VERBATIM as the review prompt for both — it carries
-the boundary, the reviewer framing, the verdict contract, and the untrusted target fenced with
-**your \`$PANEL_NONCE\` datamark** (so the same injection defense covers the Anthropic voices).
+need no egress consent. Read \`<out-dir>/panel.payload.txt\` and use it VERBATIM as the review
+prompt for both — the exact prompt the panel assembled and redacted: boundary, reviewer framing,
+verdict contract, and the untrusted target fenced with **your \`$PANEL_NONCE\` datamark** (the same
+injection defense covers the Anthropic voices).
 
 **If \`<out-dir>/panel.payload.txt\` does NOT exist** — the panel blocked egress on a HIGH/MEDIUM
 redaction hit, or assembly failed — do NOT reconstruct an unredacted prompt: mark BOTH fable and
@@ -320,8 +320,11 @@ repair that field, so a fable block not already carrying the exact nonce is ABSE
 keeping \`gstack-vote --nonce\` on fable's OWN echo, not your stamp. For native \`claude\` you ARE the
 voice: write your own block with that same \`datamark\` (self-attested — why the two count as one vendor).
 
-If either subagent fails or times out (bound it at a 5-minute timeout so "never blocking" is also
-"never hanging"), skip that voice — a missing result file is treated as ABSENT, not an error.
+If either Anthropic pass fails or times out (bound it at a 5-minute timeout so "never blocking" is
+also "never hanging"), do NOT just skip it — a missing file vanishes from the table entirely
+(\`gstack-vote\` tallies only files that exist; \`--collect\` salvages CLI voices only). **Write an
+explicit ABSENT record** for the failed voice:
+\`{"schema":"${VOICE_SCHEMA_ID}","voice":"<fable|claude>","vendor":"anthropic","status":"absent","verdict":null,"findings":[],"tokens":null,"cost_usd":null,"reason":"anthropic pass failed/timed out"}\`
 
 ---
 
@@ -333,8 +336,11 @@ Pass \`--surface\` and \`--budget-usd\` so the header shows the real surface and
 \`\`\`bash
 ${bin}/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --surface "${profile.label}" \\
   --nonce "<literal $PANEL_NONCE>" \\
-  --budget-usd "$(${bin}/gstack-config get panel_budget_usd 2>/dev/null || echo 1.50)"
+  --budget-usd "$(${bin}/gstack-config has panel_budget_usd 2>/dev/null || echo 1.50)"
 \`\`\`
+
+(\`has\`, not \`get\` — a present-but-empty \`panel_budget_usd:\` line then displays the enforced
+$0.00 cap, not a misleading $1.50 header.)
 
 \`--nonce\` (the Step 1 nonce) makes tabulation CODE-ENFORCE the anti-injection nonce on **every**
 ready verdict — CLI (panel-stamped) AND Anthropic (the \`datamark\` you wrote in Step 3): one that

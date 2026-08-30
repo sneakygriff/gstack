@@ -1976,7 +1976,7 @@ if [ -x "$SETTINGS_HOOK" ]; then
   # Explicit opt-out + live plan-tune hooks is a contradiction worth surfacing:
   # the heal honors the opt-out (dead plan-tune entries pruned, never
   # re-pointed) but live hooks stay until the user removes them.
-  if "$GSTACK_CONFIG" has plan_tune_hooks 2>/dev/null; then
+  if "$GSTACK_CONFIG" has plan_tune_hooks >/dev/null 2>&1; then
     _PT_CFG_VAL=$("$GSTACK_CONFIG" get plan_tune_hooks 2>/dev/null || true)
     case "$(printf '%s' "$_PT_CFG_VAL" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
       n|no|false|skip|off|0)
@@ -2208,7 +2208,7 @@ if [ "$NO_TEAM_MODE" -ne 1 ] \
     PT_EXPLICIT=1
   else
     PT_DECISION="$("$GSTACK_CONFIG" get plan_tune_hooks 2>/dev/null || true)"
-    if "$GSTACK_CONFIG" has plan_tune_hooks 2>/dev/null; then
+    if "$GSTACK_CONFIG" has plan_tune_hooks >/dev/null 2>&1; then
       PT_EXPLICIT=1
     fi
   fi

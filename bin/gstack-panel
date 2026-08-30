@@ -90,15 +90,20 @@ USAGE
 SURFACE=""; PROMPT_FILE=""; OUT_DIR=""; UNTRUSTED_FILE=""; DATAMARK=""
 BUDGET_USD=""; WALL_CLOCK_S=""; REDACT_ONLY=0; COLLECT=0
 BUDGET_FLAG_SET=0   # 1 once --budget-usd is seen (distinguishes unset from set-but-empty)
+WALL_FLAG_SET=0     # 1 once --wall-clock-s is seen (same unset-vs-empty distinction)
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --surface)        SURFACE="$2"; shift 2 ;;
-    --prompt-file)    PROMPT_FILE="$2"; shift 2 ;;
-    --out-dir)        OUT_DIR="$2"; shift 2 ;;
-    --untrusted-file) UNTRUSTED_FILE="$2"; shift 2 ;;
-    --datamark)       DATAMARK="$2"; shift 2 ;;
-    --budget-usd)     BUDGET_USD="$2"; BUDGET_FLAG_SET=1; shift 2 ;;
-    --wall-clock-s)   WALL_CLOCK_S="$2"; shift 2 ;;
+    # ${2?…} (no colon: empty IS a legal value — e.g. --budget-usd "" fails
+    # closed to $0) errors out loudly when the value is MISSING entirely;
+    # without it, the failed `shift 2` left the flag in place and this loop
+    # spun forever on e.g. a bare `--surface`. (ship review)
+    --surface)        SURFACE="${2?gstack-panel: --surface requires a value}"; shift 2 ;;
+    --prompt-file)    PROMPT_FILE="${2?gstack-panel: --prompt-file requires a value}"; shift 2 ;;
+    --out-dir)        OUT_DIR="${2?gstack-panel: --out-dir requires a value}"; shift 2 ;;
+    --untrusted-file) UNTRUSTED_FILE="${2?gstack-panel: --untrusted-file requires a value}"; shift 2 ;;
+    --datamark)       DATAMARK="${2?gstack-panel: --datamark requires a value}"; shift 2 ;;
+    --budget-usd)     BUDGET_USD="${2?gstack-panel: --budget-usd requires a value}"; BUDGET_FLAG_SET=1; shift 2 ;;
+    --wall-clock-s)   WALL_CLOCK_S="${2?gstack-panel: --wall-clock-s requires a value}"; WALL_FLAG_SET=1; shift 2 ;;
     --redact-only)    REDACT_ONLY=1; shift ;;
     --collect)        COLLECT=1; shift ;;
     -h|--help)        usage ;;
@@ -162,7 +167,22 @@ if [ "$BUDGET_FLAG_SET" != "1" ]; then
     fi
   fi
 fi
-[ -z "$WALL_CLOCK_S" ] && WALL_CLOCK_S="1500"
+# Wall-clock: same unset-vs-set-but-invalid contract as the budget above. No
+# flag → the 1500s built-in default. Flag passed with anything that is not a
+# whole number of seconds (including "") → fail CLOSED, mirroring
+# _panel_validate_budget: a garbage value would make the integer compare at the
+# (10) wall-clock gate error out (condition false) EVERY iteration — silently
+# disabling the gate (fail-open). Treat it as an exhausted clock instead. (ship review)
+if [ "$WALL_FLAG_SET" != "1" ] && [ -z "$WALL_CLOCK_S" ]; then WALL_CLOCK_S="1500"; fi
+case "$WALL_CLOCK_S" in
+  ''|*[!0-9]*)
+    echo "gstack-panel: WARNING — --wall-clock-s \"$WALL_CLOCK_S\" is not a whole number of seconds; failing CLOSED to 0s (all external voices will be ABSENT(wall-clock))" >&2
+    WALL_CLOCK_S="0" ;;
+esac
+# Normalize to decimal: a validated-but-leading-zero value ("090") would be
+# read as OCTAL by $(( )) below — fatal "value too great for base" under
+# bash 3.2, killing the run mid-panel. 10# forces base-10.
+WALL_CLOCK_S=$(( 10#$WALL_CLOCK_S ))
 LADDER_S="540"                    # per-voice ladder cap < 600s − slop
 OUTPUT_ALLOWANCE_TOKENS="8000"    # flat per-call output ceiling for the estimate
 
@@ -374,9 +394,17 @@ _panel_redact_gate() { # <assembled-file>
   local assembled="$1" vis json rc has_high has_secret gate_ids masked rescan_rc oversize autoredact_rc
   PAYLOAD_FILE="$OUT_DIR/panel.payload.txt"
   rm -f "$PAYLOAD_FILE"
+  # Scan the bytes the transport will SEND: the invoke path reads the payload
+  # via "$(cat …)" command substitution, which drops NUL bytes — so a
+  # NUL-split credential could evade the scanner yet reassemble contiguously
+  # at egress (ship review, live-PoC'd with an AKIA…\0… token). Strip NULs
+  # FIRST so scanned bytes == sent bytes (trailing newlines are already
+  # matched by _panel_write_stripped).
+  tr -d '\000' < "$assembled" > "$assembled.nn" 2>/dev/null && mv -f "$assembled.nn" "$assembled"
   vis="$(_panel_repo_visibility)"
 
   if ! command -v bun >/dev/null 2>&1 && [ ! -x "$REDACT_BIN" ]; then
+    rm -f "$assembled"   # unscanned, potentially secret-bearing — same hygiene as the block paths
     REDACT_RESULT="voice-absent"; REDACTION_BLOCKED=1; REDACT_CAUSE="redaction-engine-missing"
     echo "  redaction: gstack-redact unavailable — refusing all external sends (fail-closed) ABSENT(redaction-engine-missing)"
     return 0
@@ -401,7 +429,7 @@ _panel_redact_gate() { # <assembled-file>
       has_high="$([ "$rc" = "3" ] && echo 1 || echo 0)"
       # Any credential (category:secret) at HIGH or MEDIUM? A secret must NEVER be
       # mask-and-adopted: masking a maskable PII SUBSPAN of a secret (e.g. the
-      # digit run inside `xoxb-1234567890-…`, or a JWT's `iat` claim) partially
+      # digit run inside a Slack `xox*-` bot token, or a JWT's `iat` claim) partially
       # mangles it — the re-scan can then read a lower tier or even "clean" while
       # partial secret bytes remain in the payload. So when a secret is present we
       # fail CLOSED outright (block by original tier), never masking.
@@ -449,6 +477,10 @@ _panel_redact_gate() { # <assembled-file>
       rescan_rc=$?
       if [ "$rescan_rc" = "0" ]; then
         REDACT_RESULT="masked"; _panel_write_stripped "$masked" "$PAYLOAD_FILE"; rm -f "$masked"
+        # The pre-mask assembled file still carries the UNMASKED PII the gate
+        # just masked out of the payload — remove it like every block path does
+        # (the payload is the canonical artifact from here on). (ship review)
+        rm -f "$assembled"
         echo "  redaction: MEDIUM PII masked, re-scan clean (repo=$vis)"; return 0
       fi
       rm -f "$masked" "$PAYLOAD_FILE" "$assembled"
@@ -567,7 +599,7 @@ _panel_consent_ok() { # <voice>  → 0 when the send may proceed, 1 when consent
 _panel_finish_run() { # <voice> <rc> <raw-file>
   local voice="$1" rc="$2" rawfile="$3" json status verdict
   if [ "$rc" = "124" ]; then
-    _panel_write_absent "$voice" absent "CLI timed out after ${LADDER_S}s (exit 124)"
+    _panel_write_absent "$voice" absent "CLI timed out after ${PANEL_VOICE_TIMEOUT_S:-$LADDER_S}s (exit 124)"
     return 0
   fi
   json="$(_panel_json parse "$voice" < "$rawfile")"
@@ -605,7 +637,7 @@ _panel_invoke_codex() {
     _panel_write_absent codex absent "egress receipt could not be written — refusing send (fail-closed): receipt-failed"
     return 0
   fi
-  _gstack_codex_timeout_wrapper "$LADDER_S" codex exec "$(cat "$payload")" -C "$REPO_ROOT" \
+  _gstack_codex_timeout_wrapper "${PANEL_VOICE_TIMEOUT_S:-$LADDER_S}" codex exec "$(cat "$payload")" -C "$REPO_ROOT" \
     -s read-only -c 'model_reasoning_effort="high"' -c 'web_search="cached"' \
     </dev/null >"$OUT_DIR/codex.raw" 2>"$OUT_DIR/codex.err"
   rc=$?
@@ -621,7 +653,7 @@ _panel_invoke_grok() {
     _panel_write_absent grok absent "egress receipt could not be written — refusing send (fail-closed): receipt-failed"
     return 0
   fi
-  _gstack_codex_timeout_wrapper "$LADDER_S" grok -p "$(cat "$payload")" \
+  _gstack_codex_timeout_wrapper "${PANEL_VOICE_TIMEOUT_S:-$LADDER_S}" grok -p "$(cat "$payload")" \
     --sandbox read-only --output-format plain \
     </dev/null >"$OUT_DIR/grok.raw" 2>"$OUT_DIR/grok.err"
   rc=$?
@@ -637,7 +669,7 @@ _panel_invoke_gemini() {
     _panel_write_absent gemini absent "egress receipt could not be written — refusing send (fail-closed): receipt-failed"
     return 0
   fi
-  _gstack_codex_timeout_wrapper "$LADDER_S" gemini -p "$(cat "$payload")" \
+  _gstack_codex_timeout_wrapper "${PANEL_VOICE_TIMEOUT_S:-$LADDER_S}" gemini -p "$(cat "$payload")" \
     --approval-mode plan \
     </dev/null >"$OUT_DIR/gemini.raw" 2>"$OUT_DIR/gemini.err"
   rc=$?
@@ -780,6 +812,11 @@ run_panel() {
       _panel_write_absent "$voice" absent "wall-clock budget ${WALL_CLOCK_S}s exceeded (${elapsed}s elapsed): wall-clock"
       continue
     fi
+    # The REMAINING wall-clock also bounds THIS invocation (ship review): a
+    # voice starting 1s before the deadline must not run a full ladder ~9min
+    # past it. Each invoke uses min(remaining, LADDER_S) as its timeout.
+    PANEL_VOICE_TIMEOUT_S=$(( WALL_CLOCK_S - elapsed ))
+    [ "$PANEL_VOICE_TIMEOUT_S" -gt "$LADDER_S" ] && PANEL_VOICE_TIMEOUT_S="$LADDER_S"
 
     # (1) kill-switch — explicit-negative on <voice>_reviews, per-voice named
     # vars mirroring the autobuilder grok recipe (pinned by T10(d)). A missing

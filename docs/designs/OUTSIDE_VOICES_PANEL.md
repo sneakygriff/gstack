@@ -41,6 +41,12 @@ resolver rendering N voices instead of six divergent copies.
    all-four-default-on-and-paid, v2 adds three structural guards as M1 requirements:
    a `panel_budget_usd` cap, egress receipts + a redaction pass + first-use consent, and a
    Security & Threat Model section.
+   > **M1 shipped deviation:** the M1 ship gate ("no external voice default-on until the
+   > write-denial sandbox test passes for its CLI") outranked this locked default at ship
+   > time — `grok_reviews`/`gemini_reviews` shipped **default-off** (grok: live canary
+   > showed its CLI sandbox does not deny writes; gemini: auth-blocked, unverified). The
+   > all-four-on roster resumes per-voice once each canary passes; see the config-key
+   > table below.
 
 ### Five baked-in defaults (the other open questions, resolved)
 
@@ -530,8 +536,8 @@ lines 470/486):
 | Key | Type | Default | Purpose | Paid? |
 |-----|------|---------|---------|-------|
 | `codex_reviews` | `enabled`/`disabled` | `enabled` | existing master switch, OpenAI voice | paid |
-| `grok_reviews` | `enabled`/`disabled` | `enabled` | existing switch, xAI voice | paid |
-| `gemini_reviews` | `enabled`/`disabled` | `enabled` | **NEW** switch, Google voice | paid |
+| `grok_reviews` | `enabled`/`disabled` | `disabled` (shipped; design said `enabled`) | existing switch, xAI voice — default-off until the OS-level write-denial canary passes (M1 gate: the grok CLI sandbox did not deny writes live) | paid |
+| `gemini_reviews` | `enabled`/`disabled` | `disabled` (shipped; design said `enabled`) | **NEW** switch, Google voice — default-off until live auth + write-denial are verified (M1 gate: invocation fixed but auth-blocked) | paid |
 | `fable_reviews` | `enabled`/`disabled` | `enabled` | **NEW** switch, Anthropic voice — **FREE** (subagent), **not** counted against `panel_budget_usd` | **free** |
 | `panel_budget_usd` | number | `1.50` | **NEW** hard per-run USD cap on external voice spend; exceed → remaining external voices ABSENT (budget-capped) | — |
 | `grok_reviews_consent` | consent record | unset | **NEW** first-use per-vendor egress consent (private/client repos) | — |

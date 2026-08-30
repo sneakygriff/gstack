@@ -85,14 +85,23 @@ function isGlobPattern(s: string): boolean {
 
 /** Match a flat (non-recursive) basename glob (`*`/`?` only) against DIR's entries. */
 function expandGlobInDir(dir: string, pattern: string): string[] {
-  const re = new RegExp(
-    '^' +
-      pattern
-        .replace(/[.+^${}()|\\]/g, '\\$&')
-        .replace(/\*/g, '.*')
-        .replace(/\?/g, '.') +
-      '$',
-  );
+  // An unbalanced `[`/`]` in the pattern makes `new RegExp` throw; the header
+  // contract is "Exit: always 0 — advisory, never blocks", so an invalid
+  // pattern degrades to no-match (NO_VOICES), never a crash. (ship review)
+  let re: RegExp;
+  try {
+    re = new RegExp(
+      '^' +
+        pattern
+          .replace(/[.+^${}()|\\]/g, '\\$&')
+          .replace(/\*/g, '.*')
+          .replace(/\?/g, '.') +
+        '$',
+    );
+  } catch {
+    process.stderr.write(`gstack-vote: warning: invalid glob pattern "${pattern}" (tallying as no results)\n`);
+    return [];
+  }
   let entries: string[];
   try {
     entries = fs.readdirSync(dir);
@@ -117,7 +126,12 @@ function discoverFiles(values: Record<string, string>, positionals: string[]): s
   const files: string[] = [];
   for (const p of positionals) {
     if (fs.existsSync(p)) {
-      const st = fs.statSync(p);
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(p); // exists/stat race → treat as missing, never crash
+      } catch {
+        continue;
+      }
       if (st.isDirectory()) {
         files.push(...expandGlobInDir(p, '*.result.json'));
       } else {
@@ -143,6 +157,35 @@ function voiceFromFilename(file: string): ResultVoice | undefined {
   return (RESULT_VOICES as readonly string[]).includes(base) ? (base as ResultVoice) : undefined;
 }
 
+/**
+ * Repo-aware location resolver (ship review): production tabulation previously
+ * ran the parser's STRUCTURAL location check only, so a plausible-looking but
+ * nonexistent `path#symbol` was promoted into the main table as located — a
+ * hallucinated or adversarial voice could manufacture an authoritative-looking
+ * finding without naming real code. A location now counts as LOCATED only when
+ * its path part exists under the repo root (or cwd outside a git repo);
+ * anything else drops to the appendix as unlocated.
+ */
+function makeRepoLocationResolver(): (location: string) => boolean {
+  let root = process.cwd();
+  try {
+    const r = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], { stdout: 'pipe', stderr: 'ignore' });
+    const out = r.stdout.toString().trim();
+    if (r.exitCode === 0 && out !== '') root = out;
+  } catch {
+    /* cwd fallback */
+  }
+  return (location: string): boolean => {
+    const pathPart = location.split('#')[0].split(':')[0].trim();
+    if (pathPart === '' || path.isAbsolute(pathPart)) return false;
+    try {
+      return fs.existsSync(path.resolve(root, pathPart));
+    } catch {
+      return false;
+    }
+  };
+}
+
 /** Canonical display order (§Consensus table mockup): codex, grok, gemini, fable, claude. */
 function sortByCanonicalVoiceOrder(results: VoiceResult[]): VoiceResult[] {
   const rank = (v: ResultVoice): number => {
@@ -157,15 +200,38 @@ function sortByCanonicalVoiceOrder(results: VoiceResult[]): VoiceResult[] {
  * brief: "read `*.result.json`, `parseVoiceResult`-revalidate, `tallyVoices()`").
  * A file's content IS a serialized VoiceResult object (not raw CLI stdout with
  * verdict fences); `parseVoiceResult`'s fallback extraction path (last top-level
- * `{...}` object) finds it directly, so re-validation is a single call. The
- * voice hint comes from the filename, so a misnamed/renamed file is caught by
- * `parseVoiceResult`'s spoof check rather than silently trusted.
+ * `{...}` object) finds it directly, so re-validation is a single call.
+ *
+ * ATTRIBUTION IS FILENAME-BOUND (ship review, CRITICAL): only the five
+ * canonical basenames (`<voice>.result.json`, voice ∈ RESULT_VOICES) are
+ * accepted, and each voice is tallied AT MOST ONCE. Without this, a file named
+ * `evil.result.json` would be parsed with NO voice hint, `parseVoiceResult`
+ * would trust its self-reported `voice` field, and a rogue writer in the
+ * out-dir could plant nonce-stamped records for voices that never ran —
+ * stuffing the quorum or diluting a real BLOCK. A non-canonical basename or a
+ * duplicate voice is now skipped LOUDLY, never trusted.
  */
 function loadResults(files: string[], nonce?: string): VoiceResult[] {
   const out: VoiceResult[] = [];
   const haveNonce = typeof nonce === 'string' && nonce !== '';
+  const seenVoices = new Set<ResultVoice>();
+  const locationResolver = makeRepoLocationResolver();
   let unauthenticatedReady = 0;
   for (const file of files) {
+    const voice = voiceFromFilename(file);
+    if (voice === undefined) {
+      process.stderr.write(
+        `gstack-vote: WARNING — ignoring ${file}: basename is not a canonical <voice>.result.json ` +
+          `(voice ∈ ${RESULT_VOICES.join('|')}); a self-reported voice field is never trusted for attribution\n`,
+      );
+      continue;
+    }
+    if (seenVoices.has(voice)) {
+      process.stderr.write(
+        `gstack-vote: WARNING — ignoring ${file}: duplicate result for voice "${voice}" (each voice is tallied at most once)\n`,
+      );
+      continue;
+    }
     let raw: string;
     try {
       raw = fs.readFileSync(file, 'utf8');
@@ -173,11 +239,11 @@ function loadResults(files: string[], nonce?: string): VoiceResult[] {
       process.stderr.write(`gstack-vote: warning: could not read ${file}: ${(e as Error).message}\n`);
       continue;
     }
-    const voice = voiceFromFilename(file);
+    seenVoices.add(voice);
     // Natural parse (no nonce enforcement) — establishes the record's REAL status
-    // and attribution. A misnamed/renamed file is still caught by the parser's
-    // own spoof check rather than silently trusted.
-    const base = voice ? parseVoiceResult(raw, { voice }) : parseVoiceResult(raw);
+    // under the FILENAME-bound voice hint. A body whose `voice` field disagrees
+    // with the filename is caught by the parser's spoof check, never trusted.
+    const base = parseVoiceResult(raw, { voice, locationResolver });
 
     // MANDATORY nonce authentication at the ONLY tabulation path (§5, OV-5). A
     // `ready` verdict — CLI voices (panel-stamped) AND the Anthropic voices
@@ -196,7 +262,8 @@ function loadResults(files: string[], nonce?: string): VoiceResult[] {
     if (base.status === 'ready') {
       const authenticated =
         haveNonce &&
-        parseVoiceResult(raw, { voice: base.voice, datamark: nonce, requireDatamark: true }).status === 'ready';
+        parseVoiceResult(raw, { voice: base.voice, datamark: nonce, requireDatamark: true, locationResolver })
+          .status === 'ready';
       if (!authenticated) {
         unauthenticatedReady++;
         out.push({
@@ -248,8 +315,12 @@ function pickTopFinding(findings: VoiceFinding[]): VoiceFinding {
 
 /** The TOP FINDING (promoted) column's cell content for one voice's row. */
 function topFindingCell(pv: PerVoiceEntry, result: VoiceResult | undefined): string {
-  if (pv.status === 'absent') return result?.reason ?? 'absent (no reason given)';
-  if (pv.status === 'error') return result?.reason ? `unparseable — ${result.reason}` : 'unparseable output';
+  // `reason` is voice-supplied (datamarked, but up to the 2000-char registry
+  // cap) — truncate like `claim` so a hostile/verbose reason can neither blow
+  // out the table nor deliver paragraphs of prose into the orchestrator's
+  // consensus view. (ship review)
+  if (pv.status === 'absent') return result?.reason ? truncate(result.reason, 90) : 'absent (no reason given)';
+  if (pv.status === 'error') return result?.reason ? `unparseable — ${truncate(result.reason, 90)}` : 'unparseable output';
   const findings = result?.findings ?? [];
   if (findings.length === 0) return 'no findings reported';
   // An UNLOCATED finding CANNOT be promoted to the main table (registry invariant

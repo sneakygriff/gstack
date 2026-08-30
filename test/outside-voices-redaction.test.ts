@@ -19,9 +19,11 @@
  * (`panel.assembled.txt`, `panel.masked.txt`) is deleted, and no
  * `panel.payload.txt` (the exact file the egress receipt would hash, and the
  * exact bytes `"$(cat …)"` would send to a CLI) is ever written — nothing is
- * "sent". A clean or MEDIUM-only prompt must NOT be reported ABSENT (no false
- * positive): the panel gates only on HIGH (MEDIUM is the orchestrator's AUQ
- * job, per the redact-doc precedent).
+ * "sent". The gate polarity (hardened past the original redact-doc split):
+ * maskable MEDIUM PII is masked-and-adopted (re-scan must come back clean),
+ * while a non-maskable MEDIUM secret (JWT / bearer / `*_KEY=`) fails closed to
+ * voice-ABSENT(redaction-medium) — only a clean or successfully-masked prompt
+ * avoids ABSENT. The MEDIUM-blocks-egress case below pins that polarity.
  *
  * This test never touches a paid/external CLI (only `--redact-only`, which
  * `run_redact_only` guarantees invokes no CLI) and never touches the network:
