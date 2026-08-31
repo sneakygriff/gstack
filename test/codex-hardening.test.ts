@@ -457,6 +457,16 @@ describe('codex SKILL.md.tmpl Step 2A: PROMPT + --base mutual exclusion guard', 
 // pass was killed at 287s of a 300s budget mid-tool-call, and the same prompt
 // completed in 336s. An unwrapped stall returns no exit code and no output,
 // which downstream reads as "Codex reviewed and found nothing".
+//
+// M3 outside-voices panel (2026-08): the adversarial PASSES (free Claude
+// subagent + Codex `codex exec` challenge) were delegated to the shared
+// outside-voices advisory panel (scripts/resolvers/review.ts generateAdversarialStep,
+// invoked via `bin/gstack-panel`) and are no longer inlined as a second
+// `_gstack_codex_timeout_wrapper ... codex exec` call in these three sites —
+// the panel's own codex voice is wrapped internally, once, at its single call
+// site (bin/gstack-panel:640 `_panel_invoke_codex`), not per-skill-text. Only
+// the heavyweight structured `codex review --base` pass (the `[P1]` GATE FAIL
+// rule) remains inline-wrapped here; it is unchanged and still KEPT.
 describe('codex timeout wrapper: /review + /ship diff passes', () => {
   const WRAPPED_SITES = [
     'scripts/resolvers/review.ts', // generator (source of truth)
@@ -471,11 +481,22 @@ describe('codex timeout wrapper: /review + /ship diff passes', () => {
   for (const relPath of WRAPPED_SITES) {
     const read = () => fs.readFileSync(path.join(ROOT, relPath), 'utf8');
 
-    test(`${relPath}: both diff-review Codex calls run under the wrapper`, () => {
+    test(`${relPath}: the structured diff-review Codex call runs under the wrapper`, () => {
       const wrapped =
         read().match(/_gstack_codex_timeout_wrapper\s+\d+\s+codex\s+(exec|review)\b/g) ?? [];
-      // Adversarial pass + structured review pass.
-      expect(wrapped.length).toBeGreaterThanOrEqual(2);
+      // Only the structured `codex review --base` [P1] gate remains inline here
+      // (M3: the adversarial `codex exec` pass moved to the shared panel, see
+      // header comment above).
+      expect(wrapped.length).toBe(1);
+      expect(wrapped[0]).toMatch(/codex\s+review\b/);
+    });
+
+    test(`${relPath}: the adversarial pass is delegated to the shared outside-voices panel`, () => {
+      // 'outside-voices advisory panel' is the load-bearing phrase: it appears
+      // in review.ts's own generator prose (not just in the rendered output of
+      // the imported generateOutsideVoices() call), so this is not a
+      // coincidental match — it is the actual delegation marker.
+      expect(read().toLowerCase()).toContain('outside-voices advisory panel');
     });
 
     test(`${relPath}: does not claim \`timeout\` is unavailable on macOS`, () => {

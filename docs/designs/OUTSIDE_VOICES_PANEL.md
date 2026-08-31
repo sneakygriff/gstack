@@ -659,7 +659,7 @@ to `complete` only when its gate is clean and its Deliverable passes.
 **Deliverable:** `bun run gen:skill-docs --host all && bun run skill:check` clean; autoplan generation + related tests green.
 
 ### M3 — code review + design + dashboard + e2e cleanup
-<!-- status: pending -->
+<!-- status: complete -->
 - `review`'s adversarial step and `design.ts` delegate to the shared resolver (host
   self-exclusion generalized to drop grok on a grok host, gemini on a gemini host); the
   duplicated copies are deleted.
@@ -670,6 +670,21 @@ to `complete` only when its gate is clean and its Deliverable passes.
   gemini-as-reviewer e2e tests are added alongside `test/codex-e2e.test.ts`.
 
 **Deliverable:** `bun test` (unit + e2e, EVALS-gated where CLI-dependent) green; `bun run skill:check` clean; no remaining duplicated outside-voice blocks.
+
+**Shipped deviations from the frozen M3 criteria above (recorded at completion):**
+- Host self-exclusion for grok/gemini is enforced at **runtime** via env sentinels in
+  `bin/gstack-panel` (`GROK_AGENT="1"` / `GEMINI_CLI="1"`), not at generation time; `GROK_AGENT`
+  provenance is derived from strings in the installed grok binary (narrower signal — worth a
+  live re-verify against a real grok host).
+- `/review` and `/ship` adversarial panel consent is **surface-aware**: FAIL-CLOSED
+  non-blocking on those automated surfaces (voices render ABSENT if not pre-consented), while
+  interactive plan-review surfaces keep the existing consent gate.
+- The design-consultation branch is intentionally **not** delegated to the shared resolver
+  (creative-proposal flow is a separate capability, out of scope for this delegation).
+- The §7 "`/review` panel before dedup+Fix-First" reordering is **deferred** — not required by
+  the frozen M3 criteria.
+- The aggregate outside-voices record's `cost_usd` is currently `null` (`TallyResult` has no
+  cost field yet); a real summed-cost total is a follow-up, not part of this milestone.
 
 **Verification note (for autobuilder):** gstack is a bun/TypeScript tooling repo, not a
 Dockerized web app — the loop's "functional verification" step is satisfied by the Deliverable

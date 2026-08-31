@@ -1,5 +1,6 @@
 import { type TemplateContext, toShellPath } from './types';
 import { AI_SLOP_BLACKLIST, OPENAI_HARD_REJECTIONS, OPENAI_LITMUS_CHECKS, CODEX_WEB_SEARCH_FLAG } from './constants';
+import { generateOutsideVoices } from './outside-voices';
 
 export function generateDesignReviewLite(ctx: TemplateContext): string {
   const litmusList = OPENAI_LITMUS_CHECKS.map((item, i) => `${i + 1}. ${item}`).join(' ');
@@ -539,79 +540,138 @@ Error handling: all non-blocking. On failure, skip and continue.`;
 }
 
 export function generateDesignOutsideVoices(ctx: TemplateContext): string {
-  // Codex host: strip entirely — Codex should never invoke itself
-  if (ctx.host === 'codex') return '';
-
-  const rejectionList = OPENAI_HARD_REJECTIONS.map((item, i) => `${i + 1}. ${item}`).join('\n');
-  const litmusList = OPENAI_LITMUS_CHECKS.map((item, i) => `${i + 1}. ${item}`).join('\n');
-
-  // Skill-specific configuration
   const isPlanDesignReview = ctx.skillName === 'plan-design-review';
   const isDesignReview = ctx.skillName === 'design-review';
   const isDesignConsultation = ctx.skillName === 'design-consultation';
 
-  // Determine opt-in behavior and reasoning effort
-  const isAutomatic = isDesignReview; // design-review runs automatically
-  const reasoningEffort = isDesignConsultation ? 'medium' : 'high'; // creative vs analytical
+  // ── design-consultation: NOT delegated (creative-direction proposal) ──────────
+  // This branch is a creative design-direction PROPOSAL flow (no PASS/CONCERNS/BLOCK
+  // verdict, no cross-vendor tally) — a separate concern from the advisory review
+  // panel, with its own (1.08) parity cap that an ~18 KB recipe would blow. Kept
+  // exactly as-is per OUTSIDE_VOICES_PANEL.md design call #4; the M3 delegation does
+  // not touch it. (It keeps its own `host === 'codex'` handling below.)
+  if (isDesignConsultation) {
+    return generateDesignConsultationVoices(ctx);
+  }
 
-  // Build skill-specific Codex prompt
-  let codexPrompt: string;
-  let subagentPrompt: string;
+  // ── plan-design-review + design-review: delegate to the shared advisory panel ──
+  // Both design REVIEW surfaces now route through the single N-voice outside-voices
+  // panel (surface=design), replacing the duplicated inline codex-exec + subagent +
+  // litmus-scorecard blocks. The panel is ADVISORY / NON-BLOCKING: it routes a
+  // recommendation into the EXISTING design human gate and sets nothing. The
+  // untrusted-boundary, first-use egress consent, redaction, per-voice sandbox, and
+  // host self-exclusion all live in the shared resolver + `bin/gstack-panel` — this
+  // resolver references them, never re-implements them (mirrors the M1/M2 pattern).
+  if (isPlanDesignReview || isDesignReview) {
+    // full variant strips to '' on a codex host (a Codex session must not invoke
+    // itself; the two Anthropic voices have no Agent-tool transport there) — the
+    // same codex-host output shape design.ts produced before (early '' return).
+    const panel = generateOutsideVoices(ctx, ['surface=design']);
 
-  if (isPlanDesignReview) {
-    codexPrompt = `Read the plan file at [plan-file-path]. Evaluate this plan's UI/UX design against these criteria.
+    // design-review runs the panel automatically — its existing (auto) semantics.
+    if (isDesignReview) return panel;
 
-HARD REJECTION — flag if ANY apply:
-${rejectionList}
+    // plan-design-review keeps its OPT-IN gate (§4 matrix: "design-review auto;
+    // others opt-in"). Wrap the delegated panel so the shared recipe's
+    // "standard step, not opt-in" framing does not silently flip it to auto-run.
+    return wrapPlanDesignReviewOptIn(panel);
+  }
 
-LITMUS CHECKS — answer YES or NO for each:
-${litmusList}
+  // Unknown skill — return empty (matches the prior fall-through behavior).
+  return '';
+}
 
-HARD RULES — first classify as MARKETING/LANDING PAGE vs APP UI vs HYBRID, then flag violations of the matching rule set:
-- MARKETING: First viewport as one composition, brand-first hierarchy, full-bleed hero, 2-3 intentional motions, composition-first layout
-- APP UI: Calm surface hierarchy, dense but readable, utility language, minimal chrome
-- UNIVERSAL: CSS variables for colors, no default font stacks, one job per section, cards earn existence
+/**
+ * plan-design-review keeps its outside-voices step OPT-IN even though it now
+ * delegates to the shared advisory panel (which frames itself as a "standard part
+ * of this review, not an opt-in"). OUTSIDE_VOICES_PANEL.md §4 pins the run
+ * semantics: design-review auto; plan-design-review opt-in. This is the thin
+ * wrapper that preserves that — it (1) neutralizes the shared recipe's "not an
+ * opt-in" sentence and (2) injects the AskUserQuestion opt-in gate after the
+ * Surface line, inside the SAME `## Outside Voices — Advisory Panel …` section, so
+ * autoplan's single skip-list entry still covers it. Both edits are guarded: if the
+ * shared recipe prose/layout drifts so an anchor no longer matches, generation
+ * THROWS (loud) rather than silently shipping a panel that flipped to auto-run.
+ */
+function wrapPlanDesignReviewOptIn(panel: string): string {
+  // Codex host stripped the full recipe to '' — nothing to wrap (this is exactly
+  // the '' design.ts returned on a codex host for this skill before the delegation).
+  if (panel === '') return '';
 
-For each finding: what's wrong, what will happen if it ships unresolved, and the specific fix. Be opinionated. No hedging.`;
+  const NOT_OPT_IN = '. A standard\npart of this review, not an opt-in — but **ADVISORY**:';
+  const OPT_IN =
+    '. In /plan-design-review this panel is **opt-in** (unlike /design-review, which runs it ' +
+    'automatically) — but **ADVISORY**:';
+  if (!panel.includes(NOT_OPT_IN)) {
+    throw new Error(
+      'design resolver: could not find the shared panel\'s "standard part … not an opt-in" framing ' +
+        'to neutralize for /plan-design-review. The shared recipe prose drifted — update this wrapper ' +
+        'so plan-design-review is NOT silently flipped to auto-run (OUTSIDE_VOICES_PANEL.md §4).',
+    );
+  }
 
-    subagentPrompt = `Read the plan file at [plan-file-path]. You are an independent senior product designer reviewing this plan. You have NOT seen any prior review. Evaluate:
+  const SURFACE_ANCHOR = '**Surface:** `/plan-design-review`.\n\n---';
+  if (!panel.includes(SURFACE_ANCHOR)) {
+    throw new Error(
+      'design resolver: could not find the design-surface "**Surface:** `/plan-design-review`." anchor ' +
+        'to attach the /plan-design-review opt-in gate. The shared recipe layout drifted.',
+    );
+  }
 
-1. Information hierarchy: what does the user see first, second, third? Is it right?
-2. Missing states: loading, empty, error, success, partial — which are unspecified?
-3. User journey: what's the emotional arc? Where does it break?
-4. Specificity: does the plan describe SPECIFIC UI ("48px Söhne Bold header, #1a1a1a on white") or generic patterns ("clean modern card-based layout")?
-5. What design decisions will haunt the implementer if left ambiguous?
+  // Third anchor: the shared recipe's discoverability print-line still announces
+  // the panel "runs automatically (standard step)" — directly contradicting the
+  // opt-in gate we inject four lines below it. Rewrite just that lead-in to
+  // opt-in phrasing (keeping the toggle/off-switch discoverability tail intact),
+  // so an opted-in run never prints "runs automatically". Guarded like the two
+  // edits above: if the recipe's print-line drifts, generation THROWS rather than
+  // silently shipping the contradictory auto-run announcement (P2, gate2).
+  const AUTO_RUN_LEADIN = 'Running the outside-voices panel automatically (standard step). Toggle a voice:';
+  const OPT_IN_LEADIN =
+    'Running the outside-voices panel (opt-in for this review — see the gate below). Toggle a voice:';
+  if (!panel.includes(AUTO_RUN_LEADIN)) {
+    throw new Error(
+      'design resolver: could not find the shared panel\'s "Running the outside-voices panel automatically ' +
+        '(standard step)." discoverability line to neutralize for /plan-design-review. The shared recipe ' +
+        'print-line drifted — update this wrapper so the opted-in panel does not announce it runs ' +
+        'automatically (contradicting the injected opt-in gate).',
+    );
+  }
+  const OPT_IN_GATE = `**Surface:** \`/plan-design-review\`.
 
-For each finding: what's wrong, severity (critical/high/medium), and the fix.`;
-  } else if (isDesignReview) {
-    codexPrompt = `Review the frontend source code in this repo. Evaluate against these design hard rules:
-- Spacing: systematic (design tokens / CSS variables) or magic numbers?
-- Typography: expressive purposeful fonts or default stacks?
-- Color: CSS variables with defined system, or hardcoded hex scattered?
-- Responsive: breakpoints defined? calc(100svh - header) for heroes? Mobile tested?
-- A11y: ARIA landmarks, alt text, contrast ratios, 44px touch targets?
-- Motion: 2-3 intentional animations, or zero / ornamental only?
-- Cards: used only when card IS the interaction? No decorative card grids?
+**Opt-in gate (this review only).** /plan-design-review runs the outside-voices design panel as an
+OPT-IN step — unlike /design-review, which runs it automatically. Before running the panel below,
+ask with AskUserQuestion:
 
-First classify as MARKETING/LANDING PAGE vs APP UI vs HYBRID, then apply matching rules.
+> "Want outside design voices before the detailed review? The panel runs the enabled voices (codex +
+> fable + native Claude by default) over the design plan and tabulates ONE advisory recommendation.
+> NON-BLOCKING — it never sets the design verdict."
+> A) Yes — run the outside-voices design panel below
+> B) No — proceed straight to the detailed review
 
-LITMUS CHECKS — answer YES/NO:
-${litmusList}
+If the user chooses B, SKIP the entire panel below and continue with the detailed review. If A, run it.
 
-HARD REJECTION — flag if ANY apply:
-${rejectionList}
+---`;
 
-Be specific. Reference file:line for every finding.`;
+  return panel
+    .replace(NOT_OPT_IN, OPT_IN)
+    .replace(SURFACE_ANCHOR, OPT_IN_GATE)
+    .replace(AUTO_RUN_LEADIN, OPT_IN_LEADIN);
+}
 
-    subagentPrompt = `Review the frontend source code in this repo. You are an independent senior product designer doing a source-code design audit. Focus on CONSISTENCY PATTERNS across files rather than individual violations:
-- Are spacing values systematic across the codebase?
-- Is there ONE color system or scattered approaches?
-- Do responsive breakpoints follow a consistent set?
-- Is the accessibility approach consistent or spotty?
+/**
+ * design-consultation's OWN outside-voices block — a creative design-DIRECTION
+ * proposal (visual thesis / typography / color / layout), NOT the advisory review
+ * panel. Deliberately NOT delegated (design call #4): it has no PASS/CONCERNS/BLOCK
+ * verdict semantics and its 1.08 parity cap cannot absorb the shared recipe. Kept
+ * byte-for-byte as it was before the M3 delegation (the pre-M3 isDesignConsultation
+ * branch), including its own opt-in and its audit-only `design-outside-voices`
+ * review-log write.
+ */
+function generateDesignConsultationVoices(ctx: TemplateContext): string {
+  // Codex host: strip entirely — Codex should never invoke itself.
+  if (ctx.host === 'codex') return '';
 
-For each finding: what's wrong, severity (critical/high/medium), and the file:line.`;
-  } else if (isDesignConsultation) {
-    codexPrompt = `Given this product context, propose a complete design direction:
+  const codexPrompt = `Given this product context, propose a complete design direction:
 - Visual thesis: one sentence describing mood, material, and energy
 - Typography: specific font names (not defaults — no Inter/Roboto/Arial/system) + hex colors
 - Color system: CSS variables for background, surface, primary text, muted text, accent
@@ -621,70 +681,24 @@ For each finding: what's wrong, severity (critical/high/medium), and the file:li
 
 Be opinionated. Be specific. Do not hedge. This is YOUR design direction — own it.`;
 
-    subagentPrompt = `Given this product context, propose a design direction that would SURPRISE. What would the cool indie studio do that the enterprise UI team wouldn't?
+  const subagentPrompt = `Given this product context, propose a design direction that would SURPRISE. What would the cool indie studio do that the enterprise UI team wouldn't?
 - Propose an aesthetic direction, typography stack (specific font names), color palette (hex values)
 - 2 deliberate departures from category norms
 - What emotional reaction should the user have in the first 3 seconds?
 
 Be bold. Be specific. No hedging.`;
-  } else {
-    // Unknown skill — return empty
-    return '';
-  }
-
-  // Build the opt-in section
-  const optInSection = isAutomatic ? `
-**Automatic:** Outside voices run automatically when Codex is available. No opt-in needed.` : `
-Use AskUserQuestion:
-> "Want outside design voices${isPlanDesignReview ? ' before the detailed review' : ''}? Codex evaluates against OpenAI's design hard rules + litmus checks; Claude subagent does an independent ${isDesignConsultation ? 'design direction proposal' : 'completeness review'}."
->
-> A) Yes — run outside design voices
-> B) No — proceed without
-
-If user chooses B, skip this step and continue.`;
-
-  // Build the synthesis section
-  const synthesisSection = isPlanDesignReview ? `
-**Synthesis — Litmus scorecard:**
-
-\`\`\`
-DESIGN OUTSIDE VOICES — LITMUS SCORECARD:
-═══════════════════════════════════════════════════════════════
-  Check                                    Claude  Codex  Consensus
-  ─────────────────────────────────────── ─────── ─────── ─────────
-  1. Brand unmistakable in first screen?   —       —      —
-  2. One strong visual anchor?             —       —      —
-  3. Scannable by headlines only?          —       —      —
-  4. Each section has one job?             —       —      —
-  5. Cards actually necessary?             —       —      —
-  6. Motion improves hierarchy?            —       —      —
-  7. Premium without decorative shadows?   —       —      —
-  ─────────────────────────────────────── ─────── ─────── ─────────
-  Hard rejections triggered:               —       —      —
-═══════════════════════════════════════════════════════════════
-\`\`\`
-
-Fill in each cell from the Codex and subagent outputs. CONFIRMED = both agree. DISAGREE = models differ. NOT SPEC'D = not enough info to evaluate.
-
-**Pass integration (respects existing 7-pass contract):**
-- Hard rejections → raised as the FIRST items in Pass 1, tagged \`[HARD REJECTION]\`
-- Litmus DISAGREE items → raised in the relevant pass with both perspectives
-- Litmus CONFIRMED failures → pre-loaded as known issues in the relevant pass
-- Passes can skip discovery and go straight to fixing for pre-identified issues` :
-    isDesignConsultation ? `
-**Synthesis:** Claude main references both Codex and subagent proposals in the Phase 3 proposal. Present:
-- Areas of agreement between all three voices (Claude main + Codex + subagent)
-- Genuine divergences as creative alternatives for the user to choose from
-- "Codex and I agree on X. Codex suggested Y where I'm proposing Z — here's why..."` : `
-**Synthesis — Litmus scorecard:**
-
-Use the same scorecard format as /plan-design-review (shown above). Fill in from both outputs.
-Merge findings into the triage with \`[codex]\` / \`[subagent]\` / \`[cross-model]\` tags.`;
 
   const escapedCodexPrompt = codexPrompt.replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
   return `## Design Outside Voices (parallel)
-${optInSection}
+
+Use AskUserQuestion:
+> "Want outside design voices? Codex evaluates against OpenAI's design hard rules + litmus checks; Claude subagent does an independent design direction proposal."
+>
+> A) Yes — run outside design voices
+> B) No — proceed without
+
+If user chooses B, skip this step and continue.
 
 **Check Codex availability:**
 \`\`\`bash
@@ -697,7 +711,7 @@ command -v codex >/dev/null 2>&1 && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AV
 \`\`\`bash
 TMPERR_DESIGN=$(mktemp /tmp/codex-design-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-codex exec "${escapedCodexPrompt}" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="${reasoningEffort}"' ${CODEX_WEB_SEARCH_FLAG} < /dev/null 2>"$TMPERR_DESIGN"
+codex exec "${escapedCodexPrompt}" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="medium"' ${CODEX_WEB_SEARCH_FLAG} < /dev/null 2>"$TMPERR_DESIGN"
 \`\`\`
 Use a 5-minute timeout (\`timeout: 300000\`). After the command completes, read stderr:
 \`\`\`bash
@@ -715,9 +729,13 @@ Dispatch a subagent with this prompt:
 - On any Codex error: proceed with Claude subagent output only, tagged \`[single-model]\`.
 - If Claude subagent also fails: "Outside voices unavailable — continuing with primary review."
 
-Present Codex output under a \`CODEX SAYS (design ${isPlanDesignReview ? 'critique' : isDesignReview ? 'source audit' : 'direction'}):\` header.
-Present subagent output under a \`CLAUDE SUBAGENT (design ${isPlanDesignReview ? 'completeness' : isDesignReview ? 'consistency' : 'direction'}):\` header.
-${synthesisSection}
+Present Codex output under a \`CODEX SAYS (design direction):\` header.
+Present subagent output under a \`CLAUDE SUBAGENT (design direction):\` header.
+
+**Synthesis:** Claude main references both Codex and subagent proposals in the Phase 3 proposal. Present:
+- Areas of agreement between all three voices (Claude main + Codex + subagent)
+- Genuine divergences as creative alternatives for the user to choose from
+- "Codex and I agree on X. Codex suggested Y where I'm proposing Z — here's why..."
 
 **Log the result:**
 \`\`\`bash

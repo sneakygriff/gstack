@@ -25,6 +25,13 @@ export const PAID_TEST_GLOBS = [
   // safety property was untested on the build machine); this line is what
   // makes `bun run test:periodic`/`test:periodic:sharded` actually re-run it.
   'test/outside-voices-sandbox.test.ts',
+  // grok-as-reviewer / gemini-as-reviewer E2E (M3/T6): drives the REAL
+  // bin/gstack-panel reviewer call path for each voice, spawning the real
+  // grok/gemini CLIs. Same shape as test/outside-voices-sandbox.test.ts —
+  // self-gates on EVALS_TIER === 'periodic' via test/helpers/e2e-gate.ts
+  // (test/outside-voices-reviewer-e2e.test.ts header) — never runs under
+  // test:gate. Listed here so test:periodic:sharded actually picks it up.
+  'test/outside-voices-reviewer-e2e.test.ts',
 ] as const;
 
 /** True when a repo-relative path (either slash style) is a paid test file. */

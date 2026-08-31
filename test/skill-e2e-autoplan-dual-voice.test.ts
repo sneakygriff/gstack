@@ -95,7 +95,24 @@ describe('Autoplan outside-voices panel — static invocation-mechanics pins (al
     );
   });
 
-  test('these invocation lines are distinct from the Step 5 EXAMPLE output table (the tautology vector) — both exist, only once each', () => {
+  // M3 outside-voices panel integration (2026-08-31): Step 7 ("Persist the
+  // aggregate record + cleanup") re-invokes `gstack-vote --dir` a SECOND time
+  // — with `--json` and no `--surface`/`--budget-usd` — to get the raw
+  // TallyResult it maps into the aggregate `outside-voices` review-log record,
+  // re-reading the SAME `*.result.json` files Step 4 already tabulated
+  // (BEFORE the cleanup step deletes them) rather than re-implementing the
+  // tally. This is a second CALL to the same ONLY tabulation path, not a
+  // second tabulation MECHANISM, so it doesn't contradict the Step 4 heading
+  // above. Pinned separately so a future edit can't silently drop the
+  // aggregate-record re-read without failing a test.
+  test('Step 7 wires the aggregate-record JSON re-read of the same gstack-vote tally: --dir, --nonce, --json', () => {
+    expect(AUTOPLAN_SKILL).toContain('### Step 7 — Persist the aggregate record + cleanup');
+    expect(AUTOPLAN_SKILL).toContain(
+      '~/.claude/skills/gstack/bin/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --nonce "<literal $PANEL_NONCE>" --json',
+    );
+  });
+
+  test('these invocation lines are distinct from the Step 5 EXAMPLE output table (the tautology vector) — the panel-invoke line exists once; the vote line exists exactly twice (Step 4 tabulate + Step 7 JSON re-read), never more', () => {
     // Sanity: the example table this pin deliberately does NOT rely on is
     // still there (Step 5 documents what the real output looks like) — this
     // just confirms the two things (real invocation vs. illustrative
@@ -103,7 +120,20 @@ describe('Autoplan outside-voices panel — static invocation-mechanics pins (al
     const exampleTable = 'claude  anthropic  ready    CONCERNS   P1 unbounded retry queue.ts#retry    (repro claimed)';
     expect(AUTOPLAN_SKILL).toContain(exampleTable);
     expect(AUTOPLAN_SKILL.split('~/.claude/skills/gstack/bin/gstack-panel --surface <surface>').length - 1).toBe(1);
-    expect(AUTOPLAN_SKILL.split('~/.claude/skills/gstack/bin/gstack-vote --dir').length - 1).toBe(1);
+    // Exactly the two known-good forms, once each — not a loose count, so a
+    // stray THIRD gstack-vote call (a real regression) still fails this.
+    const voteDirCount = AUTOPLAN_SKILL.split('~/.claude/skills/gstack/bin/gstack-vote --dir').length - 1;
+    expect(voteDirCount).toBe(2);
+    expect(
+      AUTOPLAN_SKILL.split(
+        '~/.claude/skills/gstack/bin/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --surface "<surface label>"',
+      ).length - 1,
+    ).toBe(1);
+    expect(
+      AUTOPLAN_SKILL.split(
+        '~/.claude/skills/gstack/bin/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --nonce "<literal $PANEL_NONCE>" --json',
+      ).length - 1,
+    ).toBe(1);
   });
 });
 

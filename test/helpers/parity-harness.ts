@@ -216,7 +216,13 @@ const MONOLITH_INVARIANTS: ParityInvariant[] = [
     // not-installed vs not-authed handling, not slop.
     // v1.64+v1.65 merge: both waves grew the shared preamble (evidence
     // directive + telemetry failure flags); measured 1.094.
-    maxSizeRatio: 1.10,
+    // M3 outside-voices panel integration (2026-08-31): Step 5.7's adversarial
+    // review replaced the two inline single-vendor (free Claude subagent +
+    // Codex `codex exec`) adversarial passes with the shared N-voice advisory
+    // panel (bin/gstack-panel, surface=review) plus its consent/egress-receipt
+    // and dashboard-aggregate-log prose, ON TOP of the still-kept structured
+    // `codex review --base` [P1] gate. Measured 1.150 (93,829 -> 107,903 bytes).
+    maxSizeRatio: 1.17, // M3 outside-voices panel; measured 1.150
     minBytes: 70_000,
   },
   {
@@ -267,7 +273,12 @@ const MONOLITH_INVARIANTS: ParityInvariant[] = [
     // Measured 1.1796 (87821 -> 103598 bytes); only ~30-byte headroom left
     // under this cap — the next autoplan prose addition will need either a
     // measured re-cap or a compensating trim elsewhere (gate2-eng-review F3).
-    maxSizeRatio: 1.18, // M2 outside-voices panel; measured 1.1796 (round 2)
+    // M3 outside-voices panel integration (2026-08-31): the round-2 headroom
+    // (~30 bytes) was consumed by the M3 wave's shared-panel wiring changes
+    // (scripts/resolvers/outside-voices.ts + bin/gstack-panel invocation
+    // updates) landing on top of the M2 baseline. Measured 1.2011
+    // (87,821 -> 105,483 bytes).
+    maxSizeRatio: 1.22, // M3 outside-voices panel; measured 1.2011
     minBytes: 70_000,
   },
 ];

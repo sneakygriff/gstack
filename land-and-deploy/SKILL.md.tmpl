@@ -391,7 +391,14 @@ Collect evidence for each check below. Track warnings (yellow) and blockers (red
 
 Parse the output. For each review skill (plan-eng-review, plan-ceo-review,
 plan-design-review, design-review-lite, codex-review, review, adversarial-review,
-codex-plan-review):
+outside-voices):
+
+**Outside Voice row — legacy fallback:** the N-voice advisory panel writes its aggregate
+result under the `outside-voices` record id. If no `outside-voices` entry exists within the
+7-day window, fall back to the most recent `codex-plan-review` entry (pre-M3 plan-review
+panels logged the aggregate under that skill id) and grade staleness from it instead — an
+older log must never permanently grade this row NOT RUN once `codex-plan-review` entries age
+out. Same fallback the review dashboard uses (`scripts/resolvers/review.ts`).
 
 1. Find the most recent entry within the last 7 days.
 2. **Content-first rule (diff-scoped rows only: `review`, `adversarial-review`,

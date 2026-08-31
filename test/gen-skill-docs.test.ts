@@ -802,6 +802,71 @@ describe('REVIEW_DASHBOARD resolver', () => {
   });
 });
 
+// ─── Outside Voices aggregate record → dashboard (M3 / T4) ──────────────────
+//
+// T4 (feat-outside-voices-panel): the outside-voices panel's Step 7 writes ONE
+// aggregate `outside-voices` review-log record (per-voice sub-entries +
+// recommendation + summed cost, sourced from `gstack-vote --json`), and
+// `generateReviewDashboard`'s Outside Voice row reads THAT record, with a legacy
+// `codex-plan-review` fallback for pre-M3 logs. These pins lock the record
+// identity in BOTH resolver variants and the dashboard reader + fallback.
+describe('OUTSIDE_VOICES aggregate record + N-voice dashboard row (M3/T4)', () => {
+  const resolverSrc = fs.readFileSync(
+    path.join(ROOT, 'scripts', 'resolvers', 'outside-voices.ts'),
+    'utf-8',
+  );
+
+  test('resolver Step 7 writes the aggregate `outside-voices` record (both variants), not the codex-plan-review / skillName masquerade', () => {
+    // Two Step-7 blocks (renderFullRecipe + renderProcedure) both log `outside-voices`.
+    const aggregateWrites = resolverSrc.match(/gstack-review-log '\{"skill":"outside-voices"/g) ?? [];
+    expect(aggregateWrites.length).toBe(2);
+    // The M2-era masquerade writes are gone from the resolver's Step 7.
+    expect(resolverSrc).not.toContain(`gstack-review-log '{"skill":"codex-plan-review"`);
+    expect(resolverSrc).not.toContain(`gstack-review-log '{"skill":"\${ctx.skillName}"`);
+    // The "audit-only until M3" caveat prose is gone from both variants.
+    expect(resolverSrc).not.toContain('audit-only until');
+    expect(resolverSrc).not.toContain('audit-log record only');
+  });
+
+  test('resolver Step 7 sources the record from `gstack-vote --json` in both variants (never re-tabulates)', () => {
+    const jsonReads = resolverSrc.match(/gstack-vote --dir "<literal \$PANEL_OUT_DIR>" --nonce "<literal \$PANEL_NONCE>" --json/g) ?? [];
+    expect(jsonReads.length).toBe(2);
+    // The aggregate record carries the fields the dashboard renders.
+    expect(resolverSrc).toContain('"recommendation":"REC"');
+    expect(resolverSrc).toContain('"tally_status":"TALLY_STATUS"');
+    expect(resolverSrc).toContain('"voices":[{"voice":"…","vendor":"…","status":"…","verdict":"…"}]');
+  });
+
+  test('the aggregate `outside-voices` Step-7 record renders into a full-variant caller (review) and the procedure caller (autoplan)', () => {
+    const review = fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8');
+    const autoplan = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md'), 'utf-8');
+    for (const content of [review, autoplan]) {
+      expect(content).toContain('"skill":"outside-voices"');
+      expect(content).toContain('--json');
+      expect(content).not.toContain('"skill":"codex-plan-review"');
+    }
+  });
+
+  test('dashboard Outside Voice row reads the aggregate `outside-voices` record with a legacy codex-plan-review fallback', () => {
+    // Rendered wherever REVIEW_DASHBOARD appears (plan-review sections, ship, …).
+    for (const content of [readShipUnion(), readSkillUnion('plan-ceo-review'), readSkillUnion('plan-eng-review')]) {
+      // New primary reader.
+      expect(content).toContain('For the Outside Voice row, show the most recent `outside-voices` entry');
+      expect(content).toContain('recommendation');
+      // Per-voice sub-entries + summed cost are rendered.
+      expect(content).toContain('per-voice `voices` sub-entries');
+      expect(content).toContain('cost_usd');
+      // Legacy fallback keeps pre-M3 logs from blanking the row.
+      expect(content).toContain('Legacy fallback');
+      expect(content).toContain('fall back to the most recent `codex-plan-review` entry');
+      // The stale "not checked by any consumer" claim is gone; the aggregate row is consumed.
+      expect(content).not.toContain('not checked by any consumer');
+      // The stale adversarial tiers bullet no longer names the deleted inline passes.
+      expect(content).not.toContain('both Claude adversarial subagent and Codex adversarial challenge');
+    }
+  });
+});
+
 // ─── Test Coverage Audit Resolver Tests ─────────────────────
 
 describe('TEST_COVERAGE_AUDIT placeholders', () => {
@@ -1685,32 +1750,89 @@ describe('preamble section index routes every shared section', () => {
 // --- {{DESIGN_OUTSIDE_VOICES}} resolver tests ---
 
 describe('DESIGN_OUTSIDE_VOICES resolver', () => {
-  test('plan-design-review contains outside voices section', () => {
+  // M3: plan-design-review and design-review DELEGATE their design outside-voices
+  // step to the shared advisory panel (surface=design); the pre-M3 inline
+  // codex-exec + subagent + litmus-scorecard block is deleted. design-consultation
+  // is NOT delegated (creative-direction proposal — design call #4) and keeps its
+  // own block verbatim.
+  test('plan-design-review delegates to the shared advisory panel and KEEPS its opt-in gate', () => {
     const content = readSkillUnion('plan-design-review');
-    expect(content).toContain('Design Outside Voices');
-    expect(content).toContain('CODEX_AVAILABLE');
-    expect(content).toContain('LITMUS SCORECARD');
+    // Delegated to the shared N-voice panel …
+    expect(content).toContain('## Outside Voices — Advisory Panel (recommendation only; the user decides)');
+    expect(content).toContain('gstack-panel');
+    // … wrapped in the preserved opt-in gate (§4: plan-design-review opt-in) …
+    expect(content).toContain('**Opt-in gate (this review only).**');
+    expect(content).toContain('Want outside design voices before the detailed review');
+    expect(content).toContain('this panel is **opt-in**');
+    // … and the pre-M3 inline dual-voice block is gone.
+    expect(content).not.toContain('LITMUS SCORECARD');
+    expect(content).not.toContain('model_reasoning_effort="high"');
   });
 
-  test('design-review contains outside voices section', () => {
+  test('design-review delegates to the shared advisory panel and runs it automatically (no opt-in gate)', () => {
     const content = fs.readFileSync(path.join(ROOT, 'design-review', 'SKILL.md'), 'utf-8');
-    expect(content).toContain('Design Outside Voices');
-    expect(content).toContain('source audit');
+    expect(content).toContain('## Outside Voices — Advisory Panel (recommendation only; the user decides)');
+    expect(content).toContain('gstack-panel');
+    // design-review keeps the panel's auto framing — NOT wrapped in the opt-in gate.
+    expect(content).toContain('not an opt-in');
+    expect(content).not.toContain('**Opt-in gate (this review only).**');
+    // pre-M3 inline block gone.
+    expect(content).not.toContain('source audit');
+    expect(content).not.toContain('LITMUS SCORECARD');
   });
 
-  test('design-consultation contains outside voices section', () => {
+  // M3 gate2 P2-2 (eng-review) regression pin: `resolveProfile`
+  // (scripts/resolvers/outside-voices.ts) overrides the panel's label + target
+  // to `/design-review` ONLY when `surface === 'design' && skillName ===
+  // 'design-review'` — every OTHER caller of the shared `design` surface
+  // (`/plan-design-review` directly, and autoplan's design PHASE, which is a
+  // genuine plan-design review) must keep the static `/plan-design-review`
+  // label. Reverting `resolveProfile` to `SURFACES[surface]` regenerates the
+  // WRONG `/plan-design-review` provenance for a live design-review run while
+  // every OTHER suite stays green (the exact defect M3 round-1 fixed) — this
+  // test is the only pin on that label + the persisted record's `surface`
+  // field, so it must fail if that revert happens.
+  test('design-review renders its OWN `/design-review` label + surface provenance, never the plan-design-review one (M3 gate2 P2-2 regression pin)', () => {
+    const content = fs.readFileSync(path.join(ROOT, 'design-review', 'SKILL.md'), 'utf-8');
+    // The user-facing `**Surface:**` line.
+    expect(content).toContain('**Surface:** `/design-review`.');
+    // The gstack-vote --surface flag (drives the printed panel header).
+    expect(content).toContain('--surface "/design-review"');
+    // The persisted aggregate outside-voices record (what lights the dashboard row).
+    expect(content).toContain('"surface":"/design-review"');
+    // Never the plan-design-review provenance a `SURFACES[surface]`-only revert would emit.
+    expect(content).not.toContain('"surface":"/plan-design-review"');
+    expect(content).not.toContain('--surface "/plan-design-review"');
+    expect(content).not.toContain('**Surface:** `/plan-design-review`.');
+
+    // Sanity contrast: plan-design-review (direct) and autoplan's design phase
+    // are NOT overridden — both keep the static `/plan-design-review` label
+    // (autoplan's design phase is a genuine plan-design review; `renderInvoke`
+    // deliberately uses `SURFACES[surface]` directly, not `resolveProfile`).
+    const planDesignReview = readSkillUnion('plan-design-review');
+    expect(planDesignReview).toContain('/plan-design-review');
+    const autoplan = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md'), 'utf-8');
+    expect(autoplan).toContain('/plan-design-review');
+  });
+
+  test('design-consultation is NOT delegated — keeps its own creative-direction block', () => {
     const content = fs.readFileSync(path.join(ROOT, 'design-consultation', 'SKILL.md'), 'utf-8');
     expect(content).toContain('Design Outside Voices');
     expect(content).toContain('design direction');
+    // still its own codex-exec block, not the shared panel.
+    expect(content).toContain('CODEX_AVAILABLE');
+    expect(content).not.toContain('## Outside Voices — Advisory Panel (recommendation only; the user decides)');
   });
 
-  test('branches correctly per skillName — different prompts', () => {
+  test('branches correctly per skillName — the review surfaces delegate; design-consultation keeps its creative prompt', () => {
     const planContent = readSkillUnion('plan-design-review');
     const consultContent = fs.readFileSync(path.join(ROOT, 'design-consultation', 'SKILL.md'), 'utf-8');
-    // plan-design-review uses analytical prompt (high reasoning)
-    expect(planContent).toContain('model_reasoning_effort="high"');
-    // design-consultation uses creative prompt (medium reasoning)
+    // plan-design-review DELEGATES — no inline high-reasoning codex-exec block any more.
+    expect(planContent).not.toContain('model_reasoning_effort="high"');
+    expect(planContent).toContain('## Outside Voices — Advisory Panel (recommendation only; the user decides)');
+    // design-consultation keeps its own creative (medium reasoning) proposal block.
     expect(consultContent).toContain('model_reasoning_effort="medium"');
+    expect(consultContent).toContain('Design Outside Voices (parallel)');
   });
 });
 
@@ -2194,7 +2316,10 @@ describe('Codex generation (--host codex)', () => {
 
   test('codex host produces empty outside voices in design-review', () => {
     const codexContent = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-design-review', 'SKILL.md'), 'utf-8');
+    // Pre-M3 the inline block stripped; post-M3 the delegated shared panel strips
+    // to '' on a codex host (full variant), so neither heading may appear.
     expect(codexContent).not.toContain('Design Outside Voices');
+    expect(codexContent).not.toContain('## Outside Voices — Advisory Panel');
   });
 
   test('codex host does not include Codex design block in ship', () => {

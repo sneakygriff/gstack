@@ -831,7 +831,6 @@ unless) its phase actually runs.
 - Plan File Review Report
 - Prerequisite Skill Offer (BENEFITS_FROM)
 - Outside Voices — Advisory Panel (recommendation only; the user decides)
-- Design Outside Voices (parallel)
 
 Follow ONLY the review-specific methodology, sections, and required outputs.
 
@@ -1128,24 +1127,58 @@ gate. If no tension exists, note: "No cross-model tension — the panel agrees w
 
 ---
 
-### Step 7 — Persist + cleanup
+### Step 7 — Persist the aggregate record + cleanup
 
-`gstack-panel` already logged a per-voice audit entry. Persist ONE aggregate entry as an
-**audit-log record only** — it does NOT light the Review Readiness Dashboard's Outside Voice row (that
-row currently reads only `codex-plan-review` entries; wiring the N-voice panel into the dashboard is
-a later milestone, M3). This is a durable audit trail, nothing more:
+`gstack-panel` already logged a per-voice audit entry per voice (`skill:"outside-voices-panel"`, one
+row each — forensic only, not read by the dashboard). Now persist ONE **aggregate** `outside-voices`
+review-log record for THIS phase so the Review Readiness Dashboard's Outside Voice row renders the
+WHOLE N-voice panel — per-voice verdicts + the recommendation, plus `cost_usd` (currently always
+`null`, see below) — instead of a single masqueraded model. (Each phase that runs the panel writes
+its own record; the dashboard reads the most recent one.)
 
-Substitute the literal paths from Step 1 (never bare `$PANEL_*` — an empty var would make
-`rm -rf` operate on the wrong target):
+Source every field from the `gstack-vote` tally you already computed in Step 4 — re-read it as JSON
+BEFORE the cleanup below deletes the `*.result.json` files (`--nonce` is required, exactly as in
+Step 4, or every ready verdict demotes to error):
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"autoplan","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","commit":"'"$(git rev-parse --short HEAD)"'"}'
+~/.claude/skills/gstack/bin/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --nonce "<literal $PANEL_NONCE>" --json
+```
+
+That prints the raw `TallyResult`. Assemble ONE record by mapping its fields DIRECTLY — do NOT
+re-tabulate (`gstack-vote` is the ONLY tally path):
+- `recommendation` ← `.recommendation` (`PASS`|`CONCERNS`|`BLOCK`, or the string `"none"` when null)
+- `tally_status` ← `.status` (`OK`|`SINGLE_VENDOR_ANTHROPIC`|`INSUFFICIENT_QUORUM`|`NO_VOICES`)
+- `ready` ← `.quorum.readyVoices`; `vendors` ← `.quorum.readyVendors`
+- `voices` ← `.perVoice`, each mapped to `{voice, vendor, status, verdict}` (one entry per voice —
+  ready AND absent/error alike; `verdict` is `null` for a non-ready voice). For the `fable` entry
+  specifically, ALSO add `runtime_model`: the model that ACTUALLY ran this phase — `"fable"` normally, or
+  the fallback id (e.g. `"claude-opus-4-8"`) when Step 3 fell back because the fable runtime was
+  unavailable. That value is orchestrator-supplied from what Step 3 dispatched (the tally JSON's
+  per-voice entry carries no such field), so the record preserves fable's REAL provenance instead of
+  always attributing the row to fable.
+- `cost_usd` ← `null`. The `gstack-vote --json` `TallyResult` carries NO cost field — cost is not
+  part of the tally — so do NOT scrape the human-readable Budget line (Step 5): that display value
+  rounds to cents, sums model-reported `cost_usd` from every voice (including the FREE Anthropic
+  ones), and a voice-reported figure could overflow the record. Source cost ONLY from the tally JSON,
+  which reports none — so record `null` (honest: the panel persists no fabricated total; if a future
+  `TallyResult` gains a real cost field, copy it here).
+
+Then log it. The **orchestrator** writes this record from the JSON above — `gstack-vote` never writes
+logs itself (it is spawned hundreds of times in tests; an implicit write would pollute
+`~/.gstack/reviews`). Substitute the literal paths from Step 1 (never bare `$PANEL_*` — an empty var
+would make `rm -rf` operate on the wrong target) and THIS phase's surface label (e.g.
+`/plan-ceo-review`), and fill REC / TALLY_STATUS / N / V / the `voices` array from the JSON
+(`cost_usd` stays literally `null` per the mapping above; each `verdict` a quoted string or `null`;
+add the fable entry's `runtime_model`):
+
+```bash
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"outside-voices","surface":"<this phase's surface label>","recommendation":"REC","tally_status":"TALLY_STATUS","ready":N,"vendors":V,"cost_usd":null,"voices":[{"voice":"…","vendor":"…","status":"…","verdict":"…"}],"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":"'"$(git rev-parse --short HEAD)"'"}'
 rm -rf "<literal $PANEL_OUT_DIR>" "<literal $PANEL_PROMPT_FILE>" "<literal $PANEL_UNTRUSTED_FILE>"
 ```
 
-Substitute: STATUS = "clean" if the recommendation is PASS or no findings promoted, else
-"issues_found". SOURCE = "panel" (or "claude" if every external voice was ABSENT and only the
-Anthropic pass ran).
+This single `outside-voices` record — NOT any `gstack-vote` write — is what lights the dashboard's
+Outside Voice row (the dashboard reads it directly; the per-voice `outside-voices-panel` rows stay
+audit-only).
 
 ---
 

@@ -1,5 +1,65 @@
 # Changelog
 
+## [Unreleased — fork: outside-voices panel M3] - 2026-08-31
+
+**Every review surface now gets the cross-vendor advisory panel:
+/review and /ship's adversarial passes and both design reviews run the
+same independent N-voice second opinions that plan reviews got in
+M1/M2, and the ship dashboard shows the per-voice consensus. Still
+advisory-only — the panel can never block a ship.**
+
+Fork-local milestone (feat/outside-voices-panel, M3 of 3 — final) on
+top of the ported upstream v1.68.2.0 — VERSION deliberately unchanged:
+this fork tracks upstream release numbers, so fork work ships as
+CHANGELOG entries, not version bumps.
+
+### Added
+- `/review` Step 5.7 and `/ship` Step 11 adversarial passes now
+  delegate to the shared outside-voices panel
+  (`generateOutsideVoices(surface=review)`); the codex
+  `review --base` structured [P1] gate and its persist are kept
+  unchanged.
+- Design surfaces wired to the panel
+  (`generateOutsideVoices(surface=design)`): `/plan-design-review`
+  keeps its opt-in AskUserQuestion, `/design-review` runs the panel
+  automatically with its own `/design-review` label and live-QA
+  target; `/design-consultation` is untouched.
+- Aggregate `outside-voices` review-log record: per-voice verdicts,
+  the vendor-median recommendation, and cost (from
+  `gstack-vote --json`; honest `cost_usd: null` when the tally has no
+  cost field). The ship Review Readiness Dashboard renders it as an
+  N-voice Outside Voice row with per-voice sub-lines, with a legacy
+  `codex-plan-review` fallback so pre-M3 logs never blank the row —
+  resolving the M2-deferred dashboard/log-identity follow-up.
+- Runtime host self-exclusion generalized to grok (`GROK_AGENT="1"`)
+  and gemini (`GEMINI_CLI="1"`) in `bin/gstack-panel` — a voice never
+  reviews its own vendor's work, mirroring the under-codex guard, with
+  exact-match sentinels on all three.
+- Regression pins: review/ship non-blocking consent shape AND the
+  interactive plan-review consent gate (both revert-verified); the
+  design-review label + target; autobuilder forum-divergence (the
+  union-FAIL forum is not the panel tally); grok/gemini reviewer e2e
+  (gated, skip-if-CLI-missing).
+
+### Changed
+- Surface-aware egress consent: on the review/ship surfaces a vendor
+  without prior consent fails CLOSED and NON-BLOCKING (voice ABSENT,
+  step continues — no AskUserQuestion wait), preserving those steps'
+  non-blocking contract in CI and autobuilder gates; interactive
+  ceo/eng/devex and plan-design-review keep the ask-once consent path
+  byte-identical.
+- `land-and-deploy` readiness now reads the aggregate `outside-voices`
+  record (legacy fallback retained); the dashboard reader handles the
+  `"none"` recommendation sentinel with the degraded tally status
+  instead of a bare "none".
+- The old Claude-subagent + codex-exec adversarial blocks are deleted
+  from the review recipe; the `CODEX_PLAN_REVIEW` resolver alias is
+  dropped.
+- Measured parity re-caps for the M3 growth (review 1.17, autoplan
+  1.22, plan-ceo-review 1.11, plan-design-review 1.16,
+  plan-devex-review 1.13); ship golden fixtures re-captured; parity
+  13/13.
+
 ## [Unreleased — fork: outside-voices panel M2] - 2026-08-31
 
 **/autoplan's four plan-review phases now run the full cross-vendor

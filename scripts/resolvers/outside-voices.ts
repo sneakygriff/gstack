@@ -101,7 +101,7 @@ const SURFACES: Record<OutsideVoiceSurface, SurfaceProfile> = {
   },
 };
 
-/** skillName → default surface, used when {{OUTSIDE_VOICES}} carries no explicit surface= arg (e.g. the {{CODEX_PLAN_REVIEW}} alias). */
+/** skillName → default surface, used when {{OUTSIDE_VOICES}} carries no explicit surface= arg (a bare {{OUTSIDE_VOICES}} placeholder). */
 const SKILL_SURFACE: Record<string, OutsideVoiceSurface> = {
   'plan-ceo-review': 'ceo',
   'plan-eng-review': 'eng',
@@ -130,13 +130,52 @@ function resolveSurface(ctx: TemplateContext, args?: string[]): OutsideVoiceSurf
   return SKILL_SURFACE[ctx.skillName] ?? 'eng';
 }
 
-// ─── Emission variants (M2 autoplan integration) ───────────────────────────────
-// `full` is the DEFAULT and is byte-identical to the original single-caller
-// recipe — the plan-{ceo,eng,devex}-review sections keep rendering exactly as
-// before. `procedure` + `invoke` are additive, opt-in via `variant=`, and used
-// ONLY by a multi-phase caller (autoplan) that cannot afford four full
-// expansions under the ×1.50 skill-size-budget gate (4 × ~18 KB ≈ ratio 1.72 →
-// FAIL). See OUTSIDE_VOICES_PANEL.md M2 / m2-decompose T1.
+/**
+ * Resolve the effective {@link SurfaceProfile} for a surface, applying the one
+ * per-skill override the shared surfaces need: the `design` surface is shared by
+ * BOTH `/plan-design-review` (a design PLAN / mockups / doc) and `/design-review`
+ * (a live, diff-scoped QA of the RENDERED UI — not a plan). The static
+ * `SURFACES['design']` profile is labelled + targeted for the plan-review case,
+ * so when THIS skill is `design-review` we give the panel its own label + target.
+ * That fixes the user-facing `**Surface:**` line, the `gstack-vote --surface`
+ * value, AND the persisted aggregate `outside-voices` record — all of which
+ * otherwise carry `/plan-design-review` provenance for a design-review run.
+ *
+ * Scoped to `skillName === 'design-review'` only: `design-consultation` is not
+ * delegated, and autoplan's design PHASE (skillName `autoplan`) is a genuine
+ * plan-design review and must keep the `/plan-design-review` label — so neither
+ * is touched. Every other surface returns its static profile unchanged.
+ */
+function resolveProfile(ctx: TemplateContext, surface: OutsideVoiceSurface): SurfaceProfile {
+  const base = SURFACES[surface];
+  if (surface === 'design' && ctx.skillName === 'design-review') {
+    return {
+      ...base,
+      label: '/design-review',
+      target:
+        'the design under review for this diff-scoped audit — the rendered pages / screenshots and ' +
+        'the design-audit findings from the sections above (a live-design QA surface, not a design plan doc)',
+    };
+  }
+  return base;
+}
+
+// ─── Emission variants (M2 autoplan integration; M3 made `full` surface-aware) ──
+// `full` is the DEFAULT. Through M2 it was byte-identical to the original
+// single-caller recipe. M3 (the Step-7 aggregate record on EVERY surface, the
+// surface-aware consent/Step-6 branches inside `renderFullRecipe`, and the
+// `resolveProfile` label override) means `full` now VARIES by surface: the
+// `review` surface renders fail-closed, non-blocking consent (no
+// AskUserQuestion, no wait), while the interactive plan-{ceo,eng,devex}-review
+// and design surfaces keep their present-and-ask consent + User Sovereignty
+// text — THAT text is the part still required to stay stable (pinned by
+// `SHARED_SECURITY_FRAGMENTS` and the interactive-surface tests in
+// test/skill-recipe-invariants.test.ts), not the recipe as a whole. Overall
+// size is governed by the per-skill parity caps (test/parity-suite.test.ts),
+// not a byte-identity pin. `procedure` + `invoke` are additive, opt-in via
+// `variant=`, and used ONLY by a multi-phase caller (autoplan) that cannot
+// afford four full expansions under the ×1.50 skill-size-budget gate (4 ×
+// ~18 KB ≈ ratio 1.72 → FAIL). See OUTSIDE_VOICES_PANEL.md M2 / m2-decompose T1.
 type OutsideVoiceVariant = 'full' | 'procedure' | 'invoke';
 
 /**
@@ -225,9 +264,11 @@ function carryLabels(keys: string[]): string {
  * ABSENT (no Agent-tool transport there) — never dispatched or self-attested. See
  * the entry-guard comment below.
  *
- * VARIANTS (additive; `full` is the DEFAULT and byte-identical to the original
- * recipe — the plan-{ceo,eng,devex}-review sections that pass only `surface=`
- * MUST regenerate unchanged):
+ * VARIANTS (additive; `full` is the DEFAULT — surface-aware since M3: the
+ * `review` surface renders fail-closed, non-blocking consent + Step 6, while
+ * the interactive plan-{ceo,eng,devex}-review/design surfaces that pass only
+ * `surface=` keep their present-and-ask consent + User Sovereignty text
+ * stable — see the `full` bullet below and the comment on `renderFullRecipe`):
  *
  *   • full      — the complete self-contained 7-step recipe (DEFAULT).
  *   • procedure — the SAME 7 steps rendered surface-neutral and emitted ONCE, so
@@ -288,15 +329,123 @@ export function generateOutsideVoices(ctx: TemplateContext, args?: string[]): st
 }
 
 /**
- * variant=full — the original, complete recipe. Kept BYTE-IDENTICAL to the
- * pre-M2 single-caller output: callers that pass only `{{OUTSIDE_VOICES:surface=…}}`
- * hit this path and must regenerate unchanged. Do NOT thread new behavior through
- * here — put it in `procedure`/`invoke` instead (that is what preserves the pin).
+ * variant=full — the complete, single-surface recipe: callers that pass only
+ * `{{OUTSIDE_VOICES:surface=…}}` (no `variant=`) hit this path. Through M2 this
+ * was kept BYTE-IDENTICAL to the pre-M2 single-caller output. M3 made it
+ * surface-aware (`isAutomatedReviewSurface` below) and added the Step-7
+ * aggregate `outside-voices` record to every surface, so the output is no
+ * longer byte-frozen as a whole. What MUST still stay stable: the interactive
+ * plan-{ceo,eng,devex}-review + design surfaces keep their present-and-ask
+ * consent + User Sovereignty text unchanged (pinned by
+ * `SHARED_SECURITY_FRAGMENTS` and the interactive-surface tests in
+ * test/skill-recipe-invariants.test.ts), and the `review` surface stays
+ * fail-closed/non-blocking (pinned separately, same file). Overall size is
+ * governed by the per-skill parity caps (test/parity-suite.test.ts), not a
+ * byte-identity pin — a legitimate prose change here is expected to move bytes.
  */
 function renderFullRecipe(ctx: TemplateContext, args?: string[]): string {
   const surface = resolveSurface(ctx, args);
-  const profile = SURFACES[surface];
+  const profile = resolveProfile(ctx, surface);
   const bin = ctx.paths.binDir;
+
+  // The `review` surface is the AUTOMATED adversarial delegation — it feeds
+  // /review's Step 5.7 AND /ship's Step 11, both of which also run
+  // non-interactively inside autobuilder's own gate / CI. So on this surface the
+  // panel must never introduce a mandatory human wait: egress consent fails CLOSED
+  // (Step 2) and cross-model tension routes into the fix-first pipeline as INPUT
+  // (Step 6), never a blocking AskUserQuestion. The interactive plan-review
+  // surfaces (ceo/eng/devex, and the design surface's plan-design-review opt-in
+  // path) keep the present-and-ask flow unchanged — the user is there. (The codex
+  // `--base` [P1] structured gate is separate, lives in review.ts, and stays.)
+  const isAutomatedReviewSurface = surface === 'review';
+
+  // `/design-review` shares the `design` surface with `/plan-design-review` (see
+  // `resolveProfile` above) but audits the RENDERED UI on this diff, not a plan
+  // doc — so the Step 5 "NON-BLOCKING on this <plan|diff>" line must say "diff"
+  // for it too, the same as the `review` surface (M3 gate2-grok P2 follow-up).
+  const isLiveDesignQA = surface === 'design' && ctx.skillName === 'design-review';
+
+  // ── Step 2 first-use consent — surface-aware ─────────────────────────────────
+  const consentBlock = isAutomatedReviewSurface
+    ? `**First-use consent (private/client repos) — FAIL-CLOSED and NON-BLOCKING on this surface.** The
+adversarial panel runs non-interactively here (inside \`/review\`, \`/ship\`, and autobuilder's own gate
+/ CI), so it must NEVER stop to ask for egress consent. If \`gstack-panel\` prints a
+\`NEEDS_CONSENT: <voice>\` line, that vendor has no already-granted egress consent (config or session)
+for this private/client repo — the panel has ALREADY recorded it \`ABSENT(consent-missing)\`. Do NOT
+emit an AskUserQuestion and do NOT wait: leave that voice ABSENT and CONTINUE with whatever voices are
+ready (this mirrors autoplan's spawned-session rule — external-vendor egress is never auto-granted, so
+a missing consent fails CLOSED to ABSENT, never a blocking prompt). \`codex\` is exempt (already
+consented via \`codex_reviews\`); \`fable\`/native Claude are Anthropic (no new egress). To enable an
+external egress voice for a repo, the user grants it OUT-OF-BAND before the run
+(\`${bin}/gstack-config set <voice>_reviews_consent enabled\`); this step never asks for it and never
+persists it.`
+    : `**First-use consent (private/client repos).** If \`gstack-panel\` prints a \`NEEDS_CONSENT: <voice>\`
+line, that vendor has not been consented for egress on this private/client repo (\`codex\` is
+exempt — already consented via \`codex_reviews\`; \`fable\`/native Claude are Anthropic, no new
+egress). Ask ONCE per such vendor with AskUserQuestion:
+
+> "\`<voice>\` (\`<vendor>\`) would send this review target to \`<vendor>\`'s API for an independent
+> second opinion. This repo looks private/client. Send to \`<vendor>\` for outside-voice reviews?"
+> A) Yes — enable \`<voice>\` outside-voice reviews (persisted)
+> B) No — skip \`<voice>\` this time (stays ABSENT)
+
+On A: \`${bin}/gstack-config set <voice>_reviews_consent enabled\` (only an explicit positive
+grant — \`enabled\` or \`granted:<date>\` — satisfies the gate). Grant EVERY vendor you intend to
+use, then re-run Step 2 with a **fresh \`$PANEL_OUT_DIR\`** (\`run_panel\` re-runs every enabled
+voice, so granting all consents first avoids re-spending on codex per grant). On B: leave it
+ABSENT — do NOT send. Never persist consent the user did not grant.`;
+
+  // ── Step 6 cross-model tension — surface-aware ───────────────────────────────
+  const step6Block = isAutomatedReviewSurface
+    ? `### Step 6 — Cross-model tension → fix-first input (NON-BLOCKING)
+
+After presenting the panel, note where a voice disagrees with the review findings from the earlier
+sections, and surface any non-Anthropic **dissent** prominently (agreement across the correlated
+Anthropic voices is not extra confirmation):
+
+\`\`\`
+CROSS-MODEL TENSION:
+  [Topic]: Review said X. Outside voice says Y. [Present both neutrally. State what context you
+  might be missing that would change the answer.]
+\`\`\`
+
+Feed each tension into the EXISTING fix-first review pipeline **as INPUT** — the same way this
+review's own findings feed it — **never a per-tension human gate, never a blocking wait, and never a
+new AskUserQuestion**. The panel recommendation and any dissent are advisory signals the fix-first
+flow weighs alongside the native findings; the \`[P1]\` GATE FAIL rule stays driven solely by the
+native Codex structured review (teeth = none for the panel). Do NOT auto-apply a panel recommendation
+outside the fix-first review's own decision path. If no tension exists, note: "No cross-model
+tension — the panel agrees with the review."`
+    : `### Step 6 — Cross-model tension + user sovereignty
+
+After presenting the panel, note where a voice disagrees with the review findings from the
+earlier sections, and surface any non-Anthropic **dissent** prominently (agreement across the
+correlated Anthropic voices is not extra confirmation):
+
+\`\`\`
+CROSS-MODEL TENSION:
+  [Topic]: Review said X. Outside voice says Y. [Present both neutrally. State what context you
+  might be missing that would change the answer.]
+\`\`\`
+
+**User Sovereignty.** Do NOT auto-incorporate any panel recommendation. Cross-model agreement is
+a strong signal — present it as such — but it is NOT permission to act. You MUST NOT apply a change
+without explicit user approval. For each substantive tension, use AskUserQuestion:
+
+> "Cross-model disagreement on [topic]. The review found [X] but the outside voices argue [Y].
+> [One sentence on what context you might be missing.]"
+>
+> RECOMMENDATION: Choose [A or B] because [one-line reason]. Completeness: A=X/10, B=Y/10.
+
+Options:
+- A) Accept the outside voices' recommendation (I'll apply this change)
+- B) Keep the current approach (reject the panel)
+- C) Investigate further before deciding
+- D) Add to TODOS.md for later
+
+Wait for the user's response. Do NOT default to accepting because you agree with the panel. If the
+user chooses B, the current approach stands — do not re-argue. If no tension exists, note: "No
+cross-model tension — the panel agrees with the review."`;
 
   return `## Outside Voices — Advisory Panel (recommendation only; the user decides)
 
@@ -426,21 +575,7 @@ so any voice that never landed is recorded ABSENT, not dropped:
 ${bin}/gstack-panel --collect --out-dir "<literal $PANEL_OUT_DIR>"
 \`\`\`
 
-**First-use consent (private/client repos).** If \`gstack-panel\` prints a \`NEEDS_CONSENT: <voice>\`
-line, that vendor has not been consented for egress on this private/client repo (\`codex\` is
-exempt — already consented via \`codex_reviews\`; \`fable\`/native Claude are Anthropic, no new
-egress). Ask ONCE per such vendor with AskUserQuestion:
-
-> "\`<voice>\` (\`<vendor>\`) would send this review target to \`<vendor>\`'s API for an independent
-> second opinion. This repo looks private/client. Send to \`<vendor>\` for outside-voice reviews?"
-> A) Yes — enable \`<voice>\` outside-voice reviews (persisted)
-> B) No — skip \`<voice>\` this time (stays ABSENT)
-
-On A: \`${bin}/gstack-config set <voice>_reviews_consent enabled\` (only an explicit positive
-grant — \`enabled\` or \`granted:<date>\` — satisfies the gate). Grant EVERY vendor you intend to
-use, then re-run Step 2 with a **fresh \`$PANEL_OUT_DIR\`** (\`run_panel\` re-runs every enabled
-voice, so granting all consents first avoids re-spending on codex per grant). On B: leave it
-ABSENT — do NOT send. Never persist consent the user did not grant.
+${consentBlock}
 
 ---
 
@@ -534,62 +669,65 @@ Only a **located** finding is promoted to the main table; unlocated findings dro
 (they cannot be promoted). A \`(repro claimed)\` tag means the voice SUPPLIED a \`repro_command\`
 that has NOT been run — it is not a checkmark of verification (§7 reproduction-ranking is deferred).
 
-**${profile.routing}** This is NON-BLOCKING on ${surface === 'review' ? 'this diff' : 'this plan'}
+**${profile.routing}** This is NON-BLOCKING on ${isAutomatedReviewSurface || isLiveDesignQA ? 'this diff' : 'this plan'}
 — the recommendation is a display value, the user decides.
 
 ---
 
-### Step 6 — Cross-model tension + user sovereignty
-
-After presenting the panel, note where a voice disagrees with the review findings from the
-earlier sections, and surface any non-Anthropic **dissent** prominently (agreement across the
-correlated Anthropic voices is not extra confirmation):
-
-\`\`\`
-CROSS-MODEL TENSION:
-  [Topic]: Review said X. Outside voice says Y. [Present both neutrally. State what context you
-  might be missing that would change the answer.]
-\`\`\`
-
-**User Sovereignty.** Do NOT auto-incorporate any panel recommendation. Cross-model agreement is
-a strong signal — present it as such — but it is NOT permission to act. You MUST NOT apply a change
-without explicit user approval. For each substantive tension, use AskUserQuestion:
-
-> "Cross-model disagreement on [topic]. The review found [X] but the outside voices argue [Y].
-> [One sentence on what context you might be missing.]"
->
-> RECOMMENDATION: Choose [A or B] because [one-line reason]. Completeness: A=X/10, B=Y/10.
-
-Options:
-- A) Accept the outside voices' recommendation (I'll apply this change)
-- B) Keep the current approach (reject the panel)
-- C) Investigate further before deciding
-- D) Add to TODOS.md for later
-
-Wait for the user's response. Do NOT default to accepting because you agree with the panel. If the
-user chooses B, the current approach stands — do not re-argue. If no tension exists, note: "No
-cross-model tension — the panel agrees with the review."
+${step6Block}
 
 ---
 
-### Step 7 — Persist + cleanup
+### Step 7 — Persist the aggregate record + cleanup
 
-\`gstack-panel\` already logged a per-voice audit entry. Persist ONE aggregate entry so the existing
-Review Readiness Dashboard's Outside Voice row keeps populating (audit-only, matching today's
-semantics — the M3 dashboard rework replaces this with a per-voice \`outside-voices\` record; until
-then this makes no claim the dashboard cannot back):
+\`gstack-panel\` already logged a per-voice audit entry per voice (\`skill:"outside-voices-panel"\`, one
+row each — forensic only, not read by the dashboard). Now persist ONE **aggregate** \`outside-voices\`
+review-log record so the Review Readiness Dashboard's Outside Voice row renders the WHOLE N-voice
+panel — per-voice verdicts + the recommendation, plus \`cost_usd\` (currently always \`null\`, see
+below) — instead of a single masqueraded model.
 
-Substitute the literal paths from Step 1 (never bare \`$PANEL_*\` — an empty var would make
-\`rm -rf\` operate on the wrong target):
+Source every field from the \`gstack-vote\` tally you already computed in Step 4 — re-read it as JSON
+BEFORE the cleanup below deletes the \`*.result.json\` files (\`--nonce\` is required, exactly as in
+Step 4, or every ready verdict demotes to error):
 
 \`\`\`bash
-${bin}/gstack-review-log '{"skill":"codex-plan-review","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","commit":"'"$(git rev-parse --short HEAD)"'"}'
+${bin}/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --nonce "<literal $PANEL_NONCE>" --json
+\`\`\`
+
+That prints the raw \`TallyResult\`. Assemble ONE record by mapping its fields DIRECTLY — do NOT
+re-tabulate (\`gstack-vote\` is the ONLY tally path):
+- \`recommendation\` ← \`.recommendation\` (\`PASS\`|\`CONCERNS\`|\`BLOCK\`, or the string \`"none"\` when null)
+- \`tally_status\` ← \`.status\` (\`OK\`|\`SINGLE_VENDOR_ANTHROPIC\`|\`INSUFFICIENT_QUORUM\`|\`NO_VOICES\`)
+- \`ready\` ← \`.quorum.readyVoices\`; \`vendors\` ← \`.quorum.readyVendors\`
+- \`voices\` ← \`.perVoice\`, each mapped to \`{voice, vendor, status, verdict}\` (one entry per voice —
+  ready AND absent/error alike; \`verdict\` is \`null\` for a non-ready voice). For the \`fable\` entry
+  specifically, ALSO add \`runtime_model\`: the model that ACTUALLY ran this run — \`"fable"\` normally, or
+  the fallback id (e.g. \`"claude-opus-4-8"\`) when Step 3 fell back because the fable runtime was
+  unavailable. That value is orchestrator-supplied from what Step 3 dispatched (the tally JSON's
+  per-voice entry carries no such field), so the record preserves fable's REAL provenance instead of
+  always attributing the row to fable.
+- \`cost_usd\` ← \`null\`. The \`gstack-vote --json\` \`TallyResult\` carries NO cost field — cost is not
+  part of the tally — so do NOT scrape the human-readable Budget line (Step 5): that display value
+  rounds to cents, sums model-reported \`cost_usd\` from every voice (including the FREE Anthropic
+  ones), and a voice-reported figure could overflow the record. Source cost ONLY from the tally JSON,
+  which reports none — so record \`null\` (honest: the panel persists no fabricated total; if a future
+  \`TallyResult\` gains a real cost field, copy it here).
+
+Then log it. The **orchestrator** writes this record from the JSON above — \`gstack-vote\` never writes
+logs itself (it is spawned hundreds of times in tests; an implicit write would pollute
+\`~/.gstack/reviews\`). Substitute the literal paths from Step 1 (never bare \`$PANEL_*\` — an empty var
+would make \`rm -rf\` operate on the wrong target), and fill REC / TALLY_STATUS / N / V / the
+\`voices\` array from the JSON (\`cost_usd\` stays literally \`null\` per the mapping above; each \`verdict\`
+a quoted string or \`null\`; add the fable entry's \`runtime_model\`):
+
+\`\`\`bash
+${bin}/gstack-review-log '{"skill":"outside-voices","surface":"${profile.label}","recommendation":"REC","tally_status":"TALLY_STATUS","ready":N,"vendors":V,"cost_usd":null,"voices":[{"voice":"…","vendor":"…","status":"…","verdict":"…"}],"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":"'"$(git rev-parse --short HEAD)"'"}'
 rm -rf "<literal $PANEL_OUT_DIR>" "<literal $PANEL_PROMPT_FILE>" "<literal $PANEL_UNTRUSTED_FILE>"
 \`\`\`
 
-Substitute: STATUS = "clean" if the recommendation is PASS or no findings promoted, else
-"issues_found". SOURCE = "panel" (or "claude" if every external voice was ABSENT and only the
-Anthropic pass ran).
+This single \`outside-voices\` record — NOT any \`gstack-vote\` write — is what lights the dashboard's
+Outside Voice row (the dashboard reads it directly; the per-voice \`outside-voices-panel\` rows stay
+audit-only).
 
 ---`;
 }
@@ -951,24 +1089,58 @@ gate. If no tension exists, note: "No cross-model tension — the panel agrees w
 
 ---
 
-### Step 7 — Persist + cleanup
+### Step 7 — Persist the aggregate record + cleanup
 
-\`gstack-panel\` already logged a per-voice audit entry. Persist ONE aggregate entry as an
-**audit-log record only** — it does NOT light the Review Readiness Dashboard's Outside Voice row (that
-row currently reads only \`codex-plan-review\` entries; wiring the N-voice panel into the dashboard is
-a later milestone, M3). This is a durable audit trail, nothing more:
+\`gstack-panel\` already logged a per-voice audit entry per voice (\`skill:"outside-voices-panel"\`, one
+row each — forensic only, not read by the dashboard). Now persist ONE **aggregate** \`outside-voices\`
+review-log record for THIS phase so the Review Readiness Dashboard's Outside Voice row renders the
+WHOLE N-voice panel — per-voice verdicts + the recommendation, plus \`cost_usd\` (currently always
+\`null\`, see below) — instead of a single masqueraded model. (Each phase that runs the panel writes
+its own record; the dashboard reads the most recent one.)
 
-Substitute the literal paths from Step 1 (never bare \`$PANEL_*\` — an empty var would make
-\`rm -rf\` operate on the wrong target):
+Source every field from the \`gstack-vote\` tally you already computed in Step 4 — re-read it as JSON
+BEFORE the cleanup below deletes the \`*.result.json\` files (\`--nonce\` is required, exactly as in
+Step 4, or every ready verdict demotes to error):
 
 \`\`\`bash
-${bin}/gstack-review-log '{"skill":"${ctx.skillName}","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","commit":"'"$(git rev-parse --short HEAD)"'"}'
+${bin}/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --nonce "<literal $PANEL_NONCE>" --json
+\`\`\`
+
+That prints the raw \`TallyResult\`. Assemble ONE record by mapping its fields DIRECTLY — do NOT
+re-tabulate (\`gstack-vote\` is the ONLY tally path):
+- \`recommendation\` ← \`.recommendation\` (\`PASS\`|\`CONCERNS\`|\`BLOCK\`, or the string \`"none"\` when null)
+- \`tally_status\` ← \`.status\` (\`OK\`|\`SINGLE_VENDOR_ANTHROPIC\`|\`INSUFFICIENT_QUORUM\`|\`NO_VOICES\`)
+- \`ready\` ← \`.quorum.readyVoices\`; \`vendors\` ← \`.quorum.readyVendors\`
+- \`voices\` ← \`.perVoice\`, each mapped to \`{voice, vendor, status, verdict}\` (one entry per voice —
+  ready AND absent/error alike; \`verdict\` is \`null\` for a non-ready voice). For the \`fable\` entry
+  specifically, ALSO add \`runtime_model\`: the model that ACTUALLY ran this phase — \`"fable"\` normally, or
+  the fallback id (e.g. \`"claude-opus-4-8"\`) when Step 3 fell back because the fable runtime was
+  unavailable. That value is orchestrator-supplied from what Step 3 dispatched (the tally JSON's
+  per-voice entry carries no such field), so the record preserves fable's REAL provenance instead of
+  always attributing the row to fable.
+- \`cost_usd\` ← \`null\`. The \`gstack-vote --json\` \`TallyResult\` carries NO cost field — cost is not
+  part of the tally — so do NOT scrape the human-readable Budget line (Step 5): that display value
+  rounds to cents, sums model-reported \`cost_usd\` from every voice (including the FREE Anthropic
+  ones), and a voice-reported figure could overflow the record. Source cost ONLY from the tally JSON,
+  which reports none — so record \`null\` (honest: the panel persists no fabricated total; if a future
+  \`TallyResult\` gains a real cost field, copy it here).
+
+Then log it. The **orchestrator** writes this record from the JSON above — \`gstack-vote\` never writes
+logs itself (it is spawned hundreds of times in tests; an implicit write would pollute
+\`~/.gstack/reviews\`). Substitute the literal paths from Step 1 (never bare \`$PANEL_*\` — an empty var
+would make \`rm -rf\` operate on the wrong target) and THIS phase's surface label (e.g.
+\`/plan-ceo-review\`), and fill REC / TALLY_STATUS / N / V / the \`voices\` array from the JSON
+(\`cost_usd\` stays literally \`null\` per the mapping above; each \`verdict\` a quoted string or \`null\`;
+add the fable entry's \`runtime_model\`):
+
+\`\`\`bash
+${bin}/gstack-review-log '{"skill":"outside-voices","surface":"<this phase's surface label>","recommendation":"REC","tally_status":"TALLY_STATUS","ready":N,"vendors":V,"cost_usd":null,"voices":[{"voice":"…","vendor":"…","status":"…","verdict":"…"}],"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":"'"$(git rev-parse --short HEAD)"'"}'
 rm -rf "<literal $PANEL_OUT_DIR>" "<literal $PANEL_PROMPT_FILE>" "<literal $PANEL_UNTRUSTED_FILE>"
 \`\`\`
 
-Substitute: STATUS = "clean" if the recommendation is PASS or no findings promoted, else
-"issues_found". SOURCE = "panel" (or "claude" if every external voice was ABSENT and only the
-Anthropic pass ran).
+This single \`outside-voices\` record — NOT any \`gstack-vote\` write — is what lights the dashboard's
+Outside Voice row (the dashboard reads it directly; the per-voice \`outside-voices-panel\` rows stay
+audit-only).
 
 ---`;
 }

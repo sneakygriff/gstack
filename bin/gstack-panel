@@ -695,20 +695,72 @@ _panel_auth_ok() { # <voice>  → 0 proceed, 1 definitively unauthed
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Under-codex nested-self-invocation guard (#2519, maintainer decision 7). A live
-# Codex session exports CODEX_THREAD_ID / CODEX_SANDBOX into every shell it spawns
-# (verified against a live `codex exec 'env | grep -i codex'` capture, codex
-# 0.147.0). Spawning `codex exec` from inside one is the same model reviewing
-# itself at multiplied token cost (observed: one /review = 15M tokens), so the
-# `codex` voice is marked ABSENT(under-codex) rather than invoked. This mirrors
-# the codexPreflight probe (scripts/resolvers/constants.ts) verbatim: the guard
-# fires only when GSTACK_FORCE_CODEX_REVIEW=1 is NOT set AND at least one of the
-# two env vars is present; GSTACK_FORCE_CODEX_REVIEW=1 forces the nested pass.
-# codex-specific: nested self-review is a codex-vs-codex risk; grok/gemini are
-# different vendors, so no equivalent guard applies to them.
+# Under-<voice> nested-self-invocation guards (#2519, maintainer decision 7;
+# generalized from codex-only to grok/gemini in M3 — OV-17). Each vendor's own
+# CLI, when it spawns a shell to run a command, injects an identification
+# sentinel into that shell's environment. If THIS panel is itself running
+# inside a live session of the SAME vendor's CLI, invoking that voice would be
+# the same model reviewing itself at multiplied token cost (observed for
+# codex: one /review = 15M tokens) — so the voice is marked ABSENT(under-
+# <voice>) rather than invoked. Each guard fires only when its own
+# GSTACK_FORCE_<VOICE>_REVIEW=1 escape is NOT set AND the vendor sentinel is
+# present; the escape forces the nested pass.
+#
+# codex: CODEX_THREAD_ID / CODEX_SANDBOX — verified against a live
+# `codex exec 'env | grep -i codex'` capture, codex 0.147.0. Mirrors the
+# codexPreflight probe (scripts/resolvers/constants.ts) verbatim.
+#
+# gemini: GEMINI_CLI=1 — verified by STATIC SOURCE INSPECTION of the installed
+# @google/gemini-cli 0.57.0 package (no live/paid `gemini` invocation was run
+# for this task). packages/core/src/services/shellExecutionService.ts (bundled
+# into e.g. chunk-DFPYJMVX.js / chunk-7HKQGPWB.js) defines
+# `GEMINI_CLI_IDENTIFICATION_ENV_VAR = "GEMINI_CLI"` and
+# `GEMINI_CLI_IDENTIFICATION_ENV_VAR_VALUE = "1"`, and unconditionally sets
+# `baseEnv[GEMINI_CLI_IDENTIFICATION_ENV_VAR] = GEMINI_CLI_IDENTIFICATION_ENV_VAR_VALUE`
+# for every shell command it executes. Same class of evidence as the codex
+# capture above (the vendor CLI's own env-injection logic), obtained by
+# reading the shipped CLI's bundled source rather than by spawning it.
+#
+# grok: GROK_AGENT=1 — verified by STATIC BINARY INSPECTION (`strings`) of the
+# installed grok CLI (~/.grok/downloads/grok-1.0.5-macos-aarch64; no live/paid
+# `grok` invocation was run for this task). The binary embeds shell-wrapper
+# templates of the form `builtin export GROK_AGENT=1; builtin export
+# PWD="$(builtin pwd)"; ...; builtin eval "$__grok_user_cmd"` that wrap every
+# command the agent's shell tool executes, and separately filters `GROK_AGENT=`
+# out of an `export -p` dump alongside other internal-only vars (SUDO_ASKPASS,
+# ELECTRON_RUN_AS_NODE, …) — i.e. grok itself treats GROK_AGENT as its own
+# identification sentinel. No public grok-cli source/docs were found to
+# corroborate this beyond the shipped binary's own strings, so treat this one
+# rung below the codex/gemini evidence: real, but narrower provenance.
+#
+# GROK_AGENT is ALSO a documented user-facing grok config var ("Custom agent
+# definition path or name" — grok --help's Agent Profiles section), so a user
+# who exports GROK_AGENT=my-profile in their shell rc outside any grok session
+# must not permanently trip this guard. The wrapper templates always export
+# the sentinel as exactly `1` (and override any inherited value inside a live
+# grok session), so the guard below matches GROK_AGENT == "1" exactly rather
+# than mere presence — eliminating the config-var collision.
+#
+# GEMINI_CLI has no documented user-facing config-var collision the way
+# GROK_AGENT does (the gemini CLI's own bundled shellExecutionService.ts
+# unconditionally injects exactly GEMINI_CLI=1 into every shell it spawns —
+# see the provenance note above), so an exact match isn't required to avoid a
+# false trip. It matches GEMINI_CLI == "1" exactly anyway (M3 gate2 P2
+# follow-up), purely so the two under-<voice> guards stay structurally
+# identical rather than one being presence-only and the other exact-match.
 _panel_under_codex() { # → 0 (true) when the codex voice must be skipped
   [ "${GSTACK_FORCE_CODEX_REVIEW:-0}" = "1" ] && return 1
   [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ]
+}
+
+_panel_under_grok() { # → 0 (true) when the grok voice must be skipped
+  [ "${GSTACK_FORCE_GROK_REVIEW:-0}" = "1" ] && return 1
+  [ "${GROK_AGENT:-}" = "1" ]
+}
+
+_panel_under_gemini() { # → 0 (true) when the gemini voice must be skipped
+  [ "${GSTACK_FORCE_GEMINI_REVIEW:-0}" = "1" ] && return 1
+  [ "${GEMINI_CLI:-}" = "1" ]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -866,6 +918,14 @@ run_panel() {
             reason="grok_reviews=$_GROK_ENABLED (not an explicit 'enabled'; default-off fails closed)"
           fi
           _panel_write_absent grok absent "$reason: kill-switch"; continue
+        fi
+        # (1b) under-grok nested-self-invocation guard (OV-17) — mirrors
+        # under-codex: skip the grok voice when this session already runs
+        # inside a live Grok host (GROK_AGENT="1") — would be the same model
+        # reviewing itself. Runs BEFORE the egress receipt + `grok` spawn.
+        # GSTACK_FORCE_GROK_REVIEW=1 forces the nested pass.
+        if _panel_under_grok; then
+          _panel_write_absent grok absent "running inside a live Grok session (GROK_AGENT=\"1\") — nested grok passes skipped; set GSTACK_FORCE_GROK_REVIEW=1 to force: under-grok"; continue
         fi ;;
       gemini)
         _GEMINI_ENABLED="$enabled"
@@ -881,6 +941,14 @@ run_panel() {
             reason="gemini_reviews=$_GEMINI_ENABLED (not an explicit 'enabled'; default-off fails closed)"
           fi
           _panel_write_absent gemini absent "$reason: kill-switch"; continue
+        fi
+        # (1b) under-gemini nested-self-invocation guard (OV-17) — mirrors
+        # under-codex: skip the gemini voice when this session already runs
+        # inside a live Gemini host (GEMINI_CLI="1") — would be the same model
+        # reviewing itself. Runs BEFORE the egress receipt + `gemini` spawn.
+        # GSTACK_FORCE_GEMINI_REVIEW=1 forces the nested pass.
+        if _panel_under_gemini; then
+          _panel_write_absent gemini absent "running inside a live Gemini session (GEMINI_CLI=\"1\") — nested gemini passes skipped; set GSTACK_FORCE_GEMINI_REVIEW=1 to force: under-gemini"; continue
         fi ;;
     esac
 
