@@ -56,10 +56,19 @@ describe('deprecated codex web-search flag is gone (#2525)', () => {
     expect(rendered).not.toContain('{{CODEX_WEB_SEARCH_FLAG}}');
   });
 
-  test('rendered autoplan skill resolves the token at every inline site', () => {
+  test('rendered autoplan skill no longer carries the inline codex flag (M2: codex now routes through the outside-voices panel)', () => {
+    // Pre-M2, autoplan hardcoded 4 inline `codex exec` blocks (one per phase),
+    // each interpolating {{CODEX_WEB_SEARCH_FLAG}} directly — hence the old
+    // ">= 4 sites" assertion here. M2 replaced all 4 with
+    // {{OUTSIDE_VOICES:variant=invoke:surface=...}} placeholders (plus one
+    // {{OUTSIDE_VOICES:variant=procedure}} emitted once); the codex CLI
+    // invocation — and its web-search flag — now lives entirely inside
+    // bin/gstack-panel, which the resolver's procedure text documents by name
+    // rather than inlining the raw `codex exec` argv. So autoplan itself no
+    // longer carries the flag at all.
     const rendered = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md'), 'utf-8');
     const count = rendered.split(CODEX_WEB_SEARCH_FLAG).length - 1;
-    expect(count).toBeGreaterThanOrEqual(4);
+    expect(count).toBe(0);
     expect(rendered).not.toContain('{{CODEX_WEB_SEARCH_FLAG}}');
   });
 });
