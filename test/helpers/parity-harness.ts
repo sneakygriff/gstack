@@ -255,7 +255,19 @@ const MONOLITH_INVARIANTS: ParityInvariant[] = [
     // v1.2.0 activation lift: shared first-run-guidance preamble section.
         // Fork port wave 2 (D1): the evidence-before-claimed-limitations preamble
     // directive adds ~0.45KB to every tier-2+ skill. Measured values noted.
-    maxSizeRatio: 1.09, // D1 measured
+    // M2 outside-voices panel integration: replaces the 4 inline single-vendor
+    // (Codex-only) dual-voice sections with the shared N-voice advisory-panel
+    // procedure emitted ONCE (variant=procedure) plus 4 compact per-phase
+    // `invoke` stanzas (~1-1.5KB each) — see scripts/resolvers/outside-voices.ts.
+    // Deliberately NOT the naive 4x full-recipe inline (~1.72 ratio, would fail
+    // the ×1.50 skill-size-budget gate outright); this is the minimized shape.
+    // Round-2 gate fixes (codex-host Anthropic-voice ABSENT handling +
+    // spawned-session fail-closed egress consent + consent-memory prose)
+    // added claude-host bytes on top of round 1's 1.160 (87821 -> 101883).
+    // Measured 1.1796 (87821 -> 103598 bytes); only ~30-byte headroom left
+    // under this cap — the next autoplan prose addition will need either a
+    // measured re-cap or a compensating trim elsewhere (gate2-eng-review F3).
+    maxSizeRatio: 1.18, // M2 outside-voices panel; measured 1.1796 (round 2)
     minBytes: 70_000,
   },
 ];

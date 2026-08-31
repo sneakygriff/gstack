@@ -22,6 +22,9 @@ import * as os from 'os';
 import * as path from 'path';
 import { VOICES, VOICE_NAMES, CLI_VOICES } from '../lib/outside-voices/registry';
 import { PRICING } from './helpers/pricing';
+import { generateOutsideVoices } from '../scripts/resolvers/outside-voices';
+import { HOST_PATHS } from '../scripts/resolvers/types';
+import type { TemplateContext } from '../scripts/resolvers/types';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const AUTOBUILDER_TMPL = fs.readFileSync(path.join(ROOT, 'autobuilder-loop', 'SKILL.md.tmpl'), 'utf-8');
@@ -40,6 +43,13 @@ const OUTSIDE_VOICES_RESOLVER_SRC = fs.readFileSync(
   'utf-8',
 );
 const CONFIG_BIN = path.join(ROOT, 'bin', 'gstack-config');
+
+// M2 (autoplan integration, autobuilder run feat-outside-voices-panel-20260830-224457,
+// task T6) — read against the GENERATED files, not the .tmpl sources: the anti-drift
+// property below is specifically about what autoplan's skip-list string matches
+// against what the loaded review skills actually render, so a template-level
+// comparison would miss a drift introduced anywhere in the render pipeline.
+const AUTOPLAN_SKILL_MD = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md'), 'utf-8');
 
 /**
  * Extract one top-level bash function's source (`name() { ... }`,
@@ -339,6 +349,237 @@ describe('Outside Voices — security-field + gate-shape invariants (T10)', () =
           `test/helpers/pricing.ts prices ${model} output at $${outRate}/MTok`,
       ).toContain(`${voice}) echo ${outRate}`);
     }
+  });
+});
+
+// M2 — autoplan skip-list anti-drift (T6, m2-decompose.md). autoplan's Phase 0
+// skip-list exists ONLY so /autoplan doesn't double-run the outside-voices panel
+// section its own loaded review skills already carry (it reads plan-ceo-review,
+// plan-eng-review, plan-devex-review SKILL.md verbatim and follows them, skip
+// list and all). Before M2, this entry read the pre-M1 heading
+// "Outside Voice — Independent Plan Challenge" — M1 had already renamed the
+// panel section, so the entry silently matched nothing: autoplan would BOTH
+// follow the loaded skill's panel section AND run its own (then-inline)
+// dual-voice blocks. M2 fixed the entry; this pin makes that exact class of
+// drift impossible to reintroduce silently by asserting the skip-list string
+// against the LIVE rendered heading each surface actually emits, never a
+// hand-copied duplicate that can rot independently.
+describe('autoplan skip-list — anti-drift against the live rendered outside-voices panel heading (M2 / T6)', () => {
+  test('the autoplan skip-list entry for the panel matches the heading rendered in every plan-*-review surface it must skip (ceo/eng/devex)', () => {
+    const skipListEntry = '- Outside Voices — Advisory Panel (recommendation only; the user decides)';
+    expect(AUTOPLAN_SKILL_MD, 'autoplan skip-list must carry the current panel heading').toContain(skipListEntry);
+
+    const liveHeading = '## Outside Voices — Advisory Panel (recommendation only; the user decides)';
+    for (const surface of ['plan-ceo-review', 'plan-eng-review', 'plan-devex-review']) {
+      const rendered = fs.readFileSync(path.join(ROOT, surface, 'sections', 'review-sections.md'), 'utf-8');
+      expect(rendered, `${surface}/sections/review-sections.md must render the panel heading`).toContain(
+        liveHeading,
+      );
+    }
+
+    // Anti-drift: the skip-list entry (minus its leading "- ") must be
+    // BYTE-IDENTICAL to the live heading (minus its leading "## ") — a future
+    // resolver rename that isn't mirrored in autoplan's skip-list fails HERE,
+    // rather than silently double-running the panel at runtime.
+    expect(skipListEntry.replace(/^- /, '')).toBe(liveHeading.replace(/^## /, ''));
+  });
+
+  test('the pre-existing "Design Outside Voices (parallel)" skip-list entry still matches plan-design-review\'s live heading (untouched by M2, kept until M3)', () => {
+    const skipListEntry = '- Design Outside Voices (parallel)';
+    expect(AUTOPLAN_SKILL_MD).toContain(skipListEntry);
+
+    const rendered = fs.readFileSync(path.join(ROOT, 'plan-design-review', 'SKILL.md'), 'utf-8');
+    const liveHeading = '## Design Outside Voices (parallel)';
+    expect(rendered, 'plan-design-review/SKILL.md must render the Design Outside Voices heading').toContain(
+      liveHeading,
+    );
+    expect(skipListEntry.replace(/^- /, '')).toBe(liveHeading.replace(/^## /, ''));
+  });
+
+  test('the stale pre-M2 skip-list entry never reappears', () => {
+    // The exact stale string that caused the drift M2 fixed: M1 renamed the
+    // section this used to point at, so this string stopped matching
+    // anything without anyone noticing.
+    expect(AUTOPLAN_SKILL_MD).not.toContain('Outside Voice — Independent Plan Challenge');
+  });
+});
+
+/** Minimal TemplateContext for calling `generateOutsideVoices` directly. */
+function buildOutsideVoicesCtx(host: 'claude' | 'codex' = 'claude'): TemplateContext {
+  return {
+    skillName: 'autoplan',
+    tmplPath: `/tmp/autoplan/SKILL.md.tmpl`,
+    host,
+    paths: HOST_PATHS[host],
+  };
+}
+
+// fix1 test-task (feat-outside-voices-panel-20260830-224457) — gate-grok:
+// "renderProcedure is a hand-duplicated 18 KB copy... test/skill-recipe-
+// invariants.test.ts greps the resolver FILE, so a procedure-only drop of
+// nonce/boundary/redaction/sandbox prose still passes while renderFullRecipe
+// retains the string. The comment 'invariants + e2e tests cover both' is not
+// true." (gate-grok P2, "same 7 steps" finding.) This calls
+// `generateOutsideVoices` directly for BOTH variants — the byte-frozen
+// standalone recipe (`renderFullRecipe`, default `variant=full`) and
+// autoplan's shared multi-phase copy (`renderProcedure`, `variant=procedure`)
+// — and pins that a fixed set of SECURITY-mechanics fragments (nonce/
+// datamark contract, the boundary preamble, the redaction/egress-consent/
+// sandbox pipeline `gstack-panel` owns, the anti-injection wiring) are
+// BYTE-IDENTICAL in both. `renderProcedure` intentionally diverges from
+// `renderFullRecipe` in non-security prose (phase-aware wording, the Step 6
+// auto-decide rewrite, `run_in_background: false` on fable, the Step 7 audit
+// identity) — see outside-voices.ts:584 ("intentionally duplicates the
+// mechanics prose... rather than sharing a parameterized template") — so this
+// test scopes ONLY to the security fragments both copies are required to
+// keep in lockstep, confirmed identical by diffing the two functions' actual
+// output before writing this test (never a hand-copied guess).
+describe('renderFullRecipe / renderProcedure — SECURITY mechanics stay in sync (gate-grok "same 7 steps" follow-up)', () => {
+  const fullRecipe = generateOutsideVoices(buildOutsideVoicesCtx(), ['variant=full', 'surface=ceo']);
+  const procedure = generateOutsideVoices(buildOutsideVoicesCtx(), ['variant=procedure']);
+
+  test('sanity: both variants actually rendered non-trivial output (guards every assertion below against a vacuous pass)', () => {
+    expect(fullRecipe.length).toBeGreaterThan(5_000);
+    expect(procedure.length).toBeGreaterThan(5_000);
+  });
+
+  const SHARED_SECURITY_FRAGMENTS: Record<string, string> = {
+    'boundary preamble (verbatim, item 1)':
+      '1. **The single-sourced boundary preamble** (verbatim — do NOT paraphrase it):\n\n   "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.',
+    'verdict output contract + datamark requirement (item 3)':
+      "3. **The verdict output contract.** Instruct the voice to end with ONE machine-readable verdict\n   block between the fences `BEGIN_OUTSIDE_VOICE_VERDICT` and `END_OUTSIDE_VOICE_VERDICT`, a single JSON\n   object of schema `outside-voice/v2` with fields: `voice`, `vendor`, `status:\"ready\"`,\n   `verdict` (`PASS`|`CONCERNS`|`BLOCK`), `findings[]` (each `{severity: P0|P1|P2|P3,\n   claim, location, repro_command}`; `location` an in-repo path#symbol, `repro_command` a\n   read-only command or null), and — **required** — `datamark`: the exact token shown in the\n   `[datamark:…]` marker on the UNTRUSTED fences below. A verdict that does not echo the nonce is\n   rejected as unauthenticated (a possible injected verdict). `tokens`/`cost_usd` are nullable.\n   The verdict is an advisory input, not a decision.",
+    'gstack-panel-owned security pipeline (kill-switches / auth / consent / redaction / egress-receipt / sandbox / budget)':
+      'preflight, the **codex under-codex guard** (#2519; `GSTACK_FORCE_CODEX_REVIEW=1` forces),\n**first-use per-vendor egress consent** (private repos), the **redaction pass** (a HIGH/MEDIUM\nsecret/PII hit is masked or that voice goes ABSENT loudly — never silently sent), the\n**fail-closed egress receipt** (no receipt → no send), the **read-only sandbox** (verbatim\nper-voice flags; auto-approve modes FORBIDDEN), the **`panel_budget_usd`** projection, and the\n**wall-clock** budget.',
+    'gstack-panel invocation flags (prompt-file / untrusted-file / datamark / out-dir / wall-clock-s)':
+      '  --prompt-file "<literal $PANEL_PROMPT_FILE>" \\\n  --untrusted-file "<literal $PANEL_UNTRUSTED_FILE>" \\\n  --datamark "<literal $PANEL_NONCE>" \\\n  --out-dir "<literal $PANEL_OUT_DIR>" \\\n  --wall-clock-s 560',
+    'anti-injection nonce/datamark end-to-end wiring statement':
+      "`--untrusted-file` + `--datamark` are what wire the anti-injection nonce end-to-end: the panel\nfences the untrusted target with your nonce and then REQUIRES that same nonce in each voice's\nverdict (`parseVoiceResult` rejects a verdict whose `datamark` does not match).",
+    'first-use egress-consent flow (NEEDS_CONSENT line + AskUserQuestion trigger)':
+      '**First-use consent (private/client repos).** If `gstack-panel` prints a `NEEDS_CONSENT: <voice>`\nline, that vendor has not been consented for egress on this private/client repo (`codex` is\nexempt — already consented via `codex_reviews`; `fable`/native Claude are Anthropic, no new\negress). Ask ONCE per such vendor with AskUserQuestion:',
+    'egress-consent explicit-grant persistence':
+      '`~/.claude/skills/gstack/bin/gstack-config set <voice>_reviews_consent enabled` (only an explicit positive\ngrant — `enabled` or `granted:<date>` — satisfies the gate).',
+    'gstack-vote nonce enforcement (CODE-ENFORCEs the anti-injection nonce on every ready verdict)':
+      '--nonce "<literal $PANEL_NONCE>" \\\n  --budget-usd "$(~/.claude/skills/gstack/bin/gstack-config has panel_budget_usd 2>/dev/null || echo 1.50)"',
+  };
+
+  for (const [label, fragment] of Object.entries(SHARED_SECURITY_FRAGMENTS)) {
+    test(`both copies carry — ${label}`, () => {
+      expect(fullRecipe, `renderFullRecipe (variant=full) is missing this security fragment — drifted from renderProcedure`).toContain(fragment);
+      expect(procedure, `renderProcedure (variant=procedure) is missing this security fragment — drifted from renderFullRecipe`).toContain(fragment);
+    });
+  }
+});
+
+// fix2 P1-1 (gate2-review [P1] / gate2-eng-review B-1 / gate2-codex "Gate Fable
+// egress on Codex hosts" + "Suppress the native-Claude pass on Codex hosts") —
+// round-1 made `procedure`/`invoke` RENDER on a Codex host (instead of leaving
+// dangling "see the Procedure above" pointers), but Step 3 and the host notes
+// were not host-adapted: a Codex host was told to dispatch `fable` via a
+// nonexistent Agent tool and to "run the same review yourself" writing
+// `voice:"claude", vendor:"anthropic"` — a GPT self-review fabricating
+// Anthropic provenance (the registry derives vendor FROM the voice name, so
+// `tallyVoices()` would count it in the anthropic vendor-median). Round 2
+// fixes this by marking BOTH Anthropic voices explicitly ABSENT on a Codex
+// host with an honest "no Agent-tool transport" reason, never dispatched and
+// never self-attested.
+//
+// The rendered `.agents/skills/gstack-autoplan/SKILL.md` (codex-host output)
+// is gitignored (build artifact, host-specific) so it can't be pinned by
+// reading a file off disk in CI — this calls `generateOutsideVoices` directly
+// with `host: 'codex'`, the same entry point `gen-skill-docs.ts` uses to
+// produce that file, so the pin holds even when the file hasn't been
+// regenerated locally.
+describe('Outside Voices — codex-host output marks fable + native Claude ABSENT, never fabricates Anthropic provenance (fix2 P1-1 regression pin)', () => {
+  const codexCtx = buildOutsideVoicesCtx('codex');
+  const claudeCtx = buildOutsideVoicesCtx('claude');
+  const codexProcedure = generateOutsideVoices(codexCtx, ['variant=procedure']);
+  const codexInvoke = generateOutsideVoices(codexCtx, ['variant=invoke', 'surface=ceo']);
+  // Sanity contrast: the claude-host branch must still carry the dispatch
+  // text the codex-host branch is required to NOT carry — proves the
+  // `.not.toContain` assertions below are pinning something real, not
+  // asserting the absence of a string that never existed anywhere.
+  const claudeProcedure = generateOutsideVoices(claudeCtx, ['variant=procedure']);
+
+  test('sanity: codex-host procedure/invoke actually rendered non-trivial output (guards against a vacuous pass)', () => {
+    expect(codexProcedure.length).toBeGreaterThan(1_000);
+    expect(codexInvoke.length).toBeGreaterThan(500);
+  });
+
+  test('sanity: the claude-host branch DOES carry the Agent-tool dispatch + self-review text the codex-host branch must not (proves the negative pins below are meaningful)', () => {
+    expect(claudeProcedure).toContain('dispatch via the Agent tool with runtime `model: fable`');
+    expect(claudeProcedure).toContain('run the same review yourself and write your verdict block');
+    expect(claudeProcedure).toContain('you ARE the\nvoice');
+  });
+
+  test('codex-host Step 3 records fable AND native Claude explicit ABSENT with an honest no-Agent-tool-transport reason', () => {
+    expect(codexProcedure).toContain(
+      '### Step 3 — Anthropic voices (`fable` + native Claude) are ABSENT on a Codex host',
+    );
+    expect(codexProcedure).toContain('Never self-attest as an Anthropic voice.');
+    expect(codexProcedure).toContain('for v in fable claude; do');
+    expect(codexProcedure).toContain('"no Agent-tool transport on the Codex host"');
+  });
+
+  test('codex-host output never instructs Agent-tool dispatch or a native-Claude self-review self-attested as anthropic', () => {
+    // The exact instruction class that fabricated provenance in round 1's
+    // codex-host fix — must be absent from BOTH the shared procedure and the
+    // per-phase invoke stanza.
+    expect(codexProcedure).not.toContain('dispatch via the Agent tool with runtime `model: fable`');
+    expect(codexProcedure).not.toContain('run the same review yourself and write your verdict block');
+    expect(codexProcedure).not.toContain('you ARE the\nvoice');
+    expect(codexInvoke).not.toContain('dispatch the fable subagent with `run_in_background: false`');
+  });
+
+  test('codex-host invoke stanza points at the ABSENT handling instead of dispatching fable', () => {
+    expect(codexInvoke).toContain(
+      '- **Anthropic voices (Procedure Step 3):** `fable` + native Claude are ABSENT on a Codex host (no',
+    );
+  });
+
+  test('codex-host self-exclusion note is honest about the roster (no false "fable + native Claude still run" claim)', () => {
+    expect(codexProcedure).toContain(
+      'The two **Anthropic** voices (`fable` +\nnative Claude) are ALSO ABSENT here',
+    );
+    // The round-1-introduced overclaim this fix removed — pinned as a
+    // `.not.toContain` so it can't silently come back.
+    expect(codexProcedure).not.toContain('fable + native Claude** (plus any enabled grok/gemini) **still run**');
+  });
+});
+
+// fix1 test-task — P1 #4 hardening (gen-time validation). `resolveVariant`
+// used to silently fall back to `full` on an unknown `variant=` value (a typo
+// on an invoke site would inline the ~18 KB full recipe, caught only
+// indirectly by the size-budget gate) and `resolveCarry` title-cased any
+// unknown key into the shipped skill. Both now THROW at generation time —
+// this test calls `generateOutsideVoices` (the same entry point
+// `gen-skill-docs.ts` calls) directly with typo'd args to confirm the throw
+// is real, not just a comment claiming it.
+describe('Outside Voices — variant=/carry= gen-time validation throws on a typo\'d placeholder arg (P1 #4 hardening)', () => {
+  const ctx = buildOutsideVoicesCtx();
+
+  test('an invalid variant= value throws at generation time (never silently inlines the ~18KB full recipe)', () => {
+    expect(() => generateOutsideVoices(ctx, ['variant=bogus'])).toThrow(/invalid variant/i);
+  });
+
+  test('an invalid carry= key throws at generation time (never silently title-cases a typo into the shipped skill)', () => {
+    expect(() => generateOutsideVoices(ctx, ['variant=invoke', 'surface=design', 'carry=desing'])).toThrow(
+      /invalid carry key/i,
+    );
+  });
+
+  test('a bad key inside a +-joined carry= list still throws (not just a single-key carry=)', () => {
+    expect(() => generateOutsideVoices(ctx, ['variant=invoke', 'surface=eng', 'carry=ceo+xxx'])).toThrow(
+      /invalid carry key/i,
+    );
+  });
+
+  test('absent variant=/carry= still default cleanly and never throw (the byte-frozen callers pass only surface=)', () => {
+    expect(() => generateOutsideVoices(ctx, ['surface=eng'])).not.toThrow();
+    expect(() => generateOutsideVoices(ctx, ['variant=invoke', 'surface=ceo'])).not.toThrow();
+    expect(() => generateOutsideVoices(ctx, ['variant=procedure'])).not.toThrow();
+    expect(() =>
+      generateOutsideVoices(ctx, ['variant=invoke', 'surface=eng', 'carry=ceo+design']),
+    ).not.toThrow();
   });
 });
 

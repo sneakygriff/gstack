@@ -647,7 +647,7 @@ to `complete` only when its gate is clean and its Deliverable passes.
 **Deliverable:** `bun test test/outside-voices-vote.test.ts test/skill-recipe-invariants.test.ts test/outside-voices-sandbox.test.ts test/egress-receipt-wiring.test.ts test/outside-voices-redaction.test.ts` green, and `bun run gen:skill-docs --host all && bun run skill:check` clean.
 
 ### M2 — autoplan integration
-<!-- status: pending -->
+<!-- status: complete -->
 - autoplan's four inline per-phase dual-voice blocks are replaced by
   `{{OUTSIDE_VOICES:surface=…}}`; consensus tables use the per-voice-row layout; the skip-list
   is preserved.

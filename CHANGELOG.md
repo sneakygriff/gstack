@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased — fork: outside-voices panel M2] - 2026-08-31
+
+**/autoplan's four plan-review phases now run the full cross-vendor
+advisory panel instead of a single codex second opinion — the same
+independent voices in every phase, still advisory-only: findings feed
+the 6-principle auto-decisions as input and can never become a gate.**
+
+Fork-local milestone (feat/outside-voices-panel, M2 of 3) on top of the
+ported upstream v1.68.2.0 — VERSION deliberately unchanged: this fork
+tracks upstream release numbers, so fork work ships as CHANGELOG
+entries, not version bumps.
+
+### Added
+- `{{OUTSIDE_VOICES}}` autoplan wiring: `variant=` and `carry=` resolver
+  args render the panel procedure once plus one invoke stanza per review
+  phase, each with per-phase carry context. Args are additive and opt-in
+  — M1 ceo/eng/devex plan-review outputs stay byte-identical.
+- Gen-time validation: an invalid or empty `variant=`/`carry=` arg now
+  fails `gen:skill-docs` loudly instead of silently falling back.
+- Offline-testable e2e evidence engine (`computeAutoplanPanelEvidence`):
+  panel execution only counts on a real `gstack-panel`/`gstack-vote`
+  invocation (executable allowlist parses the Bash command's actual
+  binary); raw SKILL.md reads (cat/grep/head/tail/less/sed/awk/rg/nl/
+  more/bat) never count as evidence. Plus a renderFullRecipe ↔
+  renderProcedure security-mechanic sync test, a codex-host-absence
+  regression pin, and recipe-invariant suites.
+
+### Changed
+- autoplan's 4 inline dual-voice codex blocks replaced by the shared
+  panel; the orphaned Phase-0.5 codex preflight and Filesystem-Boundary
+  block removed; panel findings routed as non-binding advisory input
+  (no new human gate).
+- carryContext now renders inside the nonce-fenced UNTRUSTED region
+  instead of being appended to the trusted prompt.
+- Vendor egress consent is a third never-auto-decided gate: it fails
+  closed in spawned/auto-choose sessions (vendor stays ABSENT, never
+  auto-granted); interactive sessions ask once and remember across
+  phases.
+- Honest codex-host roster: fable and native-Claude voices are marked
+  explicitly ABSENT on the Codex host (no Agent-tool transport) rather
+  than fabricated via self-review; only grok/gemini dispatch there and
+  codex stays host-excluded.
+- Autoplan parity cap raised 1.09 → 1.18 (measured ratio 1.1755) to
+  accept the deliberate growth; the 1.50x product cap is unchanged.
+
 ## [Unreleased — fork: outside-voices panel M1] - 2026-08-30
 
 **Every plan review now gets a cross-vendor advisory panel: independent second

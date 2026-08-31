@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'child_process';
+import { OUTSIDE_VOICE_BOUNDARY } from '../lib/outside-voices/registry';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const MAX_SKILL_DESCRIPTION_LENGTH = 1024;
@@ -1397,17 +1398,28 @@ describe('Codex filesystem boundary', () => {
     expect(codexExecIdx).toBeGreaterThan(-1);
   });
 
-  test('autoplan boundary text avoids host-specific paths for cross-host compatibility', () => {
-    const content = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md.tmpl'), 'utf-8');
-    // autoplan template uses generic 'skills/gstack' pattern instead of host-specific
-    // paths like ~/.claude/ or .agents/skills (which break Codex/Claude output tests)
-    const boundaryStart = content.indexOf('Filesystem Boundary');
-    const boundaryEnd = content.indexOf('---', boundaryStart + 1);
-    const boundarySection = content.slice(boundaryStart, boundaryEnd);
-    expect(boundarySection).not.toContain('~/.claude/');
-    expect(boundarySection).not.toContain('.agents/skills');
-    expect(boundarySection).toContain('skills/gstack');
-    expect(boundarySection).toContain(BOUNDARY_MARKER);
+  test('autoplan boundary text is single-sourced via the outside-voices resolver (M2 removed the autoplan-only Filesystem Boundary section)', () => {
+    // Pre-M2, autoplan owned its own "## Filesystem Boundary — Codex Prompts"
+    // section with an autoplan-specific, host-path-avoiding boundary variant
+    // ("paths containing skills/gstack" instead of the enumerated host paths),
+    // because it issued 4 inline `codex exec` blocks directly. M2 deleted that
+    // section along with the inline blocks: autoplan now emits
+    // {{OUTSIDE_VOICES:variant=...}} placeholders, and the boundary text comes
+    // entirely from the resolver, which interpolates the single-sourced
+    // OUTSIDE_VOICE_BOUNDARY constant (lib/outside-voices/registry.ts) — the
+    // exact same literal every other outside-voices call site renders
+    // (plan-ceo-review, plan-eng-review, plan-devex-review). autoplan no
+    // longer carries a bespoke boundary variant at all.
+    const tmpl = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md.tmpl'), 'utf-8');
+    expect(tmpl).not.toContain('Filesystem Boundary');
+    expect(tmpl).toContain('{{OUTSIDE_VOICES:variant=procedure}}');
+
+    // The sibling CODEX_CALLING_SKILLS marker check (above) already confirms
+    // BOUNDARY_MARKER renders for autoplan; here we confirm it is byte-identical
+    // to the single-sourced constant, not a hand-maintained autoplan copy.
+    const rendered = fs.readFileSync(path.join(ROOT, 'autoplan', 'SKILL.md'), 'utf-8');
+    expect(rendered).toContain(BOUNDARY_MARKER);
+    expect(rendered).toContain(OUTSIDE_VOICE_BOUNDARY);
   });
 });
 
@@ -1881,9 +1893,36 @@ describe('Codex generation (--host codex)', () => {
   });
 
   test('no ~/.claude/ paths in Codex output', () => {
+    // autoplan is exempt for ONE specific, single-sourced literal: the
+    // outside-voices panel's OUTSIDE_VOICE_BOUNDARY preamble
+    // (lib/outside-voices/registry.ts) is deliberately host-AGNOSTIC — it is
+    // sent to whichever EXTERNAL CLI voice (codex/grok/gemini) is reviewing,
+    // telling it not to wander into either host's skill-definition
+    // directories ("~/.claude/, ~/.agents/, .agents/skills/, or agents/"),
+    // regardless of which host is orchestrating the review. Before the M2
+    // outside-voices panel fix1 P1 #2 (feat-outside-voices-panel-20260830-
+    // 224457), autoplan's Codex-host output stripped the whole panel
+    // section, so this literal never reached Codex output; the fix now
+    // renders the shared procedure on Codex hosts too (minus the self-
+    // excluded `codex` voice), which legitimately carries this text. Scrub
+    // ONLY that exact single-sourced fragment (never a blanket per-skill
+    // exemption) before the ban, so any OTHER `~/.claude/` leak — including
+    // a future one in autoplan itself — still fails loudly.
+    //
+    // Derived from the imported OUTSIDE_VOICE_BOUNDARY constant (fix2 P2 /
+    // gate2-eng-review F5) rather than hand-typed, so a future wording
+    // change to the constant doesn't silently desync this scrub from the
+    // real single-sourced text. It cannot be OUTSIDE_VOICE_BOUNDARY
+    // byte-identical, though: the codex-host renderer rewrites the ONE
+    // relative path segment `.claude/skills/` → `.agents/skills/` inside
+    // this otherwise-"verbatim" literal (gate2-eng-review F2 — the boundary
+    // is single-sourced but not host-path-agnostic on Codex output), so the
+    // scrub fragment applies that same one-token substitution to the
+    // constant before use.
+    const boundaryFragment = OUTSIDE_VOICE_BOUNDARY.replace('.claude/skills/', '.agents/skills/');
     for (const skill of CODEX_SKILLS) {
       const content = fs.readFileSync(path.join(AGENTS_DIR, skill.codexName, 'SKILL.md'), 'utf-8');
-      expect(content).not.toContain('~/.claude/');
+      expect(content.replaceAll(boundaryFragment, '')).not.toContain('~/.claude/');
     }
   });
 
@@ -2124,14 +2163,20 @@ describe('Codex generation (--host codex)', () => {
     for (const skill of CLAUDE_GENERATED_SKILLS) {
       const content = fs.readFileSync(path.join(ROOT, skill.dir, 'SKILL.md'), 'utf-8');
       // pair-agent legitimately documents how Codex agents store credentials.
-      // codex + autoplan document the Codex CLI auth file (~/.codex/auth.json)
-      // and log path (~/.codex/logs/) — those are user-facing Codex CLI paths,
-      // not the gstack Codex host install path. ~/.codex/sessions/ (rollout
+      // codex documents the Codex CLI auth file (~/.codex/auth.json) and log
+      // path (~/.codex/logs/) — those are user-facing Codex CLI paths, not
+      // the gstack Codex host install path. ~/.codex/sessions/ (rollout
       // logs, referenced by the review/ship timeout guidance) and
       // ~/.codex/config.toml (the model_unusable guidance in the shared
       // codexPreflight, #2477) are the same user-facing class, so they are
       // scrubbed before the ban.
-      if (skill.dir !== 'pair-agent' && skill.dir !== 'codex' && skill.dir !== 'autoplan') {
+      // autoplan's own exemption is gone (M2 fix1, feat-outside-voices-panel):
+      // the hardcoded inline `codex exec` blocks that used to reference
+      // ~/.codex/auth.json / ~/.codex/logs/ were replaced by the
+      // {{OUTSIDE_VOICES}} panel procedure, which routes all Codex CLI
+      // invocation through `bin/gstack-panel` — autoplan's Claude-host output
+      // carries zero `~/.codex/` references now, same as any other skill.
+      if (skill.dir !== 'pair-agent' && skill.dir !== 'codex') {
         expect(
           content
             .replaceAll('~/.codex/sessions/', '')
