@@ -162,7 +162,11 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     mustContain: ['SCOPE EXPANSION', 'SELECTIVE EXPANSION', 'HOLD SCOPE', 'SCOPE REDUCTION'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
     // prose replacing the smaller opt-in question) lands this ~5.2% over baseline.
-    maxSizeRatio: 1.08,
+    // M3 outside-voices panel integration (2026-08-31): the single-vendor
+    // Codex-only outside-voice section was replaced by the shared N-voice
+    // advisory-panel procedure (review-sections.md), landing the union at
+    // 1.0865 (139,173 -> 151,212 bytes).
+    maxSizeRatio: 1.11, // M3 outside-voices panel; measured 1.0865
   },
   'plan-eng-review': {
     skill: 'plan-eng-review',
@@ -219,7 +223,11 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     maxSkeletonBytes: 91_700, // v1.68 fix wave (#2402); measured 91,176
     minUnionBytes: 70_000,
     mustContain: ['design', 'visual'],
-    maxSizeRatio: 1.12, // D1 1.104 + main's ~0.008
+    // M3 outside-voices panel integration (2026-08-31): the single-vendor
+    // Codex-only outside-voice section was replaced by the shared N-voice
+    // advisory-panel procedure (review-sections.md), landing the union at
+    // 1.1404 (112,090 -> 127,826 bytes).
+    maxSizeRatio: 1.16, // M3 outside-voices panel; measured 1.1404
   },
   'plan-devex-review': {
     skill: 'plan-devex-review',
@@ -245,7 +253,11 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     mustContain: ['developer experience', 'Getting Started'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
     // prose replacing the smaller opt-in question) lands this ~5.7% over baseline.
-    maxSizeRatio: 1.08,
+    // M3 outside-voices panel integration (2026-08-31): the single-vendor
+    // Codex-only outside-voice section was replaced by the shared N-voice
+    // advisory-panel procedure (review-sections.md), landing the union at
+    // 1.1061 (112,660 -> 124,609 bytes).
+    maxSizeRatio: 1.13, // M3 outside-voices panel; measured 1.1061
   },
   'office-hours': {
     skill: 'office-hours',

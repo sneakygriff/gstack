@@ -384,23 +384,39 @@ describe('autoplan skip-list — anti-drift against the live rendered outside-vo
     expect(skipListEntry.replace(/^- /, '')).toBe(liveHeading.replace(/^## /, ''));
   });
 
-  test('the pre-existing "Design Outside Voices (parallel)" skip-list entry still matches plan-design-review\'s live heading (untouched by M2, kept until M3)', () => {
-    const skipListEntry = '- Design Outside Voices (parallel)';
-    expect(AUTOPLAN_SKILL_MD).toContain(skipListEntry);
-
+  test('plan-design-review now renders the SHARED advisory-panel heading (M3 delegation) — covered by the same single skip-list entry, so the bespoke "Design Outside Voices (parallel)" entry is dropped', () => {
+    // M3: plan-design-review's design outside-voices step now DELEGATES to the
+    // shared advisory panel (surface=design), wrapped in a thin opt-in gate. It
+    // therefore renders the SAME `## Outside Voices — Advisory Panel …` heading the
+    // other plan-*-review surfaces do — already asserted (and byte-anchored to the
+    // live heading) by the test above — so autoplan needs only that one skip-list
+    // entry. The pre-M3 bespoke `- Design Outside Voices (parallel)` entry is
+    // removed (design-consultation still renders that heading, but /autoplan never
+    // loads design-consultation, so it was never why the entry existed).
     const rendered = fs.readFileSync(path.join(ROOT, 'plan-design-review', 'SKILL.md'), 'utf-8');
-    const liveHeading = '## Design Outside Voices (parallel)';
-    expect(rendered, 'plan-design-review/SKILL.md must render the Design Outside Voices heading').toContain(
+    const liveHeading = '## Outside Voices — Advisory Panel (recommendation only; the user decides)';
+    expect(rendered, 'plan-design-review/SKILL.md must render the shared advisory-panel heading after M3 delegation').toContain(
       liveHeading,
     );
-    expect(skipListEntry.replace(/^- /, '')).toBe(liveHeading.replace(/^## /, ''));
+    // The opt-in gate must survive the delegation (§4: design-review auto; plan-design-review opt-in).
+    expect(rendered, 'plan-design-review must keep its opt-in gate around the delegated panel').toContain(
+      '**Opt-in gate (this review only).**',
+    );
+    // The delegated section no longer renders the pre-M3 bespoke heading …
+    expect(rendered).not.toContain('## Design Outside Voices (parallel)');
+    // … and autoplan's skip-list no longer carries the now-redundant bespoke entry.
+    expect(AUTOPLAN_SKILL_MD).not.toContain('- Design Outside Voices (parallel)');
   });
 
-  test('the stale pre-M2 skip-list entry never reappears', () => {
+  test('the stale skip-list entries never reappear', () => {
     // The exact stale string that caused the drift M2 fixed: M1 renamed the
     // section this used to point at, so this string stopped matching
     // anything without anyone noticing.
     expect(AUTOPLAN_SKILL_MD).not.toContain('Outside Voice — Independent Plan Challenge');
+    // M3: plan-design-review delegated to the shared panel, so its bespoke
+    // skip-list entry was dropped — it must not silently reappear (it would rot as
+    // a dead entry matching nothing autoplan actually double-runs).
+    expect(AUTOPLAN_SKILL_MD).not.toContain('- Design Outside Voices (parallel)');
   });
 });
 
@@ -468,6 +484,76 @@ describe('renderFullRecipe / renderProcedure — SECURITY mechanics stay in sync
       expect(procedure, `renderProcedure (variant=procedure) is missing this security fragment — drifted from renderFullRecipe`).toContain(fragment);
     });
   }
+});
+
+// M3 gate2 P2-1 (eng-review + grok) regression pin. The `review` surface is
+// the AUTOMATED adversarial delegation — it feeds /review's Step 5.7, /ship's
+// Step 11, and autobuilder's own gate/CI, all non-interactive — so
+// `isAutomatedReviewSurface` (outside-voices.ts, `renderFullRecipe`) branches
+// Step 2 consent + Step 6 tension to a FAIL-CLOSED, NON-BLOCKING form on this
+// surface ONLY: a missing egress consent is recorded ABSENT(consent-missing)
+// and the run continues — never an AskUserQuestion, never a wait. Every
+// interactive plan-review surface (ceo/eng/devex, and design's
+// plan-design-review opt-in path) keeps the original present-and-ask consent +
+// "Wait for the user's response" User Sovereignty flow untouched — the user is
+// there to answer. Before this pin, nothing rendered `surface=review` and
+// asserted the absence of the mandatory-wait text (m3-gate2-eng-review.md
+// P2-1) — a future resolver refactor that silently dropped
+// `isAutomatedReviewSurface` (reintroducing the original P1 ship-blocker: an
+// autobuilder run hanging forever on a consent prompt nobody can answer) would
+// have passed every existing suite. This test pins BOTH directions — the
+// review/ship surface must stay non-blocking AND the interactive surfaces must
+// keep asking — so the surface distinction can't silently collapse either way.
+describe('Outside Voices — review/ship surface is FAIL-CLOSED/NON-BLOCKING on consent; interactive plan-review surfaces keep asking (M3 gate2 P2-1 regression pin)', () => {
+  const reviewSurfaceRecipe = generateOutsideVoices(buildOutsideVoicesCtx(), ['variant=full', 'surface=review']);
+  const interactiveCeoRecipe = generateOutsideVoices(buildOutsideVoicesCtx(), ['variant=full', 'surface=ceo']);
+
+  test('sanity: both renders actually produced non-trivial output (guards every assertion below against a vacuous pass)', () => {
+    expect(reviewSurfaceRecipe.length).toBeGreaterThan(5_000);
+    expect(interactiveCeoRecipe.length).toBeGreaterThan(5_000);
+  });
+
+  test('resolver source, surface=review (variant=full): no mandatory consent AskUserQuestion, no blocking wait, explicitly fails closed and continues', () => {
+    expect(reviewSurfaceRecipe).not.toContain('Ask ONCE per such vendor with AskUserQuestion');
+    expect(reviewSurfaceRecipe).not.toContain("Wait for the user's response");
+    expect(reviewSurfaceRecipe).toContain('FAIL-CLOSED and NON-BLOCKING on this surface');
+    expect(reviewSurfaceRecipe).toContain('do NOT wait: leave that voice ABSENT and CONTINUE');
+  });
+
+  test("resolver source, surface=ceo (interactive plan-review): the consent AskUserQuestion + \"Wait for the user's response\" User Sovereignty flow is intact — proves the negative pins above are meaningful, not vacuous", () => {
+    expect(interactiveCeoRecipe).toContain('Ask ONCE per such vendor with AskUserQuestion');
+    expect(interactiveCeoRecipe).toContain("Wait for the user's response");
+    expect(interactiveCeoRecipe).not.toContain('FAIL-CLOSED and NON-BLOCKING on this surface');
+  });
+
+  test('generated review/SKILL.md (the AUTOMATED /review delegation) carries no mandatory consent wait', () => {
+    const content = fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8');
+    expect(content).not.toContain('Ask ONCE per such vendor with AskUserQuestion');
+    expect(content).not.toContain("Wait for the user's response");
+    expect(content).toContain('FAIL-CLOSED and NON-BLOCKING on this surface');
+  });
+
+  test('generated ship/sections/adversarial.md (the AUTOMATED /ship delegation) carries no mandatory consent wait', () => {
+    const content = fs.readFileSync(path.join(ROOT, 'ship', 'sections', 'adversarial.md'), 'utf-8');
+    expect(content).not.toContain('Ask ONCE per such vendor with AskUserQuestion');
+    expect(content).not.toContain("Wait for the user's response");
+    expect(content).toContain('FAIL-CLOSED and NON-BLOCKING on this surface');
+  });
+
+  test('generated plan-eng-review/sections/review-sections.md (interactive plan-review) still carries the consent AskUserQuestion + Wait-for-user Sovereignty flow', () => {
+    const content = fs.readFileSync(path.join(ROOT, 'plan-eng-review', 'sections', 'review-sections.md'), 'utf-8');
+    expect(content).toContain('Ask ONCE per such vendor with AskUserQuestion');
+    expect(content).toContain("Wait for the user's response");
+    expect(content).not.toContain('FAIL-CLOSED and NON-BLOCKING on this surface');
+  });
+
+  test('NEEDS_CONSENT really fails closed at the code level: gstack-panel prints the line AND writes an ABSENT(consent-missing) record before continuing (backs the resolver prose\'s "already recorded it ABSENT" claim)', () => {
+    const idx = GSTACK_PANEL.indexOf('echo "NEEDS_CONSENT: $voice"');
+    expect(idx, 'gstack-panel must print the NEEDS_CONSENT line the resolver prose references').toBeGreaterThan(0);
+    const nextLines = GSTACK_PANEL.slice(idx, idx + 300);
+    expect(nextLines, 'the line(s) right after NEEDS_CONSENT must write the ABSENT(consent-missing) record').toContain('consent-missing');
+    expect(nextLines, 'and then continue — never block').toContain('continue');
+  });
 });
 
 // fix2 P1-1 (gate2-review [P1] / gate2-eng-review B-1 / gate2-codex "Gate Fable
@@ -645,6 +731,241 @@ describe('Outside Voices — consent gate (_panel_consent_ok), executed against 
 
   test('a public repo skips the per-vendor consent gate even with no consent recorded', () => {
     expect(consentCheck('grok', 'public')).toBe(0);
+  });
+});
+
+// M3/T1 — under-grok / under-gemini nested-self-invocation guards, generalized
+// from under-codex (#2519 -> OV-17; see the design doc's Files Touched entry
+// for design.ts/review.ts and bin/gstack-panel:707-751 for the guard block
+// itself). The sentinels below were verified by STATIC INSPECTION of the
+// installed CLI artifacts on this machine — no live/paid `grok`/`gemini`
+// invocation was run to obtain them (matching the task's "only read, do not
+// run reviews" constraint):
+//   * gemini: GEMINI_CLI=1 — read directly out of the installed
+//     @google/gemini-cli 0.57.0 package's bundled
+//     packages/core/src/services/shellExecutionService.ts, which
+//     unconditionally injects GEMINI_CLI=1 into the env of every shell
+//     command the CLI executes.
+//   * grok: GROK_AGENT=1 — read via `strings` on the installed grok 1.0.5
+//     binary, which wraps every shell command the agent executes as
+//     `builtin export GROK_AGENT=1; ...; builtin eval "$__grok_user_cmd"`.
+//     No public grok-cli source/docs corroborate this beyond the shipped
+//     binary's own strings — weaker provenance than the gemini/codex evidence,
+//     called out explicitly in the guard's own comment in bin/gstack-panel.
+describe('Outside Voices — under-grok / under-gemini nested-self-invocation guards (T1, generalized from under-codex — OV-17)', () => {
+  // --- guard-shape (structural), mirroring codex-under-codex-detection.test.ts's
+  // "the panel codex path carries the under-codex nested-self-invocation guard" ---
+  test('_panel_under_grok / _panel_under_gemini exist and gate on the verified sentinel + a per-voice force-escape', () => {
+    expect(GSTACK_PANEL).toContain('_panel_under_grok()');
+    expect(GSTACK_PANEL).toContain('_panel_under_gemini()');
+    expect(GSTACK_PANEL).toContain('GROK_AGENT');
+    expect(GSTACK_PANEL).toContain('GEMINI_CLI');
+    expect(GSTACK_PANEL).toContain('GSTACK_FORCE_GROK_REVIEW');
+    expect(GSTACK_PANEL).toContain('GSTACK_FORCE_GEMINI_REVIEW');
+  });
+
+  // --- guard-shape (structural): _panel_under_grok must match GROK_AGENT
+  // EXACTLY against "1", not merely on presence. GROK_AGENT is dual-use — it
+  // is both the wrapper-injected session sentinel (always exactly "1") AND a
+  // documented user-facing grok config var (custom agent profile name), so a
+  // user who sets GROK_AGENT=my-profile outside any grok session must not
+  // permanently trip this guard (M3 fix-b gate P2-1, bin/gstack-panel
+  // _panel_under_grok).
+  //
+  // _panel_under_gemini is ALSO pinned to exact match (M3 gate2 P2 follow-up,
+  // grok's re-gate) — not because GEMINI_CLI has a documented collision like
+  // GROK_AGENT's (it doesn't: the gemini CLI's own bundled
+  // shellExecutionService.ts unconditionally injects exactly GEMINI_CLI=1),
+  // but purely so both under-<voice> guards stay structurally identical rather
+  // than one being presence-only (`-n`) and the other exact-match. CODEX_* has
+  // neither a collision nor this consistency pin — it stays presence-based. ---
+  test('_panel_under_grok matches GROK_AGENT exactly ("1"), not merely on presence', () => {
+    const grokFnStart = GSTACK_PANEL.indexOf('_panel_under_grok() {');
+    expect(grokFnStart).toBeGreaterThan(0);
+    const grokFnEnd = GSTACK_PANEL.indexOf('\n}', grokFnStart);
+    const grokFnBody = GSTACK_PANEL.slice(grokFnStart, grokFnEnd);
+    expect(grokFnBody).toContain('"${GROK_AGENT:-}" = "1"');
+    expect(grokFnBody).not.toContain('-n "${GROK_AGENT');
+  });
+
+  test('_panel_under_gemini matches GEMINI_CLI exactly ("1"), not merely on presence (M3 gate2 P2 follow-up — consistency with the grok guard)', () => {
+    const geminiFnStart = GSTACK_PANEL.indexOf('_panel_under_gemini() {');
+    expect(geminiFnStart).toBeGreaterThan(0);
+    const geminiFnEnd = GSTACK_PANEL.indexOf('\n}', geminiFnStart);
+    const geminiFnBody = GSTACK_PANEL.slice(geminiFnStart, geminiFnEnd);
+    expect(geminiFnBody).toContain('"${GEMINI_CLI:-}" = "1"');
+    expect(geminiFnBody).not.toContain('-n "${GEMINI_CLI');
+  });
+
+  test('both guards are wired into the voice loop and gate the invoke spawn, writing ABSENT(under-<voice>)', () => {
+    expect(GSTACK_PANEL).toContain('if _panel_under_grok; then');
+    expect(GSTACK_PANEL).toContain('under-grok');
+    expect(GSTACK_PANEL).toContain('if _panel_under_gemini; then');
+    expect(GSTACK_PANEL).toContain('under-gemini');
+    // The guard check must precede the invoke DISPATCH call site (case
+    // "$voice" in grok) _panel_invoke_grok ;; …) in run_panel's voice loop —
+    // not just the earlier `_panel_invoke_grok() {` function definition.
+    const grokGuardIdx = GSTACK_PANEL.indexOf('if _panel_under_grok; then');
+    const grokInvokeIdx = GSTACK_PANEL.indexOf('grok)   _panel_invoke_grok ;;');
+    expect(grokGuardIdx).toBeGreaterThan(0);
+    expect(grokInvokeIdx).toBeGreaterThan(grokGuardIdx);
+
+    const geminiGuardIdx = GSTACK_PANEL.indexOf('if _panel_under_gemini; then');
+    const geminiInvokeIdx = GSTACK_PANEL.indexOf('gemini) _panel_invoke_gemini ;;');
+    expect(geminiGuardIdx).toBeGreaterThan(0);
+    expect(geminiInvokeIdx).toBeGreaterThan(geminiGuardIdx);
+  });
+
+  test('the stale "no equivalent guard applies to them" comment is gone (codex-only guard is now generalized)', () => {
+    expect(GSTACK_PANEL).not.toContain('no equivalent guard applies to them');
+  });
+
+  // --- behavioral (real bin/gstack-panel), same harness/pattern as the
+  // consent-gate (:592ff) and FIX5 (:1059ff) behavioral tests above ---
+  function underVoiceConfigStub(voice: 'grok' | 'gemini'): string {
+    const other = voice === 'grok' ? 'gemini' : 'grok';
+    return (
+      '#!/bin/sh\n' +
+      'if [ "$1" = "get" ]; then\n' +
+      '  case "$2" in\n' +
+      `    ${voice}_reviews) echo "enabled" ;;\n` +
+      `    ${other}_reviews|codex_reviews) echo "disabled" ;;\n` +
+      '    redact_repo_visibility) echo "public" ;;\n' +
+      '    *) : ;;\n' +
+      '  esac\n' +
+      'fi\n' +
+      'if [ "$1" = "has" ]; then exit 1; fi\n' +
+      'exit 0\n'
+    );
+  }
+
+  test('grok voice is ABSENT(under-grok) when GROK_AGENT is set, never invoked', () => {
+    const h = makePanelHarness({
+      'gstack-config': underVoiceConfigStub('grok'),
+      grok: '#!/bin/sh\necho SHOULD_NOT_RUN\nexit 0\n',
+    });
+    try {
+      const r = h.run(
+        ['--surface', 'eng', '--prompt-file', path.join(h.cwd, 'prompt.txt'),
+          '--datamark', 'under-grok-nonce', '--out-dir', h.outDir, '--budget-usd', '1.50', '--wall-clock-s', '560'],
+        { GROK_AGENT: '1' },
+      );
+      expect(r.status, `panel should exit 0 (advisory): ${r.stderr}`).toBe(0);
+      const p = path.join(h.outDir, 'grok.result.json');
+      expect(fs.existsSync(p), 'grok.result.json must exist').toBe(true);
+      const rec = JSON.parse(fs.readFileSync(p, 'utf8'));
+      expect(rec.status, 'grok must be absent under a live grok session').toBe('absent');
+      expect(rec.reason, 'absent reason must reflect the under-grok guard').toContain('under-grok');
+      // Never invoked — no raw output artifact exists.
+      expect(fs.existsSync(path.join(h.outDir, 'grok.raw')), 'grok must NOT have been invoked').toBe(false);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test('GSTACK_FORCE_GROK_REVIEW=1 overrides the under-grok guard', () => {
+    const h = makePanelHarness({
+      'gstack-config': underVoiceConfigStub('grok'),
+      grok: '#!/bin/sh\necho GROK_RAN\nexit 0\n',
+    });
+    try {
+      const r = h.run(
+        ['--surface', 'eng', '--prompt-file', path.join(h.cwd, 'prompt.txt'),
+          '--datamark', 'under-grok-force-nonce', '--out-dir', h.outDir, '--budget-usd', '1.50', '--wall-clock-s', '560'],
+        { GROK_AGENT: '1', GSTACK_FORCE_GROK_REVIEW: '1' },
+      );
+      expect(r.status, `panel should exit 0 (advisory): ${r.stderr}`).toBe(0);
+      const p = path.join(h.outDir, 'grok.result.json');
+      expect(fs.existsSync(p), 'grok.result.json must exist').toBe(true);
+      const rec = JSON.parse(fs.readFileSync(p, 'utf8'));
+      // Forced past the guard: the specific under-grok reason must be gone
+      // (the stub is a pure-bash fallback, so status/reason beyond that is
+      // not asserted here — only that the guard itself did not fire).
+      expect(rec.reason ?? '', 'forced run must not carry the under-grok reason').not.toContain('under-grok');
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test('gemini voice is ABSENT(under-gemini) when GEMINI_CLI is set, never invoked', () => {
+    const h = makePanelHarness({
+      'gstack-config': underVoiceConfigStub('gemini'),
+      gemini: '#!/bin/sh\necho SHOULD_NOT_RUN\nexit 0\n',
+    });
+    try {
+      const r = h.run(
+        ['--surface', 'eng', '--prompt-file', path.join(h.cwd, 'prompt.txt'),
+          '--datamark', 'under-gemini-nonce', '--out-dir', h.outDir, '--budget-usd', '1.50', '--wall-clock-s', '560'],
+        { GEMINI_CLI: '1' },
+      );
+      expect(r.status, `panel should exit 0 (advisory): ${r.stderr}`).toBe(0);
+      const p = path.join(h.outDir, 'gemini.result.json');
+      expect(fs.existsSync(p), 'gemini.result.json must exist').toBe(true);
+      const rec = JSON.parse(fs.readFileSync(p, 'utf8'));
+      expect(rec.status, 'gemini must be absent under a live gemini session').toBe('absent');
+      expect(rec.reason, 'absent reason must reflect the under-gemini guard').toContain('under-gemini');
+      // Never invoked — no raw output artifact exists.
+      expect(fs.existsSync(path.join(h.outDir, 'gemini.raw')), 'gemini must NOT have been invoked').toBe(false);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test('GSTACK_FORCE_GEMINI_REVIEW=1 overrides the under-gemini guard', () => {
+    const h = makePanelHarness({
+      'gstack-config': underVoiceConfigStub('gemini'),
+      gemini: '#!/bin/sh\necho GEMINI_RAN\nexit 0\n',
+    });
+    try {
+      const r = h.run(
+        ['--surface', 'eng', '--prompt-file', path.join(h.cwd, 'prompt.txt'),
+          '--datamark', 'under-gemini-force-nonce', '--out-dir', h.outDir, '--budget-usd', '1.50', '--wall-clock-s', '560'],
+        { GEMINI_CLI: '1', GSTACK_FORCE_GEMINI_REVIEW: '1' },
+      );
+      expect(r.status, `panel should exit 0 (advisory): ${r.stderr}`).toBe(0);
+      const p = path.join(h.outDir, 'gemini.result.json');
+      expect(fs.existsSync(p), 'gemini.result.json must exist').toBe(true);
+      const rec = JSON.parse(fs.readFileSync(p, 'utf8'));
+      expect(rec.reason ?? '', 'forced run must not carry the under-gemini reason').not.toContain('under-gemini');
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test('no GROK_AGENT/GEMINI_CLI in the ambient env -> neither guard fires (the ordinary kill-switch reason is used instead)', () => {
+    const h = makePanelHarness({
+      'gstack-config':
+        '#!/bin/sh\n' +
+        'if [ "$1" = "get" ]; then\n' +
+        '  case "$2" in\n' +
+        '    codex_reviews) echo "disabled" ;;\n' +
+        '    grok_reviews|gemini_reviews) echo "disabled" ;;\n' +
+        '    redact_repo_visibility) echo "public" ;;\n' +
+        '    *) : ;;\n' +
+        '  esac\n' +
+        'fi\n' +
+        'if [ "$1" = "has" ]; then exit 1; fi\n' +
+        'exit 0\n',
+    });
+    try {
+      // Explicitly clear GROK_AGENT/GEMINI_CLI so this assertion holds even if
+      // the ambient shell running the test itself carries one of them (mirrors
+      // the FIX5 test's explicit CODEX_THREAD_ID/CODEX_SANDBOX clearing above).
+      const r = h.run(
+        ['--surface', 'eng', '--prompt-file', path.join(h.cwd, 'prompt.txt'),
+          '--datamark', 'no-under-voice-nonce', '--out-dir', h.outDir, '--wall-clock-s', '560'],
+        { GROK_AGENT: '', GEMINI_CLI: '' },
+      );
+      expect(r.status).toBe(0);
+      for (const voice of ['grok', 'gemini']) {
+        const p = path.join(h.outDir, `${voice}.result.json`);
+        const rec = JSON.parse(fs.readFileSync(p, 'utf8'));
+        expect(rec.reason, `${voice} absent reason must reflect the kill-switch, not the under-${voice} guard`).toContain('kill-switch');
+        expect(rec.reason).not.toContain(`under-${voice}`);
+      }
+    } finally {
+      h.cleanup();
+    }
   });
 });
 

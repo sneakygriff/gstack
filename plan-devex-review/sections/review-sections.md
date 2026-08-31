@@ -511,24 +511,56 @@ cross-model tension — the panel agrees with the review."
 
 ---
 
-### Step 7 — Persist + cleanup
+### Step 7 — Persist the aggregate record + cleanup
 
-`gstack-panel` already logged a per-voice audit entry. Persist ONE aggregate entry so the existing
-Review Readiness Dashboard's Outside Voice row keeps populating (audit-only, matching today's
-semantics — the M3 dashboard rework replaces this with a per-voice `outside-voices` record; until
-then this makes no claim the dashboard cannot back):
+`gstack-panel` already logged a per-voice audit entry per voice (`skill:"outside-voices-panel"`, one
+row each — forensic only, not read by the dashboard). Now persist ONE **aggregate** `outside-voices`
+review-log record so the Review Readiness Dashboard's Outside Voice row renders the WHOLE N-voice
+panel — per-voice verdicts + the recommendation, plus `cost_usd` (currently always `null`, see
+below) — instead of a single masqueraded model.
 
-Substitute the literal paths from Step 1 (never bare `$PANEL_*` — an empty var would make
-`rm -rf` operate on the wrong target):
+Source every field from the `gstack-vote` tally you already computed in Step 4 — re-read it as JSON
+BEFORE the cleanup below deletes the `*.result.json` files (`--nonce` is required, exactly as in
+Step 4, or every ready verdict demotes to error):
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"codex-plan-review","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","commit":"'"$(git rev-parse --short HEAD)"'"}'
+~/.claude/skills/gstack/bin/gstack-vote --dir "<literal $PANEL_OUT_DIR>" --nonce "<literal $PANEL_NONCE>" --json
+```
+
+That prints the raw `TallyResult`. Assemble ONE record by mapping its fields DIRECTLY — do NOT
+re-tabulate (`gstack-vote` is the ONLY tally path):
+- `recommendation` ← `.recommendation` (`PASS`|`CONCERNS`|`BLOCK`, or the string `"none"` when null)
+- `tally_status` ← `.status` (`OK`|`SINGLE_VENDOR_ANTHROPIC`|`INSUFFICIENT_QUORUM`|`NO_VOICES`)
+- `ready` ← `.quorum.readyVoices`; `vendors` ← `.quorum.readyVendors`
+- `voices` ← `.perVoice`, each mapped to `{voice, vendor, status, verdict}` (one entry per voice —
+  ready AND absent/error alike; `verdict` is `null` for a non-ready voice). For the `fable` entry
+  specifically, ALSO add `runtime_model`: the model that ACTUALLY ran this run — `"fable"` normally, or
+  the fallback id (e.g. `"claude-opus-4-8"`) when Step 3 fell back because the fable runtime was
+  unavailable. That value is orchestrator-supplied from what Step 3 dispatched (the tally JSON's
+  per-voice entry carries no such field), so the record preserves fable's REAL provenance instead of
+  always attributing the row to fable.
+- `cost_usd` ← `null`. The `gstack-vote --json` `TallyResult` carries NO cost field — cost is not
+  part of the tally — so do NOT scrape the human-readable Budget line (Step 5): that display value
+  rounds to cents, sums model-reported `cost_usd` from every voice (including the FREE Anthropic
+  ones), and a voice-reported figure could overflow the record. Source cost ONLY from the tally JSON,
+  which reports none — so record `null` (honest: the panel persists no fabricated total; if a future
+  `TallyResult` gains a real cost field, copy it here).
+
+Then log it. The **orchestrator** writes this record from the JSON above — `gstack-vote` never writes
+logs itself (it is spawned hundreds of times in tests; an implicit write would pollute
+`~/.gstack/reviews`). Substitute the literal paths from Step 1 (never bare `$PANEL_*` — an empty var
+would make `rm -rf` operate on the wrong target), and fill REC / TALLY_STATUS / N / V / the
+`voices` array from the JSON (`cost_usd` stays literally `null` per the mapping above; each `verdict`
+a quoted string or `null`; add the fable entry's `runtime_model`):
+
+```bash
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"outside-voices","surface":"/plan-devex-review","recommendation":"REC","tally_status":"TALLY_STATUS","ready":N,"vendors":V,"cost_usd":null,"voices":[{"voice":"…","vendor":"…","status":"…","verdict":"…"}],"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":"'"$(git rev-parse --short HEAD)"'"}'
 rm -rf "<literal $PANEL_OUT_DIR>" "<literal $PANEL_PROMPT_FILE>" "<literal $PANEL_UNTRUSTED_FILE>"
 ```
 
-Substitute: STATUS = "clean" if the recommendation is PASS or no findings promoted, else
-"issues_found". SOURCE = "panel" (or "claude" if every external voice was ABSENT and only the
-Anthropic pass ran).
+This single `outside-voices` record — NOT any `gstack-vote` write — is what lights the dashboard's
+Outside Voice row (the dashboard reads it directly; the per-voice `outside-voices-panel` rows stay
+audit-only).
 
 ---
 
@@ -752,11 +784,11 @@ After completing the review, read the review log and config to display the dashb
 ~/.claude/skills/gstack/bin/gstack-review-read
 ```
 
-Parse the output. Find the most recent entry for each skill (plan-ceo-review, plan-eng-review, review, plan-design-review, design-review-lite, adversarial-review, codex-review, codex-plan-review). Ignore entries with timestamps older than 7 days. For the Eng Review row, show whichever is more recent between `review` (diff-scoped pre-landing review) and `plan-eng-review` (plan-stage architecture review). Append "(DIFF)" or "(PLAN)" to the status to distinguish. For the Adversarial row, show whichever is more recent between `adversarial-review` (new auto-scaled) and `codex-review` (legacy). For Design Review, show whichever is more recent between `plan-design-review` (full visual audit) and `design-review-lite` (code-level check). Append "(FULL)" or "(LITE)" to the status to distinguish. For the Outside Voice row, show the most recent `codex-plan-review` entry — this captures outside voices from both /plan-ceo-review and /plan-eng-review.
+Parse the output. Find the most recent entry for each skill (plan-ceo-review, plan-eng-review, review, plan-design-review, design-review-lite, adversarial-review, codex-review, outside-voices, codex-plan-review). Ignore entries with timestamps older than 7 days. For the Eng Review row, show whichever is more recent between `review` (diff-scoped pre-landing review) and `plan-eng-review` (plan-stage architecture review). Append "(DIFF)" or "(PLAN)" to the status to distinguish. For the Adversarial row, show whichever is more recent between `adversarial-review` (new auto-scaled) and `codex-review` (legacy). For Design Review, show whichever is more recent between `plan-design-review` (full visual audit) and `design-review-lite` (code-level check). Append "(FULL)" or "(LITE)" to the status to distinguish. For the Outside Voice row, show the most recent `outside-voices` entry — the aggregate N-voice advisory-panel record written by the panel that runs inside every review surface (/review, /ship, and each plan-review phase). Render the row from its fields: the Status cell shows the panel `recommendation` (`PASS`/`CONCERNS`/`BLOCK`) — a `recommendation` of the literal string `"none"` means none was emitted; show the degraded `tally_status` instead, never a bare "none" status. The Runs cell shows `ready`/`vendors` (voices ready · vendors), and append the `cost_usd` (summed external spend) in parentheses when non-null. Below the row, expand the per-voice `voices` sub-entries — one line each as `voice/vendor: STATUS VERDICT` — so the consensus is legible. **Legacy fallback:** if no `outside-voices` entry exists within the 7-day window, fall back to the most recent `codex-plan-review` entry (pre-M3 plan-review panels logged the aggregate under that skill id) and show its status — an older log must never blank the row.
 
 **Source attribution:** If the most recent entry for a skill has a \`"via"\` field, append it to the status label in parentheses. Examples: `plan-eng-review` with `via:"autoplan"` shows as "CLEAR (PLAN via /autoplan)". `review` with `via:"ship"` shows as "CLEAR (DIFF via /ship)". Entries without a `via` field show as "CLEAR (PLAN)" or "CLEAR (DIFF)" as before.
 
-Note: `autoplan-voices` and `design-outside-voices` entries are audit-trail-only (forensic data for cross-model consensus analysis). They do not appear in the dashboard and are not checked by any consumer.
+Note: the per-voice `outside-voices-panel` entries (one row per voice, written by `gstack-panel`), plus `autoplan-voices` and `design-outside-voices` entries, are audit-trail-only (forensic data for cross-model consensus analysis). They do not appear in the dashboard. The **aggregate** `outside-voices` entry, by contrast, IS consumed — it is exactly what lights the Outside Voice row above.
 
 Display:
 
@@ -780,8 +812,8 @@ Display:
 - **Eng Review (required by default):** The only review that gates shipping. Covers architecture, code quality, tests, performance. Can be disabled globally with \`gstack-config set skip_eng_review true\` (the "don't bother me" setting).
 - **CEO Review (optional):** Use your judgment. Recommend it for big product/business changes, new user-facing features, or scope decisions. Skip for bug fixes, refactors, infra, and cleanup.
 - **Design Review (optional):** Use your judgment. Recommend it for UI/UX changes. Skip for backend-only, infra, or prompt-only changes.
-- **Adversarial Review (automatic):** Always-on for every review. Every diff gets both Claude adversarial subagent and Codex adversarial challenge. Large diffs (200+ lines) additionally get Codex structured review with P1 gate. No configuration needed.
-- **Outside Voice (optional):** Independent plan review from a different AI model. Offered after all review sections complete in /plan-ceo-review and /plan-eng-review. Falls back to Claude subagent if Codex is unavailable. Never gates shipping.
+- **Adversarial Review (automatic):** Always-on for every review. Every diff gets the outside-voices advisory panel — independent second opinions from multiple AI systems, tabulated into one non-blocking recommendation. Large diffs (200+ lines) additionally get Codex structured review with a P1 gate. No configuration needed.
+- **Outside Voice (advisory):** The N-voice advisory panel's aggregate result — per-voice verdicts plus one vendor-median recommendation from different AI models (codex + fable + native Claude by default; grok/gemini opt-in). Runs inside every review surface; the `outside-voices` record populates the row above. Advisory only — never gates shipping.
 
 **Verdict logic:**
 - **CLEARED**: Eng Review has >= 1 entry within 7 days from either \`review\` or \`plan-eng-review\` with status "clean" (or \`skip_eng_review\` is \`true\`)

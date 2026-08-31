@@ -1395,37 +1395,43 @@ describe('Codex skill', () => {
     }
   });
 
-  test('adversarial review in /review always runs both passes', () => {
+  test('adversarial review in /review delegates the passes to the outside-voices panel + keeps the [P1] structured review', () => {
     const content = fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8');
     expect(content).toContain('Adversarial review (always-on)');
-    // Always-on: both Claude and Codex adversarial
-    expect(content).toContain('Claude adversarial subagent (always runs)');
-    expect(content).toContain('Codex adversarial challenge (runs whenever');
-    // Claude adversarial subagent dispatch
-    expect(content).toContain('Agent tool');
-    expect(content).toContain('FIXABLE');
-    expect(content).toContain('INVESTIGATE');
-    // Probe-based availability via the shared codexPreflight() (install + auth)
+    // The two adversarial passes are now single-sourced from the shared
+    // outside-voices advisory panel (surface=review) — advisory, non-blocking.
+    expect(content).toContain('Outside Voices — Advisory Panel');
+    expect(content).toContain('NON-BLOCKING');
+    // The deleted inline blocks must be gone (delegated to the panel).
+    expect(content).not.toContain('### Claude adversarial subagent (always runs)');
+    expect(content).not.toContain('### Codex adversarial challenge');
+    expect(content).not.toContain('ADVERSARIAL REVIEW SYNTHESIS');
+    // The RETAINED structured review keeps its codexPreflight (install + auth)
+    // and its [P1] gate — the design pins "[P1] rule unchanged".
     expect(content).toContain('CODEX_MODE');
     expect(content).toContain('command -v codex'); // install check kept literal
-    // codex_reviews=disabled gates Codex passes only; Claude adversarial still runs
-    expect(content).toContain('skip the Codex passes ONLY');
-    // Review log
-    expect(content).toContain('adversarial-review');
-    expect(content).toContain('reasoning_effort="high"');
-    expect(content).toContain('ADVERSARIAL REVIEW SYNTHESIS');
-    // Large diff structured review still gated
     expect(content).toContain('Codex structured review (large diffs only');
     expect(content).toContain('200');
-  });
-
-  test('adversarial review in /ship always runs both passes', () => {
-    const content = readShipUnion();
-    expect(content).toContain('Adversarial review (always-on)');
+    // Persist (adversarial-review log) is retained.
     expect(content).toContain('adversarial-review');
     expect(content).toContain('reasoning_effort="high"');
-    expect(content).toContain('Investigate and fix');
-    expect(content).toContain('Claude adversarial subagent (always runs)');
+  });
+
+  test('adversarial review in /ship delegates the passes to the outside-voices panel + keeps the [P1] structured review', () => {
+    const content = readShipUnion();
+    expect(content).toContain('Adversarial review (always-on)');
+    expect(content).toContain('Outside Voices — Advisory Panel');
+    expect(content).toContain('adversarial-review');
+    expect(content).toContain('reasoning_effort="high"');
+    expect(content).toContain('Investigate and fix'); // [P1] gate AskUserQuestion retained
+    // The deleted inline adversarial-pass block heading is gone. (There is no
+    // "dashboard's Review-tiers bullet" post-M3 — the two adversarial passes are
+    // now single-sourced from the shared outside-voices advisory panel
+    // (surface=review, full variant), which is ADVISORY and NON-BLOCKING; the
+    // heavyweight `codex review --base` structured review and its [P1] gate
+    // are KEPT unchanged below, per generateAdversarialStep's own comment in
+    // scripts/resolvers/review.ts — so assert the block marker only.)
+    expect(content).not.toContain('### Claude adversarial subagent (always runs)');
   });
 
   test('scope drift detection in /review and /ship', () => {

@@ -41,6 +41,9 @@ describe('paid test enumeration', () => {
     // FIX2 gate P0: the outside-voices sandbox canary spawns real CLIs, so it
     // is a paid file too — same regression class as the two below it.
     expect(isPaidTestFile('test/outside-voices-sandbox.test.ts')).toBe(true);
+    // M3/T6: grok-as-reviewer / gemini-as-reviewer E2E spawns real CLIs via
+    // bin/gstack-panel — same regression class as the sandbox canary above.
+    expect(isPaidTestFile('test/outside-voices-reviewer-e2e.test.ts')).toBe(true);
     // Outside the globs: no dash, extra suffix, or a free test.
     // 'test/skill-e2e.test.ts' is the DELETED pre-split monolith's name,
     // kept here as a regression pin: its glob-invisibility is exactly how
@@ -54,7 +57,7 @@ describe('paid test enumeration', () => {
     const files = collectPaidTestFiles();
     expect(files.length).toBeGreaterThan(0);
     expect(files.every(isPaidTestFile)).toBe(true);
-    expect(PAID_TEST_GLOBS.length).toBe(7);
+    expect(PAID_TEST_GLOBS.length).toBe(8);
 
     const shards = planPaidShards(files);
     expect(shards.flat().sort()).toEqual([...files].sort());

@@ -77,11 +77,11 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   DEPLOY_BOOTSTRAP: generateDeployBootstrap,
   // Shared N-voice advisory panel (OUTSIDE_VOICES_PANEL.md §6).
   OUTSIDE_VOICES: generateOutsideVoices,
-  // Thin alias — no in-tree template references {{CODEX_PLAN_REVIEW}} any more
-  // (T12 repointed all 3 plan-review templates to {{OUTSIDE_VOICES:surface=…}}
-  // in this same change). Kept RESOLVING for out-of-tree/vendored templates in
-  // the interim; M3's cleanup task (T13) drops it.
-  CODEX_PLAN_REVIEW: (ctx) => generateOutsideVoices(ctx),
+  // NOTE: the interim plan-review alias (a thin {{OUTSIDE_VOICES}} forwarder kept
+  // for out-of-tree templates during M1/M2) was dropped in M3's cleanup — all
+  // in-tree templates render the panel via {{OUTSIDE_VOICES:surface=…}} directly,
+  // so it had no remaining callers. Its entry in hosts/define-host.ts
+  // CROSS_MODEL_RESOLVERS was removed in the same change.
   CODEX_DOC_REVIEW: generateCodexDocReview,
   PLAN_COMPLETION_AUDIT_SHIP: generatePlanCompletionAuditShip,
   PLAN_COMPLETION_AUDIT_REVIEW: generatePlanCompletionAuditReview,

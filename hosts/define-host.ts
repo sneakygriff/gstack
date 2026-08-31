@@ -25,10 +25,11 @@ type PathRewrite = { from: string; to: string };
  * non-Claude agent runtimes (OpenClaw, Hermes, GBrain).
  */
 export const CROSS_MODEL_RESOLVERS: string[] = [
-  'DESIGN_OUTSIDE_VOICES',  // design.ts — invokes Codex for outside voices
+  'DESIGN_OUTSIDE_VOICES',  // design.ts — delegates plan-design-review/design-review to the shared panel; design-consultation keeps its own Codex block
   'ADVERSARIAL_STEP',       // review.ts — invokes Codex adversarially
   'CODEX_SECOND_OPINION',   // review.ts — invokes Codex
-  'CODEX_PLAN_REVIEW',      // index.ts alias → outside-voices.ts panel (self-gates codex host)
+  // (the interim plan-review alias was removed in M3 — templates now render the
+  //  panel via {{OUTSIDE_VOICES:surface=…}}, which self-gates the codex host.)
   'REVIEW_ARMY',            // review-army.ts — multi-model orchestration
 ];
 

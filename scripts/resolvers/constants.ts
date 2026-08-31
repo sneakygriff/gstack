@@ -66,7 +66,7 @@ export const CODEX_WEB_SEARCH_FLAG = `-c 'web_search="cached"'`;
 
 /**
  * Shared Codex error handling block for resolver output.
- * Used by ADVERSARIAL_STEP, CODEX_PLAN_REVIEW, CODEX_SECOND_OPINION,
+ * Used by ADVERSARIAL_STEP, CODEX_SECOND_OPINION,
  * DESIGN_OUTSIDE_VOICES, DESIGN_REVIEW_LITE, DESIGN_SKETCH.
  */
 export function codexErrorHandling(feature: string): string {
@@ -79,8 +79,8 @@ On any error: continue — ${feature} is informational, not a gate.`;
 
 /**
  * Shared Codex preflight bash block — the single source of truth for deciding
- * whether a Codex review pass should run. Used by ADVERSARIAL_STEP,
- * CODEX_PLAN_REVIEW, and CODEX_DOC_REVIEW so install/auth/config detection
+ * whether a Codex review pass should run. Used by ADVERSARIAL_STEP
+ * and CODEX_DOC_REVIEW so install/auth/config detection
  * lives in exactly one place.
  *
  * Emits ONE self-contained bash block (the caller must place it in a single
@@ -103,13 +103,14 @@ On any error: continue — ${feature} is informational, not a gate.`;
  * one branch that legitimately differs per caller (D1):
  *   - `skip-all` (plan / doc reviews): disabled means no extra review step at
  *     all — skip the section, no Claude fallback.
- *   - `codex-only` (diff adversarial): disabled gates only the Codex passes; the
- *     free Claude adversarial subagent still runs.
+ *   - `codex-only` (diff adversarial): disabled gates only the structured Codex
+ *     review; the outside-voices advisory panel (which carries the adversarial
+ *     passes) still runs, owning its own per-voice kill-switches.
  */
 export function codexPreflight(opts: { modeVar?: string; disabledBehavior: 'skip-all' | 'codex-only' }): string {
   const m = opts.modeVar ?? '_CODEX_MODE';
   const disabledLine = opts.disabledBehavior === 'codex-only'
-    ? 'Skip the Codex passes only; the Claude adversarial subagent below STILL runs (it is free and fast). Print: "Codex passes skipped (codex_reviews disabled) — running Claude adversarial only."'
+    ? 'Skip the structured Codex review only; the outside-voices advisory panel (which carries the adversarial passes) STILL runs and owns its own per-voice kill-switches. Print: "Structured Codex review skipped (codex_reviews disabled) — the advisory panel still ran."'
     : 'Skip this section entirely; do NOT fall back to a Claude subagent — disabled means no extra review step. Print: "Codex review skipped (codex_reviews disabled). Re-enable: `gstack-config set codex_reviews enabled`."';
   return `\`\`\`bash
 # Codex preflight: one block (functions sourced here don't persist to later blocks).
