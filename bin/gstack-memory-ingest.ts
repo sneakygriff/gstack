@@ -821,8 +821,13 @@ function buildArtifactPage(path: string, type: MemoryType, raw?: string): PageRe
   raw ??= readFileSync(path, "utf-8");
 
   // Extract repo slug from path: ~/.gstack/projects/<slug>/...
+  // Separator class [\/\\]: on Windows these paths arrive with backslashes
+  // (path.join), and a forward-slash-only match left EVERY project's
+  // artifacts in _unattributed — colliding on <date>-<basename> in the
+  // staging dir, so all but one project's learnings/timeline per date were
+  // silently overwritten before import.
   let slug_repo = "_unattributed";
-  const m = path.match(/\/\.gstack\/projects\/([^/]+)\//);
+  const m = path.match(/[\/\\]\.gstack[\/\\]projects[\/\\]([^\/\\]+)[\/\\]/);
   if (m) slug_repo = m[1];
 
   const date = new Date(stats.mtimeMs).toISOString().slice(0, 10);
@@ -1013,6 +1018,15 @@ function writeStaged(prepared: PreparedPage[], stagingDir: string, scanned = fal
     let pendingDir: string | undefined;
     try {
       mkdirSync(dirname(absPath), { recursive: true });
+      // Two prepared pages mapping to one staged path silently overwrite each
+      // other; the survivor imports and the reconciliation guard then fails the
+      // whole batch with an unexplained staged>collected gap. Surface it.
+      if (stagedPathToSource.has(relPath)) {
+        console.error(
+          `[memory-ingest] STAGING COLLISION: ${relPath} from ${p.source_path} ` +
+            `(overwrites page from ${stagedPathToSource.get(relPath)})`,
+        );
+      }
       if (scanned) {
         pendingDir = mkdtempSync(join(GSTACK_HOME, ".brain-ingest-write-"));
         const pendingPath = join(pendingDir, "page.md");
