@@ -248,6 +248,10 @@ if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
 fi
 
 _BRAIN_SYNC_MODE=$("$_BRAIN_CONFIG_BIN" get artifacts_sync_mode 2>/dev/null || echo off)
+# Allowlist before this value reaches the agent-read ARTIFACTS_SYNC line below
+# (fork F5): `set` validates it, but a hand-edited or synced config.yaml never
+# goes through `set`, and a crafted mode could forge status text.
+case "$_BRAIN_SYNC_MODE" in off|artifacts-only|full) ;; *) _BRAIN_SYNC_MODE=off ;; esac
 
 # Remote-MCP mode detection (Path 4 of /setup-gbrain): read claude.json
 # directly (no subprocess to claude CLI on the hot path). Both registration
@@ -268,7 +272,8 @@ if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ] && grep -q '"gbr
 fi
 
 if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GH/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
-  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
+  # Synced file: strip control chars (CR/ESC can visually forge lines) and cap length (fork).
+  _BRAIN_NEW_URL=$(head -1 "$_BRAIN_REMOTE_FILE" 2>/dev/null | tr -d '[:space:][:cntrl:]' | cut -c1-120)
   if [ -n "$_BRAIN_NEW_URL" ]; then
     printf 'ARTIFACTS_SYNC: artifacts repo detected: %s\n' "$_BRAIN_NEW_URL" | _sanitize
     echo "ARTIFACTS_SYNC: run 'gstack-brain-restore' to pull your cross-machine artifacts (or 'gstack-config set artifacts_sync_mode off' to dismiss forever)"
@@ -293,12 +298,19 @@ if [ -d "$_GH/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
     if command -v _receipted_git >/dev/null 2>&1; then
       # Non-interactive + slow-network bounded (same guards as gstack-update-check):
       # a hung remote or a credential prompt must not stall the preamble.
-      ( cd "$_GH" && GSTACK_HOME="$_GH" GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 \
-          _receipted_git closed brain-sync "${_PULL_HOST:-unknown}" curated-memory-git-fetch "artifacts_sync_mode!=off" \
-          git fetch origin >/dev/null 2>&1 && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
       # Stamp only when the receipted path actually ran — a missing egress lib
       # must surface as a retry next start, not a silent 24h suppression.
-      echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+      # Fork F4: a FAILED fetch (offline, auth, refused receipt) must not buy a
+      # 24h silence either, but retrying on every start could stall each skill
+      # on an unreachable remote — so it backs off 1h instead.
+      if ( cd "$_GH" && GSTACK_HOME="$_GH" GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 \
+          _receipted_git closed brain-sync "${_PULL_HOST:-unknown}" curated-memory-git-fetch "artifacts_sync_mode!=off" \
+          git fetch origin >/dev/null 2>&1 ); then
+        ( cd "$_GH" && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
+        echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
+      else
+        echo $(( _BRAIN_NOW - 86400 + 3600 )) > "$_BRAIN_LAST_PULL_FILE"
+      fi
     fi
   fi
   "$_BRAIN_SYNC_BIN" --once 2>/dev/null || true
