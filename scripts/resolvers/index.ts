@@ -28,6 +28,7 @@ import { generateLearningsSearch, generateLearningsLog } from './learnings';
 import { generateConfidenceCalibration } from './confidence';
 import { generateInvokeSkill, generateAutoplanReviewFile, generateAutoplanSnapshotTool, generateAutoplanPublicationHook } from './composition';
 import { generateReviewArmy } from './review-army';
+import { generateOutsideVoices, generateDesignOutsideVoicesLayered, generateAdversarialStepLayered } from './outside-voices';
 import { generateDxFramework } from './dx';
 import { generateGBrainContextLoad, generateGBrainSaveResults, generateBrainPreflight, generateBrainCacheRefresh, generateBrainWriteBack } from './gbrain';
 import { generateTasksSectionEmit, generateTasksSectionAggregate } from './tasks-section';
@@ -90,7 +91,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   DESIGN_MD_CHECK: generateDesignMdCheck,
   DESIGN_SLOP_BULLETS: generateDesignSlopBullets,
   UX_PRINCIPLES: generateUXPrinciples,
-  DESIGN_OUTSIDE_VOICES: generateDesignOutsideVoices,
+  DESIGN_OUTSIDE_VOICES: generateDesignOutsideVoicesLayered, // fork: upstream block + advisory panel
   DESIGN_REVIEW_LITE: generateDesignReviewLite,
   REVIEW_DASHBOARD: generateReviewDashboard,
   PLAN_FILE_REVIEW_REPORT: generatePlanFileReviewReport,
@@ -111,10 +112,12 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   DESIGN_SHOTGUN_LOOP: generateDesignShotgunLoop,
   BENEFITS_FROM: generateBenefitsFrom,
   CODEX_SECOND_OPINION: generateCodexSecondOpinion,
-  ADVERSARIAL_STEP: generateAdversarialStep,
+  ADVERSARIAL_STEP: generateAdversarialStepLayered, // fork: upstream block + advisory panel
   SCOPE_DRIFT: generateScopeDrift,
   DEPLOY_BOOTSTRAP: generateDeployBootstrap,
   CODEX_PLAN_REVIEW: generateCodexPlanReview,
+  // Fork: N-voice advisory panel, layered after the Outside Voice (OUTSIDE_VOICES_PANEL.md §6).
+  OUTSIDE_VOICES: generateOutsideVoices,
   CODEX_DOC_REVIEW: generateCodexDocReview,
   PLAN_COMPLETION_AUDIT_SHIP: generatePlanCompletionAuditShip,
   PLAN_COMPLETION_GATE_SHIP: generatePlanCompletionGateShip,

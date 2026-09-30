@@ -24,6 +24,11 @@ export const PAID_TEST_GLOBS = [
   'test/codex-e2e*.test.ts',
   'test/llm-judge-recommendation.test.ts',
   'test/carve-section-loading*.test.ts',
+  // Fork: outside-voices panel canaries spawn the REAL codex/grok/gemini CLIs
+  // (write-denial sandbox canary + grok/gemini-as-reviewer E2E). Both self-gate
+  // on EVALS_TIER === 'periodic'.
+  'test/outside-voices-sandbox.test.ts',
+  'test/outside-voices-reviewer-e2e.test.ts',
 ] as const;
 
 /** True when a repo-relative path (either slash style) is a paid test file. */

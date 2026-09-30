@@ -203,8 +203,9 @@ test('detached PR fallback and release commands cover their actual default worke
     )) / 1000 * 1.05));
   }
   const detachedReleaseWall = Number(scripts['eval:bg:release'].match(/--timeout (\d+)/)?.[1]) * 1000;
-  expect(releaseFloors).toEqual([42_851, 37_727]);
-  expect(releaseFloors.reduce((total, floor) => total + floor, 0)).toBe(80_578);
+  // Fork: periodic floor measured with the +2 outside-voices panel canaries (was 37_727).
+  expect(releaseFloors).toEqual([42_851, 39_617]);
+  expect(releaseFloors.reduce((total, floor) => total + floor, 0)).toBe(82_468);
   expect(detachedReleaseWall).toBe(116_700_000);
   expect(detachedReleaseWall).toBeGreaterThanOrEqual(releaseWall + 120_000);
 });
@@ -280,7 +281,7 @@ test('the periodic executor supervises every actual case and retry within its CI
   const manifest = buildRunManifest({ tier: 'periodic', sliceCount: planned.slices,
     evalsAll: true, env: { EVALS_ALL: '1' } });
   const census = manifest.entries.filter(row => row.status === 'planned');
-  expect(census).toHaveLength(71);
+  expect(census).toHaveLength(73); // fork: +2 outside-voices panel canaries
   expect(census.find(row => row.file === 'test/skill-llm-eval.test.ts')?.budget?.timeoutMs).toBe(6_220_000);
   const walls = executor.strategy.matrix.slice.map((slice: number) => paidShardWallUpperBoundMs(
     census.filter(row => row.slice === slice).map(row => row.file), active.jobs,

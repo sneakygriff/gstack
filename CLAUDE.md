@@ -140,6 +140,7 @@ CLI utilities (`gstack-render.ts` is the render CLI skills call;
 and open-DESIGN.md tools), `extension/` Chrome
 extension, one directory per skill (`ship/`, `review/`, `qa/`, ...),
 `.github/` CI, `contrib/` contributor tools, `docs/designs/` design documents.
+Fork additions (sneakygriff/gstack): `autobuilder-loop/` + `plan-deliverables/` skills, `lib/outside-voices/` + `bin/gstack-panel` + `bin/gstack-vote` (advisory panel, layered after the Outside Voice), `bin/gstack-lint-touched` (ship lint gate).
 
 ## SKILL.md workflow
 
@@ -249,7 +250,11 @@ Default output from every tier-≥2 skill follows the Writing Style section in
 outcome terms ("what breaks for your users if...") not implementation terms,
 short sentences, decisions close with user impact. Power users who want the
 tighter V0 prose set `gstack-config set explain_level terse` (binary switch,
-no middle mode). See `docs/designs/PLAN_TUNING_V1.md` for the full design
+no middle mode). The config key is a RUNTIME behavior switch — the preamble
+echoes `EXPLAIN_LEVEL` and the model skips terse-gated sections; the generated
+SKILL.md bytes (and their token cost) are unchanged until you also rebuild with
+`bun run gen:skill-docs --explain-level=terse`. The `set` command now prints
+exactly this. See `docs/designs/PLAN_TUNING_V1.md` for the full design
 rationale. The review pacing overhaul that originally tried to ride alongside
 writing-style was extracted to V1.1 — see `docs/designs/PACING_UPDATES_V0.md`.
 
@@ -811,6 +816,8 @@ When the user's request matches an available skill, invoke it via the Skill tool
 
 Key routing rules:
 - Product ideas/brainstorming → invoke /office-hours
+- Acceptance criteria / deliverables / definition of done for a plan → invoke /plan-deliverables
+- Drive an approved plan/spec/backlog to completion autonomously ("autobuild it", "run the build loop") → invoke /autobuilder-loop
 - Strategy/scope → invoke /plan-ceo-review
 - Architecture → invoke /plan-eng-review
 - Design system/plan review → invoke /design-consultation or /plan-design-review

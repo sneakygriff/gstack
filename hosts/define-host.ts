@@ -29,6 +29,7 @@ export const CROSS_MODEL_RESOLVERS: string[] = [
   'ADVERSARIAL_STEP',       // review.ts — adversarial outside review
   'CODEX_SECOND_OPINION',   // review.ts — legacy token, selected provider
   'CODEX_PLAN_REVIEW',      // review.ts — legacy token, selected provider
+  'OUTSIDE_VOICES',         // outside-voices.ts — fork advisory panel, layered after the Outside Voice
   'REVIEW_ARMY',            // review-army.ts — multi-model orchestration
 ];
 

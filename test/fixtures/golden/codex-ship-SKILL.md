@@ -289,13 +289,13 @@ Applies to AskUserQuestion, user replies, and findings. AskUserQuestion Format i
 Curated jargon list lives at `$GSTACK_ROOT/scripts/jargon-list.json` (80+ terms). On the first jargon term you encounter this session, Read that file once; treat the `terms` array as the canonical list. The list is repo-owned and may grow between releases.
 
 
-## Completeness Principle — Boil the Ocean
+## Completeness Principle — Boil the Ocean (skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 AI makes completeness cheap, so the complete thing is the goal. Recommend full coverage (tests, edge cases, error paths) — boil the ocean one lake at a time. The only thing out of scope is genuinely unrelated work (rewrites, multi-quarter migrations); flag that as separate scope, never as an excuse for a shortcut.
 
 When options differ in coverage, include `Completeness: X/10` (10 = all edge cases, 7 = happy path, 3 = shortcut). When options differ in kind, write: `Note: options differ in kind, not coverage — no completeness score.` Do not fabricate scores.
 
-## Confusion Protocol
+## Confusion Protocol (skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 For high-stakes ambiguity (architecture, data model, destructive scope, missing context), STOP. Name it in one sentence, present 2-3 options with tradeoffs, and ask. Do not use for routine coding or obvious changes.
 
@@ -303,7 +303,7 @@ For high-stakes ambiguity (architecture, data model, destructive scope, missing 
 
 A claimed limitation or requirement ("the API can't do this", "X requires a credential", "that's impossible on this platform") is a material claim. State one only with the verbatim error, the documented statement, or a live probe in hand — pattern-matching a failure to a familiar story is not evidence. When a cheap probe settles the question, run it BEFORE asking the user anything or declaring a step blocked.
 
-## Context Health (soft directive)
+## Context Health (soft directive; skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo)
 
 During long-running skill sessions, periodically write a brief `[PROGRESS]` summary: done, next, surprises.
 
@@ -935,22 +935,78 @@ C stops this attempt.
 `db:test:prepare` internally, which loads the schema into the correct lane database.
 Running bare test migrations without INSTANCE hits an orphan DB and corrupts structure.sql.
 
-Run independent test suites in parallel, each wrapped in the evidence ledger. The
-wrapper is transparent (streams output live, exit code passes through) and
-records `{command, exit, working-tree fingerprint, log path}` to
-`~/.gstack/projects/<slug>/<branch>-evidence.jsonl` — Step 16 cites this
-record instead of re-running when the content hasn't changed:
+Run independent test suites in parallel — and, in the same batch, **lint + typecheck**
+(detected below; ship gates on all of them, not tests alone — a type error tests never
+touch must not reach the PR). Test suites stay wrapped in the evidence ledger: the
+wrapper is transparent (streams output live, exit code passes through) and records
+`{command, exit, working-tree fingerprint, log path}` to
+`~/.gstack/projects/<slug>/<branch>-evidence.jsonl`, so Step 16 cites the record
+instead of re-running when the content hasn't changed:
 
 ```bash
-$GSTACK_ROOT/bin/gstack-evidence run --label tests -- 'bin/test-lane 2>&1' &
-$GSTACK_ROOT/bin/gstack-evidence run --label vitest -- 'npm run test 2>&1' &
+# A script exists only if it is a key under "scripts" — grep '"lint"' also matches a
+# dependency, a nested config key, or a word in the description, and would run a script
+# that isn't there (or skip a detected linter because a lookalike string matched).
+has_script() { [ -f package.json ] || return 1; \
+  if command -v bun >/dev/null 2>&1; then bun -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]]?0:1)' "$1" ; \
+  elif command -v node >/dev/null 2>&1; then node -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]]?0:1)' "$1" ; \
+  else grep -q "\"$1\"[[:space:]]*:" package.json; fi; }
+run_script() { if command -v npm >/dev/null 2>&1; then npm run "$1"; else bun run "$1"; fi; }
+# Repo-local binary first. bunx is the LAST resort and says so out loud: it downloads and
+# executes registry code nobody vetted, in the middle of a ship — the same reason
+# bin/gstack-lint-touched refuses bunx outright.
+run_tool() { _b="$1"; _pkg="$2"; shift 2; \
+  if [ -x "node_modules/.bin/$_b" ]; then "node_modules/.bin/$_b" "$@" ; \
+  else echo "WARN: no repo-local $_b — falling back to 'bunx $_pkg' (registry download + unvetted execution mid-ship)"; bunx "$_pkg" "$@"; fi; }
+
+# Launch only the jobs this project actually has, and drop the others from the join list
+# below too: a job in that list with no status file is read as a failure, never as a skip.
+# Per-run temp dir: a shared /tmp path let one /ship run's PASS clobber another's
+# FAIL under concurrent ships (fail-open). mktemp -d isolates each run.
+RC_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ship-gate.XXXXXX"); echo "gate temp: $RC_DIR"
+# tests + vitest stay wrapped in the evidence ledger (transparent, exit code passes
+# through) so Step 16 can cite the record; the rc file just mirrors that exit for the join.
+{ $GSTACK_ROOT/bin/gstack-evidence run --label tests -- 'bin/test-lane 2>&1'; echo $? >"$RC_DIR/rc_tests"; } &
+{ $GSTACK_ROOT/bin/gstack-evidence run --label vitest -- 'npm run test 2>&1'; echo $? >"$RC_DIR/rc_vitest"; } &
+# Lint — first match wins: the project's own script, else a detected tool, else skip.
+{ if has_script lint; then run_script lint ; \
+  elif [ -f biome.json ] || [ -f biome.jsonc ]; then run_tool biome @biomejs/biome check . ; \
+  elif { _ecfg=0; for _f in .eslintrc* eslint.config.*; do [ -e "$_f" ] && { _ecfg=1; break; }; done; [ "$_ecfg" -eq 1 ]; }; then run_tool eslint eslint . ; \
+  else echo "LINT: no lint script/config detected — skipped"; fi; echo $? >"$RC_DIR/rc_lint"; } 2>&1 | tee "$RC_DIR/lint.txt" &
+# (@biomejs/biome, never bare "biome" — the bare name is an unrelated squatted
+# package that exits 0 on anything, turning the lint gate into a silent false-clean.)
+# Typecheck — project's own script ("typecheck" or "type-check"), else tsc when a tsconfig exists, else skip.
+{ if has_script typecheck; then run_script typecheck ; \
+  elif has_script type-check; then run_script type-check ; \
+  elif [ -f tsconfig.json ]; then run_tool tsc typescript --noEmit ; \
+  else echo "TYPECHECK: no typecheck script/tsconfig — skipped"; fi; echo $? >"$RC_DIR/rc_typecheck"; } 2>&1 | tee "$RC_DIR/typecheck.txt" &
 wait
+# Fail-closed join: tee'd output can read clean while the job exited nonzero (or died
+# before printing anything at all), so the gate is decided by exit codes, not by eyeballing.
+GATE=0
+for j in tests vitest lint typecheck; do
+  rc=$(cat "$RC_DIR/rc_$j" 2>/dev/null)
+  case "$rc" in
+    0) echo "PASS $j" ;;
+    "") echo "FAIL $j (no exit status — job died before reporting)"; GATE=1 ;;
+    *) echo "FAIL $j (exit $rc)"; GATE=1 ;;
+  esac
+done
+if [ "$GATE" -eq 0 ]; then echo "GATE: all four green"; else echo "GATE: FAILED — logs in $RC_DIR"; exit 1; fi
 ```
 
-After all suites complete, check the `gstack-evidence: recorded label=... exit=...
-log=...` summary lines — each carries the lane's exit code and a per-run log
-file (no shared /tmp collisions between concurrent ships). Read the log files
-for failure detail.
+The join prints one PASS/FAIL line per job. Any FAIL — including a job that reported no
+exit status — fails the gate; open that job's output file before anything else. test
+suites are also recorded in the evidence ledger (`gstack-evidence: recorded label=...
+exit=... log=...` summary lines, each with a per-run log path and no shared /tmp
+collisions between concurrent ships) so Step 16 can cite them; lint and typecheck stream
+to `$RC_DIR/lint.txt` and `$RC_DIR/typecheck.txt` (the gate prints `$RC_DIR` on its first
+line, and `exit 1`s on any FAIL). Read the log/output files for counts and detail.
+
+**If lint or typecheck fails:** fix in-branch findings now (or STOP if they can't be fixed
+cleanly). Never skip lint — a detected linter that errors is a gate failure, not a warning.
+Pre-existing violations untouched by this branch's diff may be TODOed rather than fixed, but
+say so explicitly.
 
 **If any test fails:** Do NOT immediately stop. Apply the Test Failure Ownership Triage:
 
@@ -1060,7 +1116,7 @@ Use AskUserQuestion:
 
 **After triage:** If any in-branch failures remain unfixed, **STOP**. Do not proceed. If all failures were pre-existing and handled (fixed, TODOed, assigned, or skipped), continue to Step 6.
 
-**If all pass:** Continue silently — just note the counts briefly.
+**If all pass:** Continue silently — just note the counts briefly (tests, lint, typecheck).
 
 ---
 
@@ -3133,6 +3189,11 @@ keeps its existing audit count; it does not authorize a third attempt.
 Commit only approved, verified release changes left uncommitted after Step 15,
 including generated outputs; use its grouping rules and never create an empty commit.
 Preserve unrelated user files.
+
+**Lint + typecheck have no evidence receipt.** If any code changed after Step 5,
+re-run the Step 5 lint and typecheck commands too — a review fix that breaks the
+types must not push. Paste the fresh one-line results; a failure uses stage 4's
+recovery like a test failure.
 
 Paste build/docs/test results. Reuse waivers only for the same verified
 pre-existing failures and approved scope; cite the actual approval and failing

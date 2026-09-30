@@ -26,6 +26,7 @@ export const ALL_MODEL_NAMES = [
   'gpt-5.6-sol',
   'gpt-6-astra',
   'gemini',
+  'grok',
   'o-series',
 ] as const;
 
@@ -73,6 +74,7 @@ export function resolveModel(input: string): Model | null {
   if (/^claude-sonnet-5(-|$)/.test(s)) return 'sonnet-5';
   if (/^claude(-|$)/.test(s)) return 'claude';
   if (/^gemini(-|$)/.test(s)) return 'gemini';
+  if (/^grok(-|$)/.test(s)) return 'grok';
 
   return null;
 }

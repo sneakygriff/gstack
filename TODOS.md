@@ -1,5 +1,73 @@
 # TODOS
 
+## Fork follow-ups (sneakygriff/gstack, from the v1.91.9.0 port)
+
+### Re-port the outside-voices panel into the carved /autoplan (M2)
+
+**What:** Wire `{{OUTSIDE_VOICES:variant=procedure}}` once plus a per-phase
+`{{OUTSIDE_VOICES:variant=invoke:surface=…}}` into upstream's carved autoplan
+phase sections (`autoplan/sections/{ceo,design,dx,eng}-phase.md.tmpl`), after each
+phase's harness-routed outside voice.
+
+**Why:** The v1.91.9.0 port layered the panel on every standalone review surface,
+but upstream rebuilt /autoplan (phase sections + manifest, handoff evidence,
+`{{OUTSIDE_PROVENANCE:autoplan}}`), so the fork's M2 template edits had nothing
+left to merge into. Until this lands, /autoplan runs upstream's reviewers only.
+
+**Context:** Both panel variants still render (`scripts/resolvers/outside-voices.ts`)
+and already pass `--skip-voices codex`. Register any new section in
+`autoplan/sections/manifest.json` and re-measure `test/helpers/carve-guards.ts`
+per the ratchet protocol.
+
+**Effort:** M
+
+**Also:** restore `test/outside-voices-autoplan.test.ts` from `skills/port-1.68.2`
+(removed in the port: it pinned the pre-carve autoplan template).
+
+### Move the /plan-design-review panel into a lazy carved section
+
+**What:** Render only the opt-in gate in the skeleton and move the panel recipe into
+`plan-design-review/sections/` (manifest entry + carve-guard floors), read only
+when the user answers A.
+
+**Why:** Upstream renders `{{DESIGN_OUTSIDE_VOICES}}` in the always-loaded skeleton,
+so the opt-in panel costs ~21KB (~5K tokens) on every invocation, even when the
+user declines it. Skeleton ceiling ratcheted 79,500 → 100,800 in the port.
+
+**Effort:** S
+
+### Paid canUseTool E2E for /plan-deliverables
+
+**What:** Add `test/skill-e2e-plan-deliverables*.test.ts` driving a real interactive
+session (`runPlanSkillObservation` or `canUseTool`), then drop its
+`FORK_PENDING_E2E` entry in `test/e2e-harness-audit.test.ts`.
+
+**Why:** Upstream's audit now discovers every `interactive: true` skill; the fork
+skill is exempted with a reason until this exists.
+
+**Effort:** S (paid to run)
+
+### outside-voices-redaction tests fail on Windows only
+
+**What:** 4 tests: `--redact-only` compares a `path.join` (backslash) payload path
+against the panel's `dir/panel.payload.txt`, and `panelParse` spawns `bun -e`
+directly, which returns empty output under Windows. Panel behaviour itself is
+correct there (a live run writes schema-valid records); the harness is not portable.
+
+**Effort:** S
+
+### Non-Claude IDE hosts: plan-review renders over the 160KB soft ceiling
+
+**What:** `gen:skill-docs --host all` warns for plan-eng-review on cursor, factory,
+kiro, opencode, slate and plan-ceo-review on kiro (these hosts inline sections, so
+the panel recipe lands in the same file). 14 other warnings are upstream's own.
+
+**Why:** Soft warning only; the Claude and Codex renders are unaffected. Decide
+whether the panel should render on hosts without an Agent tool (its fable/native
+Claude voices cannot dispatch there).
+
+**Effort:** S
+
 ## NEXT PRIORITY
 
 ### P2/P3: impeccable interop deferrals (filed 2026-09-08, from the CEO + eng reviews of docs/designs/IMPECCABLE_INTEROP.md)
@@ -3109,18 +3177,6 @@ Shipped: Default model changed to Sonnet for structure tests (~30), Opus retaine
 ### /plan-design-review + /qa-design-review + /design-consultation — SHIPPED
 
 Shipped as v0.5.0 on main. Includes `/plan-design-review` (report-only design audit), `/qa-design-review` (audit + fix loop), and `/design-consultation` (interactive DESIGN.md creation). `{{DESIGN_METHODOLOGY}}` resolver provides shared 80-item design audit checklist.
-
-### Design outside voices in /plan-eng-review
-
-**What:** Extend the parallel dual-voice pattern (Codex + Claude subagent) to /plan-eng-review's architecture review section.
-
-**Why:** The design beachhead (v0.11.3.0) proves cross-model consensus works for subjective reviews. Architecture reviews have similar subjectivity in tradeoff decisions.
-
-**Context:** Depends on learnings from the design beachhead. If the litmus scorecard format proves useful, adapt it for architecture dimensions (coupling, scaling, reversibility).
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** Design outside voices shipped (v0.11.3.0)
 
 ### Outside voices in /qa visual regression detection
 

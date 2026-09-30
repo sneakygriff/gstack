@@ -687,6 +687,9 @@ describe('derived touchfile closure', () => {
     'test/codex-e2e-recommendation-substance.test.ts': 'census-only Codex case; PERIODIC_CI_EXCLUDE (no codex CLI in CI)',
     'test/skill-e2e-auq-consistency.test.ts': 'periodic tier gate only (describeE2ETier), never diff-selected',
     'test/skill-e2e-auq-verbose-vs-carved-ab.test.ts': 'periodic tier gate only (describeE2ETier), never diff-selected',
+    // Fork: outside-voices panel canaries spawn the real codex/grok/gemini CLIs.
+    'test/outside-voices-reviewer-e2e.test.ts': 'fork panel canary; periodic tier gate only, never diff-selected',
+    'test/outside-voices-sandbox.test.ts': 'fork panel canary; periodic tier gate only, never diff-selected',
   };
 
   test('no free test file is a touchfile', () => {

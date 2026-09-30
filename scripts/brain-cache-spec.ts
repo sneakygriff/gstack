@@ -23,6 +23,8 @@ export interface BrainCacheEntity {
    * this list to know which cache files to bust. Special values:
    *   - 'calibration-write' — any Phase 2 takes_add call
    *   - 'skill-run-write'   — any skill that writes a gstack/skill-run page
+   *   - 'decision-write'    — any bin/gstack-decision-log write (decide,
+   *     supersede, redact, compact) to the project's local decisions ledger
    * Otherwise these are skill names like '/plan-ceo-review'.
    */
   invalidated_by: ReadonlyArray<string>;
@@ -35,7 +37,13 @@ export interface BrainCacheEntity {
  * `gstack-core` schema pack v1.0.0 (Phase 0):
  *   user-profile, product, goal, developer-persona, brand, competitive-intel, skill-run
  * Plus two derived digests:
- *   recent-decisions (top 5 gstack/skill-run pages)
+ *   recent-decisions — ledger-first: the top 5 `kind: "decide"` entries from the
+ *     project's local ledger (~/.gstack/projects/<slug>/decisions.active.json),
+ *     falling back to the top 5 gstack/skill-run pages only when that ledger is
+ *     absent/unreadable/empty. The two sources are not interchangeable (project
+ *     decisions vs. gstack skill-run history), so the digest header names which
+ *     one produced it. The ledger source is busted on write by
+ *     bin/gstack-decision-log; the skill-run source relies on TTL + skill-run-write.
  *   salience (mcp__gbrain__get_recent_salience output)
  */
 export const BRAIN_CACHE_ENTITIES: Record<string, BrainCacheEntity> = {
@@ -85,7 +93,7 @@ export const BRAIN_CACHE_ENTITIES: Record<string, BrainCacheEntity> = {
     file: 'recent-decisions.md',
     ttl_ms: 12 * 3_600_000,
     scope: 'per-project',
-    invalidated_by: ['skill-run-write'],
+    invalidated_by: ['skill-run-write', 'decision-write'],
     budget_bytes: 2048,
   },
   salience: {

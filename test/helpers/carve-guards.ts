@@ -166,7 +166,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // wave's headline capability) grows the union to 1.195x. Deliberate:
     // the section is on-demand (loads only for Apple store targets), so
     // per-invocation cost for non-iOS ships is one manifest line.
-    maxSizeRatio: 1.397, // Shared advisory identity/dedup + critical-severity validation: 248,065 union bytes / 187,706 baseline = 1.3216 (2026-09-17). + test value bar in the lazy Step 7 section (value cards, weak paths, gate table, base control, machine checks; ~13.6KB): measured 1.396 (2026-09-29).
+    maxSizeRatio: 1.539, // fork v1.91.9.0 port: layered outside-voices panel after the adversarial step + lint/typecheck gate; measured 1.534
   },
   'plan-ceo-review': {
     skill: 'plan-ceo-review',
@@ -184,12 +184,12 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // v1.65 merge: provisional larger-of-both-waves budget; re-measured below.
         // Fork port wave 2 (#703): the repo-doc-preference block in the design
     // check grew every plan-review skeleton ~0.7KB. Measured values noted.
-    maxSkeletonBytes: 80_150, // + depth-specific output and 0H/0I feasibility boundary clarity + the Aside probe's failure reason; measured 80,111.
+    maxSkeletonBytes: 80_500, // fork v1.91.9.0 port: + EXPLAIN_LEVEL terse notes, measured 80,337. Was 80_150: + depth-specific output and 0H/0I feasibility boundary clarity + the Aside probe's failure reason; measured 80,111.
     minUnionBytes: 123_600, // token-reduction Phases 1-2 (v1.69.x branch): preamble bash -> bin/gstack-skill-start, onboarding -> gated emission; measured union 137,346
     mustContain: ['SCOPE EXPANSION', 'SELECTIVE EXPANSION', 'HOLD SCOPE', 'SCOPE REDUCTION'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
     // prose replacing the smaller opt-in question) lands this ~5.2% over baseline.
-    maxSizeRatio: 1.081, // + the Aside probe's failure reason; measured 1.0803
+    maxSizeRatio: 1.215, // fork v1.91.9.0 port: layered outside-voices panel after the Outside Voice; measured 1.210
   },
   'plan-eng-review': {
     skill: 'plan-eng-review',
@@ -221,7 +221,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // 1.08 → 1.10: the scope-gate exceptions block (+ its adversarial-review
     // hardening: host-anchored mode signal, precedence, passing-mention
     // guards) and the plan-mode preamble reword land the union at 1.092.
-    maxSizeRatio: 1.169, // + clarity rules for saved decisions/setup gates + the Aside probe's failure reason; measured 1.1504. + test value bar and Tests to Retire in the lazy Test review section (~2.6KB); measured 1.168
+    maxSizeRatio: 1.35, // fork v1.91.9.0 port: layered outside-voices panel + /plan-deliverables route; measured 1.345
   },
   'plan-design-review': {
     skill: 'plan-design-review',
@@ -243,10 +243,10 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // tier-2+ skeleton (measured 89,184). Main's v1.64.0.0 adds ~340 B more
     // (telemetry --error-message/--failed-step preamble prose, PR #769).
     // Budget covers the sum of both waves.
-    maxSkeletonBytes: 79_500, // Harness-aware outside voice: validated dispatch and provenance.
+    maxSkeletonBytes: 100_800, // fork v1.91.9.0 port: + opt-in outside-voices panel rendered in the skeleton (DESIGN_OUTSIDE_VOICES), measured 100,584; lazy-section move tracked in TODOS.md. Was 79_500: Harness-aware outside voice: validated dispatch and provenance.
     minUnionBytes: 99_200, // token-reduction Phases 1-2 (v1.69.x branch); measured union 110,293
     mustContain: ['design', 'visual'],
-    maxSizeRatio: 1.12, // D1 1.104 + main's ~0.008
+    maxSizeRatio: 1.188, // fork v1.91.9.0 port: layered outside-voices panel (opt-in) after the design voices; measured 1.183
   },
   'plan-devex-review': {
     skill: 'plan-devex-review',
@@ -272,7 +272,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     mustContain: ['developer experience', 'Getting Started'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
     // prose replacing the smaller opt-in question) lands this ~5.7% over baseline.
-    maxSizeRatio: 1.08,
+    maxSizeRatio: 1.225, // fork v1.91.9.0 port: layered outside-voices panel after the Outside Voice; measured 1.220
   },
   'office-hours': {
     skill: 'office-hours',
@@ -481,7 +481,7 @@ do not launch the downstream skill or open a browser.`,
     maxSkeletonBytes: 74_600, // Shared-code identity/skip/action rules + critical-severity validation; measured 74,493 (2026-09-17).
     minUnionBytes: 89_000, // Phase 4 wave 1; measured union 93,357
     mustContain: ['confidence', 'P1', 'P2', 'Review Army', 'adversarial'],
-    maxSizeRatio: 1.18, // Shared-code feature + critical-severity validation: 128,042 union bytes / 108,523 baseline = 1.1799; preserves content floors.
+    maxSizeRatio: 1.372, // fork v1.91.9.0 port: layered outside-voices panel after the adversarial step; measured 1.367
   },
   codex: {
     skill: 'codex',
@@ -664,7 +664,7 @@ do not launch the downstream skill or open a browser.`,
     },
     behavioral: 'prompt',
     maxSkeletonBytes: 63_500, // + v2.0 {{ASIDE_SETUP}}/{{BROWSE_FALLBACK}} (replaces the browse setup block); measured 61_253
-    maxSizeRatio: 1.095, // + v1.81 Aside contract + gstack-browser fallback block (1.080 on v1.91.7.0) + the shared test value bar at 8a.5 ({{TEST_VALUE_BAR:qa}}); measured 1.094
+    maxSizeRatio: 1.101, // fork v1.91.9.0 port: EXPLAIN_LEVEL terse skip notes on three preamble headings (+212 B); measured 1.096
     minUnionBytes: 69_500, // measured union 70,385
     // 'aside repl' pins the Aside contract; '$B goto' pins the fallback block in the always-loaded skeleton.
     mustContain: ['bug', 'aside repl', '$B goto', 'fix', 'Health Score Rubric', 'regression'],

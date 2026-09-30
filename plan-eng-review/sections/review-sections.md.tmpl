@@ -434,6 +434,8 @@ Evaluate:
 
 Finish the Outside Voice branch. Only completed reviews enter Cross-model tension. Record the actual coverage, including disabled or unavailable outcomes, in the Completion summary, then continue below.
 
+{{OUTSIDE_VOICES:surface=eng}}
+
 ## Final planning decisions
 
 After Sections 1–4 and Outside Voice, resolve the TODO choices, then check Approval readiness before Required outputs.
@@ -579,7 +581,10 @@ In finish step 5, offer applicable routes from the published dashboard:
   interactions in the diagram/findings).
 - **B) Run /plan-ceo-review:** optionally, an unreviewed significant product change
   (new user-facing features, changed direction or substantial scope expansion).
-- **C) Ready to implement — run /ship when done**
+- **C) Run /plan-deliverables:** the design doc has no `## Acceptance Criteria &
+  Deliverables` section yet — author measurable per-milestone criteria + paired
+  tests before implementation (or before `/autobuilder-loop`). Soft suggestion.
+- **D) Ready to implement — run /ship when done**
 
 Flag stale CEO/design reviews from contradictory assumptions or significant commit
 drift. If no further review is needed or `skip_eng_review: true`, state

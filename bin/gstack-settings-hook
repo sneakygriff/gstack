@@ -741,7 +741,7 @@ case "$ACTION" in
     # re-points, and uninstall must not depend on a sibling gstack-config.
     if [ -z "$PRUNE_ALL" ]; then
       _CFG_BIN="$(cd "$(dirname "$0")" && pwd)/gstack-config"
-      if [ -x "$_CFG_BIN" ] && "$_CFG_BIN" has plan_tune_hooks 2>/dev/null; then
+      if [ -x "$_CFG_BIN" ] && "$_CFG_BIN" has plan_tune_hooks >/dev/null 2>&1; then
         _PT_VAL=$("$_CFG_BIN" get plan_tune_hooks 2>/dev/null || true)
         _PT_VAL=$(printf '%s' "$_PT_VAL" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         case "$_PT_VAL" in

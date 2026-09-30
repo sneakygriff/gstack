@@ -1,7 +1,7 @@
 ---
 name: ship
 preamble-tier: 4
-version: 1.0.0
+version: 1.1.0
 description: |
   Ship workflow: detect + merge base branch, run tests, review diff, bump VERSION,
   update CHANGELOG, commit, push, create PR. Use when asked to "ship", "deploy",
@@ -471,6 +471,11 @@ keeps its existing audit count; it does not authorize a third attempt.
 Commit only approved, verified release changes left uncommitted after Step 15,
 including generated outputs; use its grouping rules and never create an empty commit.
 Preserve unrelated user files.
+
+**Lint + typecheck have no evidence receipt.** If any code changed after Step 5,
+re-run the Step 5 lint and typecheck commands too — a review fix that breaks the
+types must not push. Paste the fresh one-line results; a failure uses stage 4's
+recovery like a test failure.
 
 Paste build/docs/test results. Reuse waivers only for the same verified
 pre-existing failures and approved scope; cite the actual approval and failing

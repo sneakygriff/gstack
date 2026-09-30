@@ -1,5 +1,233 @@
 # Changelog
 
+## [Unreleased — fork: port onto upstream v1.91.9.0] - 2026-09-30
+
+Re-port of the fork (`skills/port-1.68.2`, 12 commits) onto upstream v1.91.9.0 via
+"port final state + regenerate". History stays on `skills/port-1.68.2`; the
+pre-port install is pinned at `backup/installed-v1.68.2`.
+
+### Kept
+- `/autobuilder-loop` and `/plan-deliverables` (fork-only; upstream declined new
+  standalone skills in #2276). Re-rendered against the v1.91.9 preamble, which also
+  fixes installed copies that pointed at fork-only preamble files missing from the
+  runtime. Routes kept: root router, `/office-hours` handoff, `/plan-eng-review`
+  option C.
+- Ship Step-5 lint + typecheck fail-closed gate (`bin/gstack-lint-touched`, per-run
+  `mktemp` gate dir, explicit `exit 1`), plus a Step-16 rule: lint/typecheck have no
+  evidence receipt, so they re-run when code changed after Step 5.
+- `gstack-config`: paid-switch alias normalization on get and set (F3), panel keys,
+  `panel_budget_usd` reject-on-invalid, `fable_reviews` warn-and-default.
+- Brain-cache ledger-first `recent-decisions` digests + decision-write invalidation.
+- `EXPLAIN_LEVEL: terse` skip notes (upstream still echoes EXPLAIN_LEVEL).
+- Windows memory-ingest fixes: backslash-aware project slug (upstream still
+  forward-slash only, so every Windows project landed in `_unattributed`) and a
+  loud STAGING COLLISION warning. The frontmatter-fence fix is dropped: upstream
+  fixed it independently.
+- Brain-sync hardening, re-ported into upstream's `bin/gstack-skill-start`: F5
+  `artifacts_sync_mode` allowlist before the agent-read status line; remote-URL
+  control-char strip + 120-char cap; F4 a failed daily fetch backs off 1h instead
+  of stamping a silent 24h cooldown (bounded, so an unreachable remote cannot
+  stall every skill start).
+
+### Changed: outside-voices panel is layered, not a replacement
+- Upstream v1.86 routes the primary outside reviewer by harness and pins it with
+  its own tests, provenance records and autoplan handoffs. The panel now renders
+  AFTER that step on /plan-ceo-review, /plan-eng-review, /plan-devex-review,
+  /review, /ship, /design-review and /plan-design-review (opt-in there).
+- `gstack-panel --skip-voices <csv>`: records voices the primary step already ran
+  as `ABSENT(covered-by-primary)` before any config read, receipt or spawn. The
+  recipe passes `--skip-voices codex`; default panel roster is fable + native
+  Claude, grok/gemini still default-off.
+- Upstream's `review.ts` / `design.ts` stay byte-identical: `ADVERSARIAL_STEP` and
+  `DESIGN_OUTSIDE_VOICES` map to layered wrappers in `outside-voices.ts`.
+- `OUTSIDE_VOICES` joins `CROSS_MODEL_RESOLVERS`, so OpenClaw/Hermes/GBrain hosts
+  suppress the panel like every other cross-model resolver.
+- /autoplan's section skip list gains the panel heading, so loading a plan review
+  at phase entry never runs the full interactive panel inside every phase. The
+  same list's `Design Outside Voices (parallel)` entry had drifted from upstream's
+  renamed `(independent)` heading (upstream bug: /autoplan ran design outside
+  voices on top of its own); fixed here and pinned by the fork's anti-drift test.
+
+### Fixed for upstream's newer rules
+- `/autobuilder-loop` states the `run_in_background: false` default at its dispatch
+  template (#2440 scanner).
+- `/plan-deliverables` is `interactive: true`; upstream's E2E audit now discovers
+  every such skill, so it carries a declared, reasoned exemption until its paid
+  canUseTool E2E exists (TODOS.md).
+- Panel canaries stay classified as paid (`PAID_TEST_GLOBS`, `KEYLESS_PAID`);
+  paid-retry pins re-measured (periodic cases 71 → 73, release floor 37,727 → 39,617).
+
+### Budgets (measured, upstream ratchet protocol)
+- Catalog 1,194 → 1,295 token-equivalents (+401 bytes: the two fork skills).
+- Context budget: new ceilings for the two fork skills; design-review and
+  plan-design-review raised (the panel renders in their eager SKILL.md, ~+5K tokens).
+  Every other ceiling stays at upstream's value.
+- Parity caps for ship, review, the four plan reviews (panel) and qa
+  (EXPLAIN_LEVEL notes), each at measured + 0.005. Ship goldens re-blessed.
+
+### Dropped as superseded upstream
+- #48 shared-preamble carve (`preamble/sections/*`, `carved-sections.ts`,
+  `bin/gstack-artifacts-preamble` twin): upstream v1.71 moved the preamble into
+  `bin/gstack-skill-start` with gated onboarding and on-demand AUQ rules.
+- Lazy per-phase review-skill loading in /autoplan (upstream does it natively).
+- First-run telemetry-off guard (`gstack-telemetry-log` no-ops when off).
+- `skill-check` Claude-skipped-skill handling (upstream's checker passes natively).
+- Coverage-matrix entries (upstream deleted the matrix: nothing read it).
+
+### Deferred
+- Panel inside /autoplan (M2): upstream rebuilt autoplan into carved phase sections
+  with handoff evidence; /autoplan runs upstream's reviewers only until the panel
+  is re-ported onto that structure (see TODOS.md).
+
+## [Unreleased — fork: outside-voices panel M3] - 2026-08-31
+
+**Every review surface now gets the cross-vendor advisory panel:
+/review and /ship's adversarial passes and both design reviews run the
+same independent N-voice second opinions that plan reviews got in
+M1/M2, and the ship dashboard shows the per-voice consensus. Still
+advisory-only — the panel can never block a ship.**
+
+Fork-local milestone (feat/outside-voices-panel, M3 of 3 — final) on
+top of the ported upstream v1.68.2.0 — VERSION deliberately unchanged:
+this fork tracks upstream release numbers, so fork work ships as
+CHANGELOG entries, not version bumps.
+
+### Added
+- `/review` Step 5.7 and `/ship` Step 11 adversarial passes now
+  delegate to the shared outside-voices panel
+  (`generateOutsideVoices(surface=review)`); the codex
+  `review --base` structured [P1] gate and its persist are kept
+  unchanged.
+- Design surfaces wired to the panel
+  (`generateOutsideVoices(surface=design)`): `/plan-design-review`
+  keeps its opt-in AskUserQuestion, `/design-review` runs the panel
+  automatically with its own `/design-review` label and live-QA
+  target; `/design-consultation` is untouched.
+- Aggregate `outside-voices` review-log record: per-voice verdicts,
+  the vendor-median recommendation, and cost (from
+  `gstack-vote --json`; honest `cost_usd: null` when the tally has no
+  cost field). The ship Review Readiness Dashboard renders it as an
+  N-voice Outside Voice row with per-voice sub-lines, with a legacy
+  `codex-plan-review` fallback so pre-M3 logs never blank the row —
+  resolving the M2-deferred dashboard/log-identity follow-up.
+- Runtime host self-exclusion generalized to grok (`GROK_AGENT="1"`)
+  and gemini (`GEMINI_CLI="1"`) in `bin/gstack-panel` — a voice never
+  reviews its own vendor's work, mirroring the under-codex guard, with
+  exact-match sentinels on all three.
+- Regression pins: review/ship non-blocking consent shape AND the
+  interactive plan-review consent gate (both revert-verified); the
+  design-review label + target; autobuilder forum-divergence (the
+  union-FAIL forum is not the panel tally); grok/gemini reviewer e2e
+  (gated, skip-if-CLI-missing).
+
+### Changed
+- Surface-aware egress consent: on the review/ship surfaces a vendor
+  without prior consent fails CLOSED and NON-BLOCKING (voice ABSENT,
+  step continues — no AskUserQuestion wait), preserving those steps'
+  non-blocking contract in CI and autobuilder gates; interactive
+  ceo/eng/devex and plan-design-review keep the ask-once consent path
+  byte-identical.
+- `land-and-deploy` readiness now reads the aggregate `outside-voices`
+  record (legacy fallback retained); the dashboard reader handles the
+  `"none"` recommendation sentinel with the degraded tally status
+  instead of a bare "none".
+- The old Claude-subagent + codex-exec adversarial blocks are deleted
+  from the review recipe; the `CODEX_PLAN_REVIEW` resolver alias is
+  dropped.
+- Measured parity re-caps for the M3 growth (review 1.17, autoplan
+  1.22, plan-ceo-review 1.11, plan-design-review 1.16,
+  plan-devex-review 1.13); ship golden fixtures re-captured; parity
+  13/13.
+
+## [Unreleased — fork: outside-voices panel M2] - 2026-08-31
+
+**/autoplan's four plan-review phases now run the full cross-vendor
+advisory panel instead of a single codex second opinion — the same
+independent voices in every phase, still advisory-only: findings feed
+the 6-principle auto-decisions as input and can never become a gate.**
+
+Fork-local milestone (feat/outside-voices-panel, M2 of 3) on top of the
+ported upstream v1.68.2.0 — VERSION deliberately unchanged: this fork
+tracks upstream release numbers, so fork work ships as CHANGELOG
+entries, not version bumps.
+
+### Added
+- `{{OUTSIDE_VOICES}}` autoplan wiring: `variant=` and `carry=` resolver
+  args render the panel procedure once plus one invoke stanza per review
+  phase, each with per-phase carry context. Args are additive and opt-in
+  — M1 ceo/eng/devex plan-review outputs stay byte-identical.
+- Gen-time validation: an invalid or empty `variant=`/`carry=` arg now
+  fails `gen:skill-docs` loudly instead of silently falling back.
+- Offline-testable e2e evidence engine (`computeAutoplanPanelEvidence`):
+  panel execution only counts on a real `gstack-panel`/`gstack-vote`
+  invocation (executable allowlist parses the Bash command's actual
+  binary); raw SKILL.md reads (cat/grep/head/tail/less/sed/awk/rg/nl/
+  more/bat) never count as evidence. Plus a renderFullRecipe ↔
+  renderProcedure security-mechanic sync test, a codex-host-absence
+  regression pin, and recipe-invariant suites.
+
+### Changed
+- autoplan's 4 inline dual-voice codex blocks replaced by the shared
+  panel; the orphaned Phase-0.5 codex preflight and Filesystem-Boundary
+  block removed; panel findings routed as non-binding advisory input
+  (no new human gate).
+- carryContext now renders inside the nonce-fenced UNTRUSTED region
+  instead of being appended to the trusted prompt.
+- Vendor egress consent is a third never-auto-decided gate: it fails
+  closed in spawned/auto-choose sessions (vendor stays ABSENT, never
+  auto-granted); interactive sessions ask once and remember across
+  phases.
+- Honest codex-host roster: fable and native-Claude voices are marked
+  explicitly ABSENT on the Codex host (no Agent-tool transport) rather
+  than fabricated via self-review; only grok/gemini dispatch there and
+  codex stays host-excluded.
+- Autoplan parity cap raised 1.09 → 1.18 (measured ratio 1.1755) to
+  accept the deliberate growth; the 1.50x product cap is unchanged.
+
+## [Unreleased — fork: outside-voices panel M1] - 2026-08-30
+
+**Every plan review now gets a cross-vendor advisory panel: independent second
+opinions from other AI systems, tabulated into one recommendation that can
+never block — the user still decides.**
+
+Fork-local milestone (feat/outside-voices-panel, M1 of 3) on top of the ported
+upstream v1.68.2.0 — VERSION deliberately unchanged: this fork tracks upstream
+release numbers, so fork work ships as CHANGELOG entries, not version bumps.
+
+### Added
+- `bin/gstack-panel` — the invocation primitive for external CLI voices
+  (codex/grok/gemini): sequential-foreground, per-voice 540s timeout ladder
+  bounded by the remaining wall-clock, one `<voice>.result.json` per voice on
+  every path, `--collect` salvage, `--redact-only`, and the full per-voice
+  security pipeline (kill-switches, auth preflight, under-codex guard,
+  first-use per-vendor egress consent, redaction gate, fail-closed egress
+  receipts, read-only sandboxes, `panel_budget_usd` projection).
+- `bin/gstack-vote` — the ONLY tabulation path: filename-bound attribution
+  (only canonical `<voice>.result.json` basenames, each voice at most once),
+  mandatory per-run nonce authentication (an un-nonced ready verdict is
+  demoted, fail-closed), repo-aware finding-location resolution, and the
+  per-voice consensus table (vendor-collapsed median, dissents, appendix).
+- `lib/outside-voices/{registry,vote}.ts` — voice registry with mandatory
+  security fields per adapter, the strict `parseVoiceResult` (schema/enum/
+  size/nonce/spoof validation), and `tallyVoices()` per the design's §5
+  truth table.
+- `{{OUTSIDE_VOICES}}` resolver wired into the ceo/eng/devex plan reviews
+  (replaces the codex-only `{{CODEX_PLAN_REVIEW}}` block) — panel runs
+  default-on as a standard, advisory, non-blocking step.
+- Config keys: `gemini_reviews`, `fable_reviews` (free), `panel_budget_usd`
+  (fail-closed on present-but-empty), `grok_reviews_consent`,
+  `gemini_reviews_consent`; `gstack-config has` now prints the raw stored
+  value for provenance-aware callers.
+- Security/invariant test suites (+~1,000 assertions): nonce, redaction,
+  egress-receipt, sandbox-canary (periodic tier), budget, consent, vote
+  truth-table, and ship-review regression pins.
+
+### Changed
+- Roster safe-default: `grok_reviews`/`gemini_reviews` ship **disabled**
+  (design said all-four-on) until each CLI passes a live write-denial canary
+  — grok's sandbox did not deny writes live; gemini is auth-blocked.
+- gemini sandbox pinned to `--approval-mode plan` (`-s read-only` is invalid
+  against the real CLI).
 ## [1.91.9.0] - 2026-09-29
 
 Every gstack workflow that proposes, writes, reviews or ships tests now applies one test value bar: a test earns its place by protecting behavior a real regression would break, and test count is not a goal. `/ship`'s coverage gate counts only tests that clear that bar, and the new `/test-audit` sweeps existing tests for ones that cost more than they protect.
