@@ -100,18 +100,21 @@ defeats routing entirely.
 
 Shorthand used below: **"Opus 4.8-max"** = `claude-opus-4-8` at maximum effort (`effort:
 max`/`xhigh` where the runtime exposes it, else `high`) — the ORCHESTRATION floor.
-**"Opus 5-max"** = `claude-opus-5` at maximum effort — the COMPLEX-IMPLEMENTATION tier.
-These are two different models with two different jobs and they never swap: Fable (else
-Opus 4.8-max) orchestrates, synthesizes, and consolidates; **Opus 5 NEVER orchestrates** —
-it is the heavy coding workhorse only. Where a host only exposes the bare `opus` alias,
+**"Opus 5-max"** = `claude-opus-5` or `claude-opus-5-5` at maximum effort — the
+COMPLEX-IMPLEMENTATION tier. Fable (`claude-fable-5-1`), Opus 4.8-max, and **Opus 5.5
+(`claude-opus-5-5`) may orchestrate**, synthesize, and consolidate — top-level session,
+milestone decomposition, eng-review / review synthesis, forum-findings consolidation
+(operator amendment 2026-10-01). Opus 5.5 is also a valid complex-coding tier. **Earlier Opus 5
+builds (`claude-opus-5` and any Opus 5 id other than 5.5) NEVER orchestrate** — they are the
+heavy coding workhorse only. Where a host only exposes the bare `opus` alias,
 resolve which model it maps to (see the probe below) before using it for orchestration.
 
 | Task | Route to | Dispatch recipe |
 |---|---|---|
-| Milestone orchestration + code-review synthesis + forum-findings consolidation | **Fable** if the loop-start probe confirmed it, else **Opus 4.8-max** — NEVER Opus 5 | Agent tool, `model: fable` (or explicit `claude-opus-4-8`). Report the fallback in the envelope. |
-| Adversarial / independent second-opinion review | **Codex (`gpt-5.6-sol`) + Grok (CLI default = latest)** via CLI — a cross-model forum, each on a `high` → `medium`-on-timeout effort ladder. Findings loop BACK to the Fable/Opus 4.8 synthesis tier for consolidation — the forum never self-consolidates. | Each CLI runs inside its OWN Haiku (or Sonnet-low) subagent's Bash — NOT emulated by a Claude subagent, and never a Task/Agent that role-plays them. See the adversarial-forum recipe in Quick reference. |
+| Milestone orchestration + code-review synthesis + forum-findings consolidation | **Fable** if the loop-start probe confirmed it, else **Opus 4.8-max** (or **Opus 5.5**) — NEVER an earlier Opus 5 build | Agent tool, `model: fable` (or explicit `claude-opus-4-8` / `claude-opus-5-5`). Report the fallback in the envelope. |
+| Adversarial / independent second-opinion review | **Codex (`gpt-5.6-sol`) + Grok (CLI default = latest)** via CLI — a cross-model forum, each on a `high` → `medium`-on-timeout effort ladder. Findings loop BACK to the Fable/Opus 4.8/Opus 5.5 synthesis tier for consolidation — the forum never self-consolidates. | Each CLI runs inside its OWN Haiku (or Sonnet-low) subagent's Bash — NOT emulated by a Claude subagent, and never a Task/Agent that role-plays them. See the adversarial-forum recipe in Quick reference. |
 | Basic / mechanical (boilerplate, renames, file moves, config, docs, run a known command) + utility subagents (scribe, parse, mark-complete, CLI wrappers) | **Haiku** (latest), else Sonnet-low where the host has no Haiku | Agent tool, `model: haiku` (fallback `model: sonnet`, lower effort). |
-| Coding — hard / complex / architectural | **Opus 5-max** | Agent tool, explicit `claude-opus-5` (or `model: opus` ONLY where the probe confirmed the alias maps to Opus 5), `effort: max` (or `high` where max/xhigh is not exposed). |
+| Coding — hard / complex / architectural | **Opus 5-max** | Agent tool, explicit `claude-opus-5` or `claude-opus-5-5` (or `model: opus` ONLY where the probe confirmed the alias maps to an Opus 5 model), `effort: max` (or `high` where max/xhigh is not exposed). |
 | Coding — moderate / localized | **Sonnet (latest)** | Agent tool, `model: sonnet`, higher effort. |
 
 `effort:` is not a documented gstack dispatch parameter on every host — if the runtime does
@@ -135,35 +138,40 @@ model id you are running as, nothing else." Inspect the returned id:
 - Envelope names a Fable model → cache "Fable available" for the whole run; route
   orchestration/synthesis to Fable.
 - Envelope names any other model (coercion) or the dispatch errors → cache "Fable
-  unavailable", route those tasks to **Opus 4.8-max** (explicit `claude-opus-4-8`), and print
+  unavailable", route those tasks to **Opus 4.8-max** (explicit `claude-opus-4-8`; `claude-opus-5-5`
+  is an equally legal orchestration route), and print
   one line: "Fable unavailable in this runtime (probe returned <id>); routing
   orchestration/synthesis to Opus 4.8 at max effort."
 
 **Resolve the bare `opus` alias in the same probe step** (one extra trivial probe, `model:
 opus`, same "return your literal model id" instruction) when you intend to use the alias at
-all: if it resolves to an Opus 5 model, the alias is legal ONLY for the complex-coding tier
-and NEVER for orchestration; if it resolves to Opus 4.8, the alias may serve as the
+all: if it resolves to Opus 5.5, the alias is legal for orchestration AND the complex-coding
+tier; if it resolves to an earlier Opus 5 build, the alias is legal ONLY for the complex-coding
+tier and NEVER for orchestration; if it resolves to Opus 4.8, the alias may serve as the
 orchestration floor AND as the coding tier's in-class fallback string (on alias-only hosts
 the post-probe alias IS the legal way to express `claude-opus-4-8` — for orchestration and
 coding-fallback alike). If the host accepts explicit model ids, skip the ambiguity entirely
-and pass `claude-opus-4-8` / `claude-opus-5` per the table. If neither Fable nor an Opus 4.8
-route exists for orchestration, STOP and surface it (`BLOCKED` / `NEEDS_CONTEXT`) — never
-quietly orchestrate on Opus 5 or drop below the Opus class.
+and pass `claude-opus-4-8` / `claude-opus-5` / `claude-opus-5-5` per the table. If no Fable,
+Opus 4.8, or Opus 5.5 route exists for orchestration, STOP and surface it (`BLOCKED` /
+`NEEDS_CONTEXT`) — never quietly orchestrate on an earlier Opus 5 build or drop below the
+Opus class.
 
 **Check YOURSELF too — the top-level session is the primary orchestrator.** The probes above
 govern subagent dispatches, but every routing, gating, and consolidation decision in this
 loop is made by YOU, the main session. At loop start, state the model you are running as (you
-know your own model id). Fable or Opus 4.8 → proceed. An Opus 5 model → STOP: tell the user
-"this session runs <id>; the loop's orchestration contract is Fable/Opus 4.8 — relaunch under
+know your own model id). Fable (`claude-fable-5-1`), Opus 4.8, or Opus 5.5 (`claude-opus-5-5`)
+→ proceed. An earlier Opus 5 build (e.g. `claude-opus-5`) → STOP: tell the user
+"this session runs <id>; the loop's orchestration contract is Fable/Opus 4.8/Opus 5.5 — relaunch under
 one of those (or explicitly waive this check to proceed anyway)" and wait. Any other model →
 same stop-and-ask. Never silently orchestrate a run from a model the routing table forbids
 for orchestration.
 
-**Fallback floor.** Orchestration/synthesis falls back only `fable → claude-opus-4-8`.
+**Fallback floor.** Orchestration/synthesis falls back only within the orchestration set
+(`fable → claude-opus-4-8`; `claude-opus-5-5` is equally legal).
 Hard / architectural / security-sensitive coding falls back only WITHIN the Opus class
-(`claude-opus-5 → claude-opus-4-8`) — and that fallback is legal ONLY when Opus 5 is actually
-unavailable: the dispatch errored, or the envelope's `actual_model` shows coercion away from
-`claude-opus-5`. Never invoke it for cost or speed. Neither tier may EVER silently degrade to
+(`claude-opus-5` / `claude-opus-5-5` → `claude-opus-4-8`) — and that fallback is legal ONLY when the
+requested Opus 5-family model is actually unavailable: the dispatch errored, or the envelope's
+`actual_model` shows coercion away from the requested id (`claude-opus-5` / `claude-opus-5-5`). Never invoke it for cost or speed. Neither tier may EVER silently degrade to
 Sonnet — model choice matters most for exactly this work. Sonnet is a legal target for hard
 work only with an explicit user waiver. Every dispatch envelope MUST report
 `{requested_model, actual_model, fallback_reason}` so any downgrade is visible and auditable
@@ -282,7 +290,7 @@ fall back to the first milestone with unmet acceptance criteria.
 run the step-f meter. At ≥ 4,000 LOC: checkpoint FIRST (step f), then start the milestone
 against the fresh base. Never begin a milestone that cannot plausibly finish inside the cap.
 
-**a. Decompose.** A **Fable-or-Opus-4.8-max** orchestrator subagent decomposes the milestone into
+**a. Decompose.** A **Fable / Opus-4.8-max / Opus-5.5** orchestrator subagent decomposes the milestone into
 tasks, classifies each by complexity (hard / moderate / mechanical), and returns the compact
 task plan: `{tasks[]: {id, summary, complexity, deps}}`.
 
@@ -325,7 +333,7 @@ review-specific methodology — the orchestrator never reads source, diffs, or l
 findings-only in its envelope; all fixes remain YOUR routed fix dispatches (the review skills'
 own fix/commit flows are skipped).
 
-1. **/plan-eng-review** on the milestone design/diff — a Fable-or-Opus-4.8-max subagent READS
+1. **/plan-eng-review** on the milestone design/diff — a Fable / Opus-4.8-max / Opus-5.5 subagent READS
    `~/.claude/skills/gstack/plan-eng-review/SKILL.md` from disk and follows the review
    methodology only. It must SKIP, in addition to the sections below, the **Scope gate** (its
    mandated first-tool-call AskUserQuestion — a subagent has no user channel and would halt),
@@ -337,7 +345,7 @@ own fix/commit flows are skipped).
    in the brief file. Auto-decision policy for anything the skill would ask the user: apply the
    recommended option; list genuine taste decisions in the envelope's `follow_ups` (do NOT
    block on them). It returns findings compact.
-2. **/review** (code review) on the diff — a Fable-or-Opus-4.8-max subagent (never Opus 5 — this is synthesis-tier work) reads
+2. **/review** (code review) on the diff — a Fable / Opus-4.8-max / Opus-5.5 subagent (never an earlier Opus 5 build — this is synthesis-tier work; Opus 5.5 is allowed) reads
    `~/.claude/skills/gstack/review/SKILL.md` from disk and runs the checklist passes against
    the diff. It must SKIP: the Preamble, Step 1 / branch + base-branch detect, the **Review
    Army dispatch** (the `REVIEW_ARMY` placeholder block — subagents cannot spawn subagents, so it would error or
@@ -355,8 +363,8 @@ own fix/commit flows are skipped).
    the gate stays satisfiable.
 
 Collect findings into a compact list — this consolidation is synthesis-tier work and happens
-on Fable/Opus 4.8 (that is YOU, whose model the loop-start self-check already verified; the
-forum members never self-consolidate, and Opus 5 never consolidates). Dispatch fix subagents
+on Fable/Opus 4.8/Opus 5.5 (that is YOU, whose model the loop-start self-check already verified; the
+forum members never self-consolidate, and earlier Opus 5 builds never consolidate). Dispatch fix subagents
 (routed by complexity) until the gate is clean, then re-run the gate. Log one review-log entry
 PER review (see Quick reference).
 
@@ -480,7 +488,7 @@ still "built — gate pending" per the deferral valve gets its covering gate run
 milestone complete (flip its `<!-- status: built-gate-pending -->` marker to `complete`)
 via the step-e subagent so it stops blocking step 2's completion check.
 
-**Run /ship the same way the gate runs its reviews:** dispatch a **Fable-or-Opus-4.8-max**
+**Run /ship the same way the gate runs its reviews:** dispatch a **Fable / Opus-4.8-max / Opus-5.5**
 subagent that READS `~/.claude/skills/gstack/ship/SKILL.md` from disk and executes the ship
 flow for this increment (ship's own checks and confirmations apply — this loop does not
 bypass them), returning `{commit, pr_url, version}` in the envelope. The /ship checkpoint is
@@ -608,7 +616,7 @@ Docker run, or the user.
 ```
 Agent (subagent_type: general-purpose):
   description: "<one-line task>"
-  model: <fable|claude-opus-4-8|claude-opus-5|sonnet|haiku>   # REQUIRED — never omit; bare `opus` only after the alias probe
+  model: <fable|claude-opus-4-8|claude-opus-5|claude-opus-5-5|sonnet|haiku>   # REQUIRED — never omit; bare `opus` only after the alias probe
   run_in_background: <true|false> # true = parallel / long work
   prompt: |
     Read your brief first: <ABS_BRIEF_PATH>   # requirements live here, verbatim
@@ -856,8 +864,8 @@ never block the loop.
   a compact envelope.
 - **Route every dispatch.** Classify complexity first; emit `model:` every time. Probe Fable
   once at loop start; on unavailability route orchestration/synthesis to Opus 4.8-max
-  (explicit `claude-opus-4-8`) and say so. **Opus 5 codes, it never orchestrates**; Fable/
-  Opus 4.8 orchestrate and consolidate; Sonnet takes moderate work, Haiku the mechanical
+  (explicit `claude-opus-4-8`) and say so. **Earlier Opus 5 builds code, they never
+  orchestrate; Opus 5.5 may do both**; Fable/Opus 4.8/Opus 5.5 orchestrate and consolidate; Sonnet takes moderate work, Haiku the mechanical
   and utility work. Hard work never silently degrades below the Opus class.
 - **Ship in chunks — the 5k/4k rule.** Chunk the plan into ship-units of ≤5,000 LOC at
   resolution; meter the diff after every milestone (`SHIP_METER`); warn at 4,000 (current
