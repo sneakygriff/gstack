@@ -681,17 +681,20 @@ describe('Outside Voices — consent gate (_panel_consent_ok), executed against 
       spawnSync('bash', [CONFIG_BIN, 'set', 'redact_repo_visibility', visibility], {
         env: { ...process.env, GSTACK_STATE_ROOT: state },
         encoding: 'utf8',
+        timeout: 30_000,
       });
       if (consent !== undefined) {
         spawnSync('bash', [CONFIG_BIN, 'set', `${voice}_reviews_consent`, consent], {
           env: { ...process.env, GSTACK_STATE_ROOT: state },
           encoding: 'utf8',
+          timeout: 30_000,
         });
       }
       const script = `set +e\nCONFIG_BIN="${CONFIG_BIN}"\nVIS_CACHE=""\n${CONSENT_FNS}\n_panel_consent_ok "${voice}"\nexit $?\n`;
       const r = spawnSync('bash', ['-c', script], {
         env: { ...process.env, GSTACK_STATE_ROOT: state },
         encoding: 'utf8',
+        timeout: 30_000,
       });
       return r.status ?? -1;
     } finally {
@@ -1021,7 +1024,7 @@ echo "EST2:$est2"
 _panel_add_spend grok "$est2"
 echo "SPENT2:$SPENT_USD"
 `;
-      const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+      const r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 30_000 });
       expect(r.status, `extraction harness failed: ${r.stderr}`).toBe(0);
 
       const out = r.stdout ?? '';
@@ -1068,7 +1071,7 @@ describe('Outside Voices — budget cap validation fails closed on a malformed v
     const script = `set +e\n${VALIDATE_FN}\n_panel_validate_budget "$1"\n`;
     // Pass raw as a positional arg (not string-interpolated) so no quoting or
     // shell-injection can distort the input under test.
-    const r = spawnSync('bash', ['-c', script, 'bash', raw], { encoding: 'utf8' });
+    const r = spawnSync('bash', ['-c', script, 'bash', raw], { encoding: 'utf8', timeout: 30_000 });
     return (r.stdout ?? '').trim();
   }
 
@@ -1091,7 +1094,7 @@ describe('Outside Voices — budget cap validation fails closed on a malformed v
   test('a zero cap budget-caps a voice with a positive estimate — the fail-closed direction (real awk)', () => {
     const overFn = extractBashFunction(GSTACK_PANEL, '_panel_over_budget');
     const script = `set +e\n${overFn}\nSPENT_USD="0"\nBUDGET_USD="0"\nif _panel_over_budget "0.08"; then echo OVER; else echo OK; fi\n`;
-    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 30_000 });
     // est 0.08 > cap 0 → over budget → the voice (and every remaining one) is capped.
     expect((r.stdout ?? '').trim()).toBe('OVER');
   });
@@ -1158,7 +1161,7 @@ describe('Outside Voices — config-read failure fails closed (codex re-gate P1-
           '--budget-usd', '1.50',
           '--wall-clock-s', '560',
         ],
-        { cwd, encoding: 'utf8', env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` } },
+        { cwd, encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` } },
       );
 
       expect(r.status, `panel should exit 0 (advisory): ${r.stderr}`).toBe(0);
@@ -1234,6 +1237,7 @@ function makePanelHarness(stubs: Record<string, string>): {
       spawnSync('bash', [path.join(binDir, 'gstack-panel'), ...args], {
         cwd,
         encoding: 'utf8',
+        timeout: 60_000,
         env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, ...env },
       }),
     cleanup: () => {

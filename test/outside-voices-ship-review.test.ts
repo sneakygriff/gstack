@@ -49,7 +49,7 @@ afterAll(() => {
 });
 
 function runVote(args: string[]): { code: number; stdout: string; stderr: string } {
-  const r = Bun.spawnSync(['bun', VOTE_BIN, ...args], { stdout: 'pipe', stderr: 'pipe' });
+  const r = Bun.spawnSync(['bun', VOTE_BIN, ...args], { stdout: 'pipe', stderr: 'pipe', timeout: 30_000 });
   return { code: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
 }
 
@@ -178,6 +178,7 @@ describe('gstack-config has: real-binary provenance contract (round-5 budget dep
   function cfg(args: string[], stateRoot: string): { code: number; out: string; err: string } {
     const r = spawnSync('bash', [CONFIG_BIN, ...args], {
       encoding: 'utf-8',
+      timeout: 30_000,
       env: { ...process.env, GSTACK_STATE_ROOT: stateRoot },
     });
     return { code: r.status ?? -1, out: r.stdout ?? '', err: r.stderr ?? '' };

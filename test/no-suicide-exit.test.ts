@@ -53,7 +53,7 @@ test('no test file schedules a delayed process.exit (kills the whole bun test ru
   // Enumerate via git so vendored trees (node_modules, .git) are never
   // traversed — a repo-wide glob walk paid the node_modules directory scan
   // on every suite run just to filter matches afterwards.
-  const tracked = execFileSync('git', ['ls-files', '*.test.ts'], { cwd: repoRoot, encoding: 'utf-8' })
+  const tracked = execFileSync('git', ['ls-files', '*.test.ts'], { cwd: repoRoot, encoding: 'utf-8', timeout: 30_000 })
     .split('\n')
     .filter(Boolean);
   const violations: string[] = [];

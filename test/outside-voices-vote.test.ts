@@ -538,7 +538,7 @@ function writeResultFile(dir: string, voice: ResultVoice, result: VoiceResult, d
 const TABLE_NONCE = 'tbl-run-nonce-cafe';
 
 function runVote(args: string[]): { code: number; stdout: string; stderr: string } {
-  const proc = Bun.spawnSync(['bun', GSTACK_VOTE_BIN, ...args], { stdout: 'pipe', stderr: 'pipe' });
+  const proc = Bun.spawnSync(['bun', GSTACK_VOTE_BIN, ...args], { stdout: 'pipe', stderr: 'pipe', timeout: 30_000 });
   return { code: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
 }
 

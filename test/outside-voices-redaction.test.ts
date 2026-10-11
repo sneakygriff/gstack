@@ -63,7 +63,7 @@ beforeAll(() => {
   const r = spawnSync(
     'bash',
     [CONFIG_BIN, 'set', 'redact_repo_visibility', 'public'],
-    { encoding: 'utf8', env: { ...process.env, GSTACK_STATE_ROOT: STATE } },
+    { encoding: 'utf8', timeout: 30_000, env: { ...process.env, GSTACK_STATE_ROOT: STATE } },
   );
   if (r.status !== 0) {
     throw new Error(`setup: gstack-config set redact_repo_visibility failed: ${r.stderr}`);
@@ -79,7 +79,7 @@ function runRedactOnly(promptFile: string, outDir: string) {
   return spawnSync(
     'bash',
     [PANEL, '--redact-only', '--prompt-file', promptFile, '--out-dir', outDir],
-    { cwd: CWD, encoding: 'utf8', env: { ...process.env, GSTACK_STATE_ROOT: STATE } },
+    { cwd: CWD, encoding: 'utf8', timeout: 60_000, env: { ...process.env, GSTACK_STATE_ROOT: STATE } },
   );
 }
 
@@ -276,7 +276,7 @@ describe('gstack-panel — mandatory verdict nonce when wrapping untrusted conte
       '--out-dir', outDir,
     ];
     if (datamark !== undefined) args.push('--datamark', datamark);
-    return spawnSync('bash', args, { cwd: CWD, encoding: 'utf8', env: { ...process.env, GSTACK_STATE_ROOT: STATE } });
+    return spawnSync('bash', args, { cwd: CWD, encoding: 'utf8', timeout: 60_000, env: { ...process.env, GSTACK_STATE_ROOT: STATE } });
   }
 
   test('--untrusted-file WITHOUT --datamark: the panel mints a nonce, stamps the fences, and warns loudly', () => {
@@ -346,6 +346,7 @@ describe('gstack-panel — parse-time nonce authentication is mandatory (round-4
     const r = spawnSync('bun', ['-e', BUN_SCRIPT], {
       input: raw,
       encoding: 'utf8',
+      timeout: 60_000,
       env: {
         ...process.env,
         PANEL_REGISTRY: REGISTRY,

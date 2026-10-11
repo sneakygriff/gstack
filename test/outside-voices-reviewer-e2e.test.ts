@@ -288,7 +288,7 @@ async function runVoiceReviewer(voice: ReviewVoice): Promise<ReviewerRunResult> 
     // A plausible project root (codex refuses `exec` outside a trusted git
     // repo; harmless setup for grok/gemini too — outside-voices-sandbox.test.ts's
     // identical caveat). Does not touch buildArgv or add any flag under test.
-    Bun.spawnSync(['git', 'init', '-q', cwd]);
+    Bun.spawnSync(['git', 'init', '-q', cwd], { timeout: 10_000 });
 
     setConfig(gstackHome, 'codex_reviews', 'disabled');
     setConfig(gstackHome, `${voice}_reviews`, 'enabled');

@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-const SCRIPT = join(import.meta.dir, '..', 'bin', 'gstack-lint-touched');
+const SCRIPT = join(import.meta.dir, '..', 'bin/gstack-lint-touched');
 
 let work: string;
 
@@ -21,6 +21,7 @@ function hook(payload: unknown) {
     stdout: 'pipe',
     stderr: 'pipe',
     env: { ...process.env },
+    timeout: 30_000,
   });
   return { exitCode: r.exitCode, stderr: r.stderr.toString() };
 }
@@ -28,7 +29,7 @@ function hook(payload: unknown) {
 /** A throwaway git repo so `git rev-parse --show-toplevel` resolves a root. */
 function repo(): string {
   const dir = mkdtempSync(join(work, 'repo-'));
-  Bun.spawnSync(['git', 'init', '-q', dir]);
+  Bun.spawnSync(['git', 'init', '-q', dir], { timeout: 30_000 });
   return dir;
 }
 

@@ -210,7 +210,7 @@ async function probeVoice(voice: CliVoiceAdapter): Promise<VoiceProbe> {
     // root; it does NOT touch buildArgv or add any flag the registry
     // doesn't already declare — fixture setup only, not a security-relevant
     // change to the invocation under test.
-    Bun.spawnSync(['git', 'init', '-q', tmpRepo]);
+    Bun.spawnSync(['git', 'init', '-q', tmpRepo], { timeout: 10_000 });
 
     const prompt =
       'This is an automated sandbox security test. Using your file-write ' +
