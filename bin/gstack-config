@@ -183,6 +183,18 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 # gstack_contributor: false # true = file field reports when gstack misbehaves
 # skip_eng_review: false    # true = skip eng review gate in /ship (not recommended)
 #
+# ─── Autobuilder lanes (/autobuilder-loop, bin/gstack-lane) ──────────
+# claude_overflow_dir: $HOME/.claude-overflow
+#                           # CLAUDE_CONFIG_DIR of the SECOND Claude account (lane
+#                           #   L2). Log in once, interactively:
+#                           #   CLAUDE_CONFIG_DIR=<dir> claude  →  /login
+#                           #   Until then L2 is ABSENT and its work spills over.
+# autobuilder_max_parallel: 6
+#                           # Global cap on concurrent /autobuilder-loop worker
+#                           #   payloads (per-lane caps: L1/L2/L3 = 2, L4 = 1).
+#                           #   Integer 1..16; an invalid value is REJECTED
+#                           #   (existing value preserved).
+#
 # ─── Workspace-aware ship ────────────────────────────────────────────
 # workspace_root: $HOME/conductor/workspaces  # Where /ship looks for sibling
 #                           # Conductor worktrees when picking a VERSION slot.
@@ -223,6 +235,8 @@ lookup_default() {
     gstack_contributor) echo "false" ;;
     skip_eng_review) echo "false" ;;
     workspace_root) echo "$HOME/conductor/workspaces" ;;
+    claude_overflow_dir) echo "$HOME/.claude-overflow" ;; # L2 lane: CLAUDE_CONFIG_DIR of the second Claude account (bin/gstack-lane)
+    autobuilder_max_parallel) echo "6" ;; # global /autobuilder-loop worker cap — see set-side reject-on-invalid below
     cross_project_learnings) echo "" ;; # intentionally empty → unset triggers first-time prompt
     artifacts_sync_mode) echo "off" ;;
     artifacts_sync_mode_prompted) echo "false" ;;
@@ -551,9 +565,34 @@ case "${1:-}" in
     # treatment as the paid-call switches above: anything that is not a non-negative decimal
     # number (e.g. 1.50, 2, 0.75 — no leading '-', no scientific notation, digits required
     # before an optional '.') is REJECTED and the existing value is left unchanged.
+    # Numeric keys validate the WHOLE scalar: grep is line-oriented, so a value with an
+    # embedded newline (e.g. $'abc\n2') could match on its second line and then have its
+    # first line persisted by the head -1 below. Reject CR/LF outright, then match the
+    # entire string with bash [[ =~ ]] (anchors apply to the whole value).
+    case "$KEY" in
+      panel_budget_usd|autobuilder_max_parallel)
+        case "$VALUE" in
+          *$'\n'*|*$'\r'*)
+            echo "Error: $KEY must be a single-line value. Existing value left unchanged." >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
     if [ "$KEY" = "panel_budget_usd" ]; then
-      if ! printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+      if ! [[ "$VALUE" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         echo "Error: panel_budget_usd '$VALUE' not recognized. Must be a non-negative decimal number (e.g. 1.50). Existing value left unchanged." >&2
+        exit 1
+      fi
+    fi
+    # autobuilder_max_parallel: the global cap on concurrent /autobuilder-loop worker
+    # payloads. Same reject-on-invalid treatment as panel_budget_usd: a garbage value
+    # would either serialize the whole loop or fan out past what the accounts can
+    # carry, so anything that is not an integer in 1..16 (no sign, no leading zero)
+    # is REJECTED and the existing value is left unchanged.
+    if [ "$KEY" = "autobuilder_max_parallel" ]; then
+      if ! [[ "$VALUE" =~ ^[1-9][0-9]?$ ]] || [ "$VALUE" -gt 16 ]; then
+        echo "Error: autobuilder_max_parallel '$VALUE' not recognized. Must be an integer from 1 to 16. Existing value left unchanged." >&2
         exit 1
       fi
     fi
@@ -629,7 +668,8 @@ case "${1:-}" in
                grok_reviews_consent gemini_reviews_consent \
                gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted plan_tune_hooks \
-               timeline_stop_hook design_detector design_detector_install_prompted memorable_recall; do
+               timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
+               claude_overflow_dir autobuilder_max_parallel; do
       VALUE=$(read_config_value "$KEY" || true)
       SOURCE="default"
       if [ -n "$VALUE" ]; then
@@ -648,7 +688,8 @@ case "${1:-}" in
                grok_reviews_consent gemini_reviews_consent \
                gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted plan_tune_hooks \
-               timeline_stop_hook design_detector design_detector_install_prompted memorable_recall; do
+               timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
+               claude_overflow_dir autobuilder_max_parallel; do
       printf '  %-24s %s\n' "$KEY:" "$(lookup_default "$KEY")"
     done
     ;;

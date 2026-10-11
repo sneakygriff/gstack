@@ -223,3 +223,87 @@ describe('design_detector_install_prompted (true|false, rejecting validator)', (
     }
   });
 });
+
+describe('autobuilder lane keys (bin/gstack-lane, /autobuilder-loop v1.7.0)', () => {
+  // A fresh state dir per test: these keys are written, and the shared STATE above
+  // must not leak values between describe blocks.
+  const fresh = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-config-ab-'));
+    const env = { ...process.env, GSTACK_STATE_ROOT: dir, HOME: dir };
+    const run = (args: string[]) => {
+      const r = spawnSync('bash', [CONFIG_BIN, ...args], { encoding: 'utf-8', timeout: 30_000, env });
+      return { code: r.status ?? -1, out: r.stdout ?? '', err: r.stderr ?? '' };
+    };
+    return { dir, run };
+  };
+
+  test('claude_overflow_dir defaults to $HOME/.claude-overflow and round-trips a path', () => {
+    const { dir, run } = fresh();
+    try {
+      expect(run(['get', 'claude_overflow_dir'])).toMatchObject({ code: 0, out: `${dir}/.claude-overflow` });
+      expect(run(['set', 'claude_overflow_dir', '/srv/claude-two']).code).toBe(0);
+      expect(run(['get', 'claude_overflow_dir']).out).toBe('/srv/claude-two');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('autobuilder_max_parallel defaults to 6, accepts 1..16, and REJECTS anything else with the value preserved', () => {
+    const { dir, run } = fresh();
+    try {
+      expect(run(['get', 'autobuilder_max_parallel'])).toMatchObject({ code: 0, out: '6' });
+      for (const ok of ['1', '8', '16']) {
+        expect(run(['set', 'autobuilder_max_parallel', ok]).code).toBe(0);
+        expect(run(['get', 'autobuilder_max_parallel']).out).toBe(ok);
+      }
+      const file = path.join(dir, 'config.yaml');
+      const before = fs.readFileSync(file, 'utf-8');
+      // Multi-line values used to slip past the line-oriented grep (Astra P2): '99\n6'
+      // matched on its 2nd line and then persisted its 1st line, 99.
+      for (const bad of ['0', '17', '99', '-1', '6.5', 'six', '06', '1e1', ' 4', '99\n6', '6\n99', '6\r', '\n6']) {
+        const r = run(['set', 'autobuilder_max_parallel', bad]);
+        expect({ bad, code: r.code }).toEqual({ bad, code: 1 });
+        expect(r.err).toContain('Existing value left unchanged');
+      }
+      expect(fs.readFileSync(file, 'utf-8')).toBe(before);
+      expect(run(['get', 'autobuilder_max_parallel']).out).toBe('16');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('panel_budget_usd (the other numeric key) also rejects multi-line values whole', () => {
+    const { dir, run } = fresh();
+    try {
+      expect(run(['set', 'panel_budget_usd', '2.25']).code).toBe(0);
+      const before = fs.readFileSync(path.join(dir, 'config.yaml'), 'utf-8');
+      for (const bad of ['abc\n2', '2\nabc', '2.5\r', '1.50\n']) {
+        const r = run(['set', 'panel_budget_usd', bad]);
+        expect({ bad, code: r.code }).toEqual({ bad, code: 1 });
+        expect(r.err).toContain('Existing value left unchanged');
+      }
+      expect(fs.readFileSync(path.join(dir, 'config.yaml'), 'utf-8')).toBe(before);
+      expect(run(['get', 'panel_budget_usd']).out).toBe('2.25');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('both keys are enumerated by list/defaults and documented in the annotated header', () => {
+    const { dir, run } = fresh();
+    try {
+      for (const verb of ['list', 'defaults']) {
+        const r = run([verb]);
+        expect(r.code).toBe(0);
+        expect(r.out).toMatch(/autobuilder_max_parallel:\s+6/);
+        expect(r.out).toMatch(new RegExp(`claude_overflow_dir:\\s+${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/\\.claude-overflow`));
+      }
+      run(['set', 'telemetry', 'off']); // first set writes the header
+      const yaml = fs.readFileSync(path.join(dir, 'config.yaml'), 'utf-8');
+      expect(yaml).toContain('# claude_overflow_dir: $HOME/.claude-overflow');
+      expect(yaml).toContain('# autobuilder_max_parallel: 6');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -1,7 +1,7 @@
 ---
 name: autobuilder-loop
 preamble-tier: 3
-version: 1.6.1
+version: 1.7.0
 description: Use when asked to "autobuilder", "build loop", "auto-build", "keep building automatically", "drive the plan to completion", or "run the build loop" on an already-approved plan, spec, or backlog. (gstack)
 triggers:
   - autobuilder loop
@@ -480,11 +480,18 @@ Read/Write/Edit/Glob/Grep because you are physically not the worker. So:
 - **You NEVER read source, diffs, or logs into your own context.** To inspect anything,
   dispatch a subagent that returns a distilled summary. Not the file — the summary.
 - **You NEVER run the build yourself.** A subagent brings the stack up and reports back.
-- **Top-level `Bash` is limited to: the mandatory adversarial-forum review invocations (Codex +
-  Grok), `gstack-review-log` / telemetry, step 0's run-workspace setup, and the SHIP_METER
-  measurement (`git rev-parse` / `git diff --shortstat` / `git ls-files` — number-emitting
-  commands that carry no file content).** Every repo read, build, and file mutation happens
-  inside a subagent. You do not `cat`, `grep`, content-level `git diff`, or edit files from the
+- **You do no rote (class R) work** beyond ONE compact command with ≤ ~20 lines of output (e.g. a
+  `gstack-lane summary` line). File reads, suite runs, grep sweeps and verbatim relays of helper
+  lines go to an R Haiku subagent returning a ≤10-line envelope (file:line refs, counts, verbatim
+  failing names). Reviewer output is never "parsed" by Haiku: `gstack-lane adjudicate` decides a
+  seat; interpreting finding text is synthesis-tier work.
+- **Top-level `Bash` is limited to: `~/.claude/skills/gstack/bin/gstack-lane` (`probe` / `run`
+  / `summary` / `adjudicate` / `commit` / `worktree` — the external-lane launcher; the forum recipes
+  are built on it and only its one-line outputs enter your context, never a transcript),
+  `gstack-review-log` / telemetry, step 0's run-workspace setup, and the SHIP_METER measurement
+  (`git rev-parse` / `git diff --shortstat` / `git ls-files` — number-emitting commands that
+  carry no file content).** Every repo read, build, and file mutation happens inside a subagent
+  or an external lane. You do not `cat`, `grep`, content-level `git diff`, or edit files from the
   main session.
 - **Subagents return a COMPACT ENVELOPE, never raw output.** Requirements go OUT as an
   absolute brief-file path (authored by a scribe subagent, never by you); full reports come
@@ -502,98 +509,130 @@ never work from a fuzzy recollection that lets scope silently drift.
 
 ---
 
-## Model routing
+## Model routing — lanes + tiers
 
-Classify every unit of work BEFORE dispatch, then route it. Emit `model:` on EVERY
-dispatch — an omitted model silently inherits this session's most-expensive model and
-defeats routing entirely.
+Classify every unit of work BEFORE dispatch (class R or tier T0–T3), then route it to a lane. Emit `model:`
+on EVERY in-session dispatch — an omitted model silently inherits this session's most-expensive
+model and defeats routing entirely. Routing POLICY lives here; the MECHANICS (probing, bounded CLI
+launch, outcome classification, worktrees, commits) live in `~/.claude/skills/gstack/bin/gstack-lane`
+— call it, never re-implement it in Bash prose.
 
-Shorthand used below: **"Opus 4.8-max"** = `claude-opus-4-8` at maximum effort (`effort:
-max`/`xhigh` where the runtime exposes it, else `high`) — the ORCHESTRATION floor.
-**"Opus 5-max"** = `claude-opus-5` or `claude-opus-5-5` at maximum effort — the
-COMPLEX-IMPLEMENTATION tier. Fable (`claude-fable-5-1`), Opus 4.8-max, and **Opus 5.5
-(`claude-opus-5-5`) may orchestrate**, synthesize, and consolidate — top-level session,
-milestone decomposition, eng-review / review synthesis, forum-findings consolidation
-(operator amendment 2026-10-01). Opus 5.5 is also a valid complex-coding tier. **Earlier Opus 5
-builds (`claude-opus-5` and any Opus 5 id other than 5.5) NEVER orchestrate** — they are the
-heavy coding workhorse only. Where a host only exposes the bare `opus` alias,
-resolve which model it maps to (see the probe below) before using it for orchestration.
+**Lanes (execution accounts; `gstack-lane probe` writes their health to `$RUN_DIR/lanes.json`):**
 
-| Task | Route to | Dispatch recipe |
-|---|---|---|
-| Milestone orchestration + code-review synthesis + forum-findings consolidation | **Fable** if the loop-start probe confirmed it, else **Opus 4.8-max** (or **Opus 5.5**) — NEVER an earlier Opus 5 build | Agent tool, `model: fable` (or explicit `claude-opus-4-8` / `claude-opus-5-5`). Report the fallback in the envelope. |
-| Adversarial / independent second-opinion review | **Codex (`gpt-5.6-sol`) + Grok (CLI default = latest)** via CLI — a cross-model forum, each on a `high` → `medium`-on-timeout effort ladder. Findings loop BACK to the Fable/Opus 4.8/Opus 5.5 synthesis tier for consolidation — the forum never self-consolidates. | Each CLI runs inside its OWN Haiku (or Sonnet-low) subagent's Bash — NOT emulated by a Claude subagent, and never a Task/Agent that role-plays them. See the adversarial-forum recipe in Quick reference. |
-| Basic / mechanical (boilerplate, renames, file moves, config, docs, run a known command) + utility subagents (scribe, parse, mark-complete, CLI wrappers) | **Haiku** (latest), else Sonnet-low where the host has no Haiku | Agent tool, `model: haiku` (fallback `model: sonnet`, lower effort). |
-| Coding — hard / complex / architectural | **Opus 5-max** | Agent tool, explicit `claude-opus-5` or `claude-opus-5-5` (or `model: opus` ONLY where the probe confirmed the alias maps to an Opus 5 model), `effort: max` (or `high` where max/xhigh is not exposed). |
-| Coding — moderate / localized | **Sonnet (latest)** | Agent tool, `model: sonnet`, higher effort. |
+| Lane | Account / transport | Models | Role |
+|---|---|---|---|
+| **L0** root | this session | Fable 5.1 / Opus 5.5 / Opus 4.8 | Orchestration ONLY. Never implements. |
+| **L1** in-session | Agent tool (shares L0's quota) | `fable`, `claude-opus-5-5`, `claude-opus-4-8`, `sonnet`, `haiku` | Decomposition, synthesis, integration, Claude reviewer seat. Implements only as LAST spillover. |
+| **L2** Claude #2 | second Claude account: `CLAUDE_CONFIG_DIR=<claude_overflow_dir> claude -p`, hooks/MCP off, explicit `--tools` (review: Read/Grep/Glob, no Bash), inherited tokens unset | `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` — NEVER Fable (`claude -p` bills Fable to usage credits; the helper rejects it without `--allow-credit-billing`) | Primary for T3; spillover T0–T2; reviewer for Codex-authored work (adds QUOTA, not vendor diversity — L2 is still Claude). |
+| **L3** Codex | ChatGPT subscription, hermetic `CODEX_HOME` kept OUTSIDE the run tree (`${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/`, no MCP servers, config rewritten per use) | `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra` (quota-scarce: ~5–45 msgs/5h on Plus vs 15–160 for Sol — reserve for T3, debugging escalation, the T3/final gate) | Primary implementation pool T0–T2; gate-forum member. |
+| **L4** Grok | grok.com subscription — EVERY use (probe, review, impl) only when `grok_reviews=enabled` (bin default `disabled`; the helper refuses otherwise) | latest (helper resolves the CLI default and pins it), `grok-4.7-build-fast` | Gate-forum member (high); bounded-scope reviewer; T0/T1 spillover implementer only (NOT OS-contained; never on a secrets-bearing repo). |
 
-`effort:` is not a documented gstack dispatch parameter on every host — if the runtime does
-not accept it, drop the key and put the effort instruction ("work at maximum reasoning
-effort") in the prompt text instead.
+**Class R — rote / no-reasoning** (below T0): deterministic work with an exact success check and no
+judgment. Run a known command and report (test suites → pass/fail counts + failing test names,
+builds, `gen:skill-docs`, lint/format, `gstack-lane probe|summary`); read / grep / extract facts from
+files or logs with file:line refs; mechanical bookkeeping (`gstack-lane worktree add|rm|commit`,
+mark-complete, ledger/status updates, scribe briefs from content you already decided, relaying
+`gstack-lane adjudicate` / `summary` lines verbatim — never interpreting review text); verbatim
+edits whose exact text you dictate. Scope/LOC estimation, milestone splitting and marker-less
+next-milestone selection are judgment — orchestration class, never R.
 
-**Complexity classification (do this before every coding dispatch):** hard = new
-architecture, cross-cutting change, subtle concurrency/security, ambiguous requirements →
-Opus 5-max. Moderate = single module, clear spec, localized blast radius → Sonnet. Mechanical
-= the plan already contains the answer (transcription, rename, config) → Haiku (Sonnet low
-where Haiku is unavailable). When unsure between two tiers, pick the higher one — but still
-name it.
+**Tiers:** **T0** mechanical (the plan already contains the answer — transcription, rename, config,
+docs). **T1** standard (single module, clear spec, localized blast radius).
+**T2** complex (cross-module, concurrency, perf, refactor). **T3** critical (architecture, security
+boundary, migration, untrusted input). Unsure between two tiers → the higher one, named.
 
-**Fable availability — probe once at loop start, do not attempt-and-catch per dispatch.**
-Silent model coercion is common: many hosts accept an unknown `model:` string and quietly
-substitute the session default, so an attempt-and-catch never fires and the loop inherits
-the expensive model — the exact failure this skill forbids. Instead, at loop start dispatch
-one trivial probe subagent — `model: fable`, whose ONLY instruction is "Return the literal
-model id you are running as, nothing else." Inspect the returned id:
+**Routing (first available lane under its cap wins, in order):**
 
-- Envelope names a Fable model → cache "Fable available" for the whole run; route
-  orchestration/synthesis to Fable.
-- Envelope names any other model (coercion) or the dispatch errors → cache "Fable
-  unavailable", route those tasks to **Opus 4.8-max** (explicit `claude-opus-4-8`; `claude-opus-5-5`
-  is an equally legal orchestration route), and print
-  one line: "Fable unavailable in this runtime (probe returned <id>); routing
-  orchestration/synthesis to Opus 4.8 at max effort."
+| Work type | Primary | Spillover (in order) | Effort |
+|---|---|---|---|
+| **R** rote / no-reasoning | L1 Haiku 5.5 — `model: haiku` (read-only search: `subagent_type: Explore`) | L2 `claude-haiku-5-5 --effort low` → L3 `gpt-6-luna` → L4 `grok-4.7-build-fast` (low; pass `-m`); Sonnet-low ONLY on a host with no Haiku; never Sonnet/Opus/Fable/Sol/Astra | low |
+| Root orchestration | L0 | — | session |
+| Decomposition, synthesis, forum consolidation | L1 Fable | L1 Opus 5.5 / 4.8 → L2 Opus 5.5 | high/max |
+| **T0** | L3 `gpt-6-luna` | L2 Haiku → L1 Haiku (low) → L4 `grok-4.7-build-fast` (if `grok_reviews=enabled`) | low |
+| **T1** | L3 `gpt-6.1-sol` | L2 Sonnet → L4 latest grok (if enabled) → L1 Sonnet | medium (Grok high) |
+| **T2** | L3 `gpt-6.1-sol` | L2 Opus 5.5 → L1 Opus 5.5 | high |
+| **T3** | L2 Opus 5.5 | L3 `gpt-6-astra` → L1 Opus 5.5 → L1 Fable (escalation only) | high/xhigh (Astra xhigh) |
+| Test writing | the task's implementer | that TASK's tier row (never Sonnet for T2/T3) | by tier |
+| Debugging / root cause | L3 `gpt-6.1-sol` | L2 Opus 5.5 → L3 `gpt-6-astra` | high (Astra xhigh) |
+| Per-task review (T1+) | fresh context, OTHER vendor than the author | L2/L1 Claude ↔ L3 Sol; L4 for bounded scope (if enabled) | medium (T1) / high (T2+) |
+| Milestone gate forum | L3 `gpt-6.1-sol` + L4 grok + Claude eng-review//review | Astra substitutes Sol; a fresh Claude seat substitutes an ABSENT member | high → medium |
+| Gate for a milestone containing a T3 task, and the FINAL milestone | L3 **`gpt-6-astra`** + L4 grok + Claude (L2 Opus 5.5 or L1 Fable) | as above | high → medium |
+| Fix rounds | original author lane/model | same-tier other vendor → +1 tier after diagnosis | original tier |
+| Integration / merge conflicts | L1 Opus 5.5 (single integration owner) | L2 Opus 5.5 → L3 Sol | high |
 
-**Resolve the bare `opus` alias in the same probe step** (one extra trivial probe, `model:
-opus`, same "return your literal model id" instruction) when you intend to use the alias at
-all: if it resolves to Opus 5.5, the alias is legal for orchestration AND the complex-coding
-tier; if it resolves to an earlier Opus 5 build, the alias is legal ONLY for the complex-coding
-tier and NEVER for orchestration; if it resolves to Opus 4.8, the alias may serve as the
-orchestration floor AND as the coding tier's in-class fallback string (on alias-only hosts
-the post-probe alias IS the legal way to express `claude-opus-4-8` — for orchestration and
-coding-fallback alike). If the host accepts explicit model ids, skip the ambiguity entirely
-and pass `claude-opus-4-8` / `claude-opus-5` / `claude-opus-5-5` per the table. If no Fable,
-Opus 4.8, or Opus 5.5 route exists for orchestration, STOP and surface it (`BLOCKED` /
-`NEEDS_CONTEXT`) — never quietly orchestrate on an earlier Opus 5 build or drop below the
-Opus class.
+**Rules:**
+0. **Fable is an escalation, not a default implementer** — in-session (L1) only, after Opus 5.5 at
+   xhigh/max fell short, or for decomposition/synthesis (its first-choice role).
+1. **Never downgrade tier to spill.** Cross-vendor tier equivalents are legal (T2: Opus 5.5 ≡ Sol
+   high; T3: Opus 5.5/Fable ≡ Astra). Sonnet / Luna / Haiku are NEVER a T2/T3 fallback without an
+   explicit user waiver.
+2. **L1 reserve.** The orchestrator's own subscription implements only when L2/L3/L4 are all
+   cooling or absent for that tier. Before admitting new implementation work, reserve the next
+   gate's reviewer seats. **Exemption: R and T0 work on L1 Haiku** (≈1/40 of Opus 5.5 per token —
+   the operator wants small models used; the T0 row therefore keeps `L2 Haiku → L1 Haiku → L4`). R
+   workers have their own cap (default 4 concurrent), do NOT consume `autobuilder_max_parallel`
+   slots, and the heavy-check limits (≤2 focused + 1 full-suite) still bind R runs that execute test suites.
+3. **Reviewer diversity.** Fresh reviewer context + at least one OTHER-vendor assessment per T1+
+   task; T3 needs TWO other vendors — unless the operator waived the second seat at step 0 (then
+   T3 = Codex + a fresh Claude seat, gates `DEGRADED`, verdict ≤ `COMPLETE_UNVERIFIED`). L2 counts as
+   Claude (same vendor as L1). Diversity that no enabled, present vendor can supply → the task is
+   `BLOCKED` with that reason at once (never an indefinite PENDING — and never without the step-0
+   question having been asked); a gate missing a forum member is `DEGRADED`, never `CLEAN` (Quick reference).
+4. **No `ultra`, no nested delegation** (`codex … ultra`, grok subagents) unless the operator
+   budgets it.
+5. **No routine best-of-N.** For T3: two independent design analyses (different vendors) → ONE
+   implementation.
+6. **Escalate by diagnosis, not count.** Classify every failure (product / fixture / environment /
+   permission) before re-dispatch; switch vendor for a demonstrated reasoning failure; +1 tier only
+   after diagnosis. Existing caps stay: 2 failed re-dispatches → `BLOCKED`; >3 gate rounds → `BLOCKED`.
+7. **No escalation of R by retry.** A failed R task reports the failure verbatim (exit code + last
+   lines), never retried on a bigger model. If it needs judgment (ambiguous output, a decision),
+   re-classify it T0/T1 and route by that row.
 
-**Check YOURSELF too — the top-level session is the primary orchestrator.** The probes above
-govern subagent dispatches, but every routing, gating, and consolidation decision in this
-loop is made by YOU, the main session. At loop start, state the model you are running as (you
-know your own model id). Fable (`claude-fable-5-1`), Opus 4.8, or Opus 5.5 (`claude-opus-5-5`)
-→ proceed. An earlier Opus 5 build (e.g. `claude-opus-5`) → STOP: tell the user
-"this session runs <id>; the loop's orchestration contract is Fable/Opus 4.8/Opus 5.5 — relaunch under
-one of those (or explicitly waive this check to proceed anyway)" and wait. Any other model →
-same stop-and-ask. Never silently orchestrate a run from a model the routing table forbids
-for orchestration.
+`effort:` is not a documented dispatch parameter on every host — if the runtime does not accept
+it, drop the key and put the effort instruction ("work at maximum reasoning effort") in the prompt.
+This skill explicitly authorizes setting `effort: "low"` on R dispatches.
+
+**Orchestration class.** Fable (`claude-fable-5-1`), **Opus 4.8-max** (`claude-opus-4-8` at
+`max`/`xhigh` where exposed, else `high` — the orchestration floor) and **Opus 5.5**
+(`claude-opus-5-5`) may orchestrate, decompose, synthesize and consolidate. **Earlier Opus 5 builds
+(`claude-opus-5`, any Opus 5 id other than 5.5) NEVER orchestrate** — T2/T3 coding only.
+
+**Fable availability — probe once at loop start, never attempt-and-catch per dispatch** (hosts
+silently coerce an unknown `model:` to the session default, so a catch never fires). Dispatch one
+trivial probe subagent — `model: fable`, sole instruction "Return the literal model id you are
+running as, nothing else". A Fable id → cache "Fable available" for the run. Anything else or an
+error → cache "unavailable", route orchestration/synthesis to **Opus 4.8-max** (explicit
+`claude-opus-4-8`; `claude-opus-5-5` equally legal) and print "Fable unavailable in this runtime
+(probe returned <id>); routing orchestration/synthesis to Opus 4.8 at max effort."
+
+**Resolve the bare `opus` alias in the same step** (one extra probe, `model: opus`) if you intend
+to use it: → Opus 5.5: orchestration AND T2/T3; → an earlier Opus 5: T2/T3 ONLY; → Opus 4.8: the
+orchestration floor and the Opus-class coding fallback (on alias-only hosts the probed alias IS
+how you express `claude-opus-4-8`). Hosts that accept explicit ids skip the alias. No Fable /
+Opus 4.8 / Opus 5.5 route for orchestration → STOP (`BLOCKED` / `NEEDS_CONTEXT`); never quietly
+orchestrate below the Opus class.
+
+**Check YOURSELF too — the top-level session is the primary orchestrator.** At loop start, state
+the model you are running as. Fable, Opus 4.8 or Opus 5.5 → proceed. Anything else (e.g.
+`claude-opus-5`) → STOP: "this session runs <id>; the loop's orchestration contract is Fable/Opus
+4.8/Opus 5.5 — relaunch under one of those (or explicitly waive this check)" and wait.
 
 **Fallback floor.** Orchestration/synthesis falls back only within the orchestration set
-(`fable → claude-opus-4-8`; `claude-opus-5-5` is equally legal).
-Hard / architectural / security-sensitive coding falls back only WITHIN the Opus class
-(`claude-opus-5` / `claude-opus-5-5` → `claude-opus-4-8`) — and that fallback is legal ONLY when the
-requested Opus 5-family model is actually unavailable: the dispatch errored, or the envelope's
-`actual_model` shows coercion away from the requested id (`claude-opus-5` / `claude-opus-5-5`). Never invoke it for cost or speed. Neither tier may EVER silently degrade to
-Sonnet — model choice matters most for exactly this work. Sonnet is a legal target for hard
-work only with an explicit user waiver. Every dispatch envelope MUST report
-`{requested_model, actual_model, fallback_reason}` so any downgrade is visible and auditable
-rather than silent.
+(`fable → claude-opus-4-8`; `claude-opus-5-5` equally legal). T2/T3 work falls back only WITHIN its
+tier — the Opus class (`claude-opus-5-5 → claude-opus-4-8`) or the cross-vendor equivalent of rule 1
+(T2 ≡ `gpt-6.1-sol` high; T3 ≡ `gpt-6-astra`) — and only when the requested model is actually
+unavailable (dispatch error, lane cooling/absent, or `actual_model`/`runtime_model` shows coercion).
+Never for cost or speed; never silently to Sonnet / Luna / Haiku (a user waiver only). Every
+envelope reports `{requested_model, actual_model, fallback_reason}` so a downgrade is auditable.
 
-**The adversarial reviewers are CLIs, never Claude subagents.** Cross-model independence comes
-from running the actual GPT/codex and xAI/grok CLIs — not from where you invoke them. Run each
-CLI inside its OWN Haiku (or Sonnet-low) subagent's Bash (so its verbatim output never lands in your
-context). "Never a Task subagent" means: never spin up a Claude subagent and instruct it to "act
-as codex" or "act as grok" — that is same-model theater, not an independent second model. When
-BOTH external CLIs are genuinely unavailable, the gate falls back to a single Claude adversarial
-subagent whose findings are tagged `[single-model]` (see the adversarial-forum recipe).
+**External lanes are real CLIs, never Claude subagents role-playing them.** Run the actual codex /
+grok / second-account `claude` CLIs through `gstack-lane run`, which YOU launch from top-level Bash
+with `run_in_background: true` as `gstack-lane run … >/dev/null 2>&1; gstack-lane summary --out <out>`
+— the transcript stays on disk, only the one-line summary returns. No launcher subagents (an Agent
+that merely waits on a CLI burns L0 quota), and never a Claude subagent told to "act as codex" —
+same-model theater. When BOTH forum CLIs are genuinely unavailable, an ordinary
+gate falls back to a single Claude adversarial pass tagged `[single-model]` and is `DEGRADED`.
 
 ---
 
@@ -602,7 +641,7 @@ subagent whose findings are tagged `[single-model]` (see the adversarial-forum r
 Drive the current plan to completion. Narrate continuously — the user should always know
 what milestone just finished, what is running now, and what is next. No silent gaps.
 
-### 0. Set up the run workspace, resolve the plan, probe Fable
+### 0. Set up the run workspace, resolve the plan, probe Fable + lanes
 
 **Run workspace.** Establish a run-scoped state directory (all paths absolute). `gstack-slug`
 sets `$SLUG` and `$BRANCH`:
@@ -613,17 +652,38 @@ DATETIME=$(date +%Y%m%d-%H%M%S)
 RUN_DIR="$HOME/.gstack/projects/$SLUG/autobuilder/${BRANCH}-${DATETIME}"
 mkdir -p "$RUN_DIR/briefs" "$RUN_DIR/reports"
 : > "$RUN_DIR/audit-trail.md"
-echo "RUN_DIR=$RUN_DIR"
+_CFG=~/.claude/skills/gstack/bin/gstack-config
+OVERFLOW_DIR=$($_CFG get claude_overflow_dir 2>/dev/null); OVERFLOW_DIR=${OVERFLOW_DIR:-$HOME/.claude-overflow}
+MAX_PARALLEL=$($_CFG get autobuilder_max_parallel 2>/dev/null); MAX_PARALLEL=${MAX_PARALLEL:-6}
+echo "RUN_DIR=$RUN_DIR OVERFLOW_DIR=$OVERFLOW_DIR MAX_PARALLEL=$MAX_PARALLEL"
 ```
 
-A **Haiku-or-Sonnet resolver/scribe** subagent authors every brief into `$RUN_DIR/briefs/` and returns
+An **R-class Haiku resolver/scribe** subagent authors every brief into `$RUN_DIR/briefs/` and returns
 only its path; every subagent writes its full report into `$RUN_DIR/reports/`. You never author
 briefs and never inline repo/source content into prompts. Reference `$RUN_DIR` from the dispatch
 recipe.
 
 **Probe Fable** now (per Model routing) and cache the routing decision for the whole run.
 
-**Resolve the plan source.** Dispatch the Haiku-or-Sonnet resolver. Precedence:
+**Probe the lanes.** Run `~/.claude/skills/gstack/bin/gstack-lane probe --run-dir "$RUN_DIR"`
+(top-level Bash; it prints ONE line per lane and writes `$RUN_DIR/lanes.json` — `status:
+ok|cooling|absent`, `reason`, `next_probe_at`, `runtime_model`). L2: haiku "reply OK"; L3:
+`gpt-6-luna` low under the hermetic home; L4: grok plan-mode at `high`, recording the runtime model
+id (ABSENT "disabled by grok_reviews" unless `grok_reviews=enabled`). Print the roster. A
+cooling/absent lane's rows spill to the next lane in the routing table — the run proceeds, and
+absent/cooling lanes are re-probed at every milestone and gate start. Operator notes, printed once, never
+blocking: **L2 needs a one-time interactive login** (`CLAUDE_CONFIG_DIR=~/.claude-overflow claude` →
+`/login` with the second account; until then L2 is ABSENT and T3 spills to L3 Astra → L1 Opus 5.5);
+pooling two subscriptions is the operator's call (plan terms assume individual use); when the grok
+sandbox cannot apply (status `sandbox: none`) L4 is NOT OS-contained — run `grok update` or fix the
+`/var/run/docker.sock` symlink to restore containment.
+
+**Permissions (auto mode).** `gstack-lane` is an external writable CLI the auto-mode classifier
+blocks by default — the operator needs ONE allow rule for `~/.claude/skills/gstack/bin/gstack-lane`.
+A denied lane launch → mark that lane ABSENT for the run and spill; NEVER work around the denial
+(no inlined `codex`/`claude -p`/`grok`, no copied auth files).
+
+**Resolve the plan source.** Dispatch the R-class Haiku resolver. Precedence:
 explicit arg path > newest approved plan under the gstack plans dir > `SPEC.md` / `PLAN.md`
 bearing an approval marker > root `TODOS.md`. The resolver returns
 `{path, approval_evidence, milestone_count}` and writes the full parse to a report file. Do
@@ -635,11 +695,21 @@ NOT read the plan into your own context.
   building an unapproved (possibly stale) spec. This skill's premise is that the plan is
   already approved.
 
+**Vendor-diversity check (ONCE, here).** The resolver flags T3-shaped milestones (architecture,
+security boundary, migration, untrusted input). If any exist — or, failing a plan signal, when
+step 1.a first yields a T3 task — and L4 is disabled/absent, only ONE other vendor exists, so warn
+and AskUserQuestion ONCE (decision-brief format): **A) Enable Grok** (`gstack-config set
+grok_reviews enabled`, then re-probe L4); **B) Waive the second other-vendor seat for T3 this run**
+— audit-trailed; T3 per-task review = Codex + a fresh Claude seat, every gate labelled `DEGRADED`,
+final verdict capped at `COMPLETE_UNVERIFIED`; **C) Stop**. A T3 task may never reach rule 3's
+`BLOCKED` without this question having been asked.
+
 **Chunk into ship-units (BEFORE the freeze — this is a hard requirement, not a preference).**
 Unchunked runs balloon: past runs ended at 10-20k lines of diff in one deploy, where nobody —
-model or human — still holds full context, and quality collapses. So: have the resolver
-estimate a rough diff size per milestone (from the plan's scope hints; estimates are coarse —
-the runtime meter below is the enforcement). Then group consecutive milestones into
+model or human — still holds full context, and quality collapses. So: an **orchestration-class**
+subagent (Fable / Opus 5.5 / Opus 4.8-max) estimates a rough diff size per milestone and decides
+any split — that is judgment, never R work; the R resolver only extracts scope numbers the plan
+already states (estimates are coarse — the runtime meter below is the enforcement). Then group consecutive milestones into
 **ship-units of ≤5,000 projected LOC each**. Any SINGLE milestone projected >5k must be split
 into sub-milestones here, at resolution, with the split shown to the user — never split
 silently, and never split after the freeze. Each ship-unit ends in an intermediary **/ship
@@ -671,7 +741,8 @@ CEILING: the runtime meter may end a unit early (move a ship boundary forward), 
 skips a planned checkpoint or merges two units.
 
 **Worktree preflight (ONCE, here at kickoff — before any milestone work starts).** The
-milestone-commit sites below run unconditional `git add -A`. Started in a worktree carrying
+milestone-commit sites below stage EVERYTHING in the worktree (`gstack-lane commit`; its secret
+guard catches credential-shaped paths, not arbitrary WIP). Started in a worktree carrying
 unrelated modified/untracked files — secrets, a stray `.env`, someone else's WIP — those ride
 along into the first milestone commit, and the loop's own later review/ship steps can then
 publish them. This is the one point the user is present to catch it; the loop runs unattended
@@ -687,33 +758,99 @@ A clean `git status --porcelain` needs no question — proceed straight to step 
 
 ### 1. Build the next milestone
 
-**1.0. Re-parse from disk.** Each iteration, dispatch the **Haiku (or Sonnet-low)** parse subagent to
+**1.0. Re-parse from disk.** Each iteration, dispatch the **R-class Haiku** parse subagent to
 re-extract `{next_milestone, acceptance_criteria}` from the frozen plan on disk. This catches
 in-place edits to a milestone's criteria and keeps you honest — never work the next milestone
 from memory. When the plan carries per-milestone status markers
 (`<!-- status: pending | built-gate-pending | complete -->`, authored by `/plan-deliverables`),
 `next_milestone` is the FIRST milestone still marked `pending` — a durable selector that
-survives re-parsing instead of inferring "next" from unchecked criteria. Plans without markers
-fall back to the first milestone with unmet acceptance criteria.
+survives re-parsing instead of inferring "next" from unchecked criteria. Plans without markers:
+the orchestration-class decomposer (step a) picks the first milestone with unmet acceptance
+criteria — selection is judgment, not R work. **Re-probe before dispatch:** if
+any lane was absent/cooling in the last roster, run `gstack-lane probe --run-dir "$RUN_DIR" --lanes
+<those lanes>` now (and again at each gate start) — a repaired login or an expired cooldown must be
+seen before routing; only `*_reviews=disabled` persists across milestones.
 
 **Pre-dispatch SHIP_METER check (the 4k rule's home).** Before dispatching this milestone,
 run the step-f meter. At ≥ 4,000 LOC: checkpoint FIRST (step f), then start the milestone
 against the fresh base. Never begin a milestone that cannot plausibly finish inside the cap.
 
-**a. Decompose.** A **Fable / Opus-4.8-max / Opus-5.5** orchestrator subagent decomposes the milestone into
-tasks, classifies each by complexity (hard / moderate / mechanical), and returns the compact
-task plan: `{tasks[]: {id, summary, complexity, deps}}`.
+**a. Decompose.** A **Fable / Opus-4.8-max / Opus-5.5** orchestrator subagent (L1) decomposes the
+milestone into tasks, classifies each by tier, and returns the compact task plan:
+`{tasks[]: {id, summary, tier: T0|T1|T2|T3, deps[], owns[], lane}}`. `owns` is the task's WRITE
+SET including shared surfaces — interfaces, lockfiles, schemas, generated outputs, CHANGELOG/VERSION.
+`lane` is the primary lane from the routing table (dispatch may spill it).
 
-**b. Dispatch, model-routed.** For each task, the scribe writes its brief; then dispatch the
-routed subagent (per the table). Each subagent implements + writes/updates tests +
-self-verifies + returns the envelope:
-`{status, requested_model, actual_model, fallback_reason, files_touched, change_summary,
-tests_run, test_result, follow_ups}`. Independent tasks → dispatch in parallel (multiple Agent
-calls in ONE turn, or `run_in_background: true`) — "independent" means DISJOINT FILE SETS, not
-just logical independence; two subagents editing one worktree's shared file corrupt each other,
-so tasks whose `files_touched` may overlap are sequenced even when logically unrelated.
-Dependent tasks → sequence them. After any
-task returns a failing `test_result`, re-query ground truth via a fresh subagent before
+**b. Dispatch — ready queue, lane-routed.** A task is READY when its deps are integrated into the
+milestone branch AND its `owns` set is disjoint from every in-flight task's `owns` (file-level
+disjointness — overlapping write sets are sequenced even when logically unrelated). Keep admitting
+ready tasks while caps allow; there are no wave barriers.
+- **Caps:** per lane L1 = 2, L2 = 2, L3 = 2, L4 = 1; global = `autobuilder_max_parallel` worker
+  payloads (read in step 0; default 6). Reviewers count; background `gstack-lane run` launches
+  count against THEIR lane, not L1. Reserve the next gate's reviewer seats before admitting new
+  implementation work (rule 2). Class-R workers sit outside these caps (rule 2). Heavy checks: ≤ 2
+  focused runners + 1 full-suite/build runner at a time. **Throttle cap rule:** each `throttle` drops
+  that lane's cap by 1 for the milestone, never below 1 while the lane is `ok`; reductions reset at
+  the next milestone; ≥ 3 consecutive throttles in a milestone (`throttle_count`) → treat the lane as
+  `cooling` for spillover (rule 2 may spill).
+- **Isolation:** every external-lane task, and every in-session task running concurrently with
+  another, gets its OWN worktree — `gstack-lane worktree add --run-dir "$RUN_DIR" --task <id>
+  --base <milestone-branch>` (→ `$RUN_DIR/wt/<id>` on `ab/<run-id>/<id>`; it prints `base_sha=<sha>` —
+  record that in your task ledger, it is the `--base` every later `commit` for this task must pass);
+  concurrent Agent implementers pass `isolation: "worktree"`. A lone task may run in the milestone worktree.
+  Dependents start from the INTEGRATED milestone branch, never a sibling's.
+- **In-session (L1) task:** the scribe writes the brief; dispatch per the Claude recipe (Quick
+  reference), `model:` + effort from its tier row.
+- **External-lane (L2/L3/L4) task:** YOU launch it — one top-level Bash call with
+  `run_in_background: true`, into a FRESH attempt dir (`run` refuses an existing `--out`):
+  `A="$RUN_DIR/attempts/<id>/<attempt_id>"; mkdir -p "$A" && ~/.claude/skills/gstack/bin/gstack-lane run
+  --run-dir "$RUN_DIR" --lane <l2|l3|l4> --mode impl --tier T<n> --model <id> --effort <e>
+  --cwd "$RUN_DIR/wt/<id>" --prompt-file <brief> --out "$A/impl.json" --schema <envelope schema>
+  --timeout <s> --allow-cmd "<vetted check prefix>"… >/dev/null 2>&1; ~/.claude/skills/gstack/bin/gstack-lane summary --out "$A/impl.json"`
+  (lane/model/effort from the routing table; `--tier` is REQUIRED for L4 impl — T0/T1 only).
+  `--allow-cmd` carries the milestone's check commands for L2/L4 impl — only
+  test/build-runner prefixes (`bun test`, `npm test`, `make`, `cargo`, `pytest`, `gradle`, …); the
+  helper rejects shells and inline interpreters (`bash -c`, `eval`, `python -c`, `curl`, …) — never
+  try to smuggle one through. The helper owns the hard deadline (kills the whole process tree),
+  the `ok|throttle|quota|auth|timeout|error` classification, the REVIEW-only timeout step-down (an
+  impl timeout is class `timeout` — never a silent effort drop below the tier's floor) and
+  `lanes.json`; never retry around it by hand.
+- **Evidence + commit:** accept an attempt only when ITS `status.json` (in that fresh dir)
+  says `class: ok`, `exit: 0` and `runtime_model` is present (null = unknown model → treat as
+  coercion, spill per rule 1). Then commit the task's work with
+  `gstack-lane commit --run-dir "$RUN_DIR" --task <id> --base <base_sha> -m "<task summary>"` —
+  `--base` is the `base_sha=` the task's `worktree add` printed, taken from YOUR task ledger, never
+  re-read from the run tree (the helper refuses a mismatch). It stages the task worktree inertly (no
+  hooks/filters), REFUSES (exit 1, nothing committed) if a credential-shaped path appears in the
+  staged delta or in any commit since the base — `auth.json`/`.credentials.json`, `*.pem`/`*.key`/
+  `*.p12`/`*.pfx`/`*.jks`, `id_rsa*`/`id_ed25519*`/`id_ecdsa*`, `.env`/`.env.*` (but `.env.example`,
+  `.env.sample`, `.env.template`, `*.example` commit fine), `.netrc`, `.git-credentials`, `.pgpass`,
+  `.npmrc`/`.pypirc` only when they hold a token; under `.claude*/` only credential-shaped names, so
+  `.claude/settings.json` and `.claude/commands/*` commit fine — or an LFS/git-crypt filtered path
+  (`filter_path=`), or if the git control state changed since `worktree add`; it prints
+  `result_sha=` / `base_sha=` for the envelope. A refusal is a failed attempt: diagnose (rule 6) —
+  never commit around it.
+- **Quota / health (from `lanes.json`):** `throttle` → apply the throttle cap rule. `quota` → the
+  lane cools until `next_probe_at`; requeue the task on the next lane in its row (same tier, rule 1).
+  `auth` → lane ABSENT until a later probe clears it. `timeout` (impl: no effort step-down) → the
+  attempt failed; diagnose (rule 6) before re-dispatch. `lane_update: pending` → re-run `probe` before the
+  next dispatch on that lane. The helper stops the old process tree before a requeue; keep its
+  partial diff in the task worktree for the next attempt's brief. Codex models share one quota
+  bucket — a cooling L3 cools all its models.
+- **Per-task review (T1+):** before integration, a fresh-context reviewer from ANOTHER vendor
+  than the author reviews the task branch at its `result_sha` (`--mode review` on L3/L4 in a
+  detached worktree at that sha; an L1/L2 Claude reviewer for Codex/Grok-authored work); T3 needs
+  TWO other vendors (or Codex + a fresh Claude seat under the step-0 waiver). Findings → a fix
+  round on the author lane. Diversity unmeetable because a vendor is disabled (`grok_reviews`),
+  absent or cooling past the milestone → the task is `BLOCKED` with that reason immediately, never
+  an indefinite PENDING — the step-0 question must already have been asked.
+- **Integration:** ONE integration worker (L1 Opus 5.5, owning the milestone worktree) merges task
+  branches into the milestone branch in dependency order, runs the affected checks after EACH
+  merge, resolves conflicts with semantic revalidation, then `gstack-lane worktree rm` the task
+  worktree. A schema-valid envelope and `test_result: pass` are claims, not verification — the
+  integration worker's own check run is what counts.
+
+After any task returns a failing result, re-query ground truth via a fresh subagent before
 re-dispatching — never blindly re-run the same failing task.
 
 **Task-level retry cap.** After 2 failed re-dispatches of the SAME task, stop and surface
@@ -727,21 +864,27 @@ checkpoint (step f).
 **c. MILESTONE GATE (MANDATORY — run on EVERY milestone before it can be marked complete).**
 There is no major/minor distinction and no "it's trivial" skip. The ONLY carve-out is a
 milestone the plan explicitly labels non-code (docs-only) — judged from the plan's label, never
-decided on the fly. **First, commit the milestone's work**: dispatch the step-e marker subagent
-to `git add -A && git commit` a WIP commit on the feature branch — every reviewer below diffs
-`<base>...HEAD`, which sees ONLY committed state; uncommitted or untracked work would sail
-through the gate unreviewed. The Worktree preflight gate (step 0) is what makes `-A` safe here:
-starting from a clean `git status --porcelain` means everything `-A` now picks up was produced
-by this loop's own tasks — the general rule against a blind `git add -A` at a checkpoint still
-holds everywhere outside this loop. Then run every review in the gate — eng-review, /review, and the
-Codex + Grok adversarial forum — then dispatch model-routed fix subagents until CLEAN (CLEAN =
-zero `[P1]`; surviving `[P2]`s are recorded as follow-ups, per the Gate verdict). Fix commits
-land the same way before any re-review.
+decided on the fly. **First, commit the milestone's work** through the helper's secret guard —
+top-level Bash: `gstack-lane commit --cwd "<milestone worktree>" --base <milestone base sha> -m
+"wip(<m>): <summary>"` (the base = the commit the milestone started from). It stages everything,
+REFUSES (exit 1, nothing committed) if any credential-shaped or LFS/git-crypt filtered path appears
+in the staged delta or in any commit since the base, and prints the offending paths (`secret_path=` /
+`filter_path=`) → the milestone is `BLOCKED` with those paths (never `git add -A && git commit`
+around it). Every reviewer below diffs the frozen `BASE_SHA...REVIEWED_SHA` range, which sees ONLY
+committed state; uncommitted or untracked work would sail through the gate unreviewed. The
+Worktree preflight gate (step 0) is what makes stage-everything safe here: starting from a clean
+`git status --porcelain` means everything picked up now was produced by this loop's own tasks — the
+general rule against a blind stage-all at a checkpoint still holds everywhere outside this loop.
+Then run every review in the gate — eng-review, /review, and the
+Codex + Grok adversarial forum (its gate-start block resolves the immutable `BASE_SHA` and
+`REVIEWED_SHA` once per round) — then dispatch model-routed fix subagents until the gate passes (`CLEAN` = zero `[P1]` with
+both forum members PRESENT; zero `[P1]` with a member ABSENT = `DEGRADED`, never `CLEAN`; an INVALID
+member blocks the pass until re-run clean; surviving `[P2]`s are recorded as follow-ups, per the Gate
+verdict). Fix commits land the same way before any re-review.
 
 Every review runs in a subagent that reads its own skill file from disk and follows ONLY the
-review-specific methodology — the orchestrator never reads source, diffs, or logs. Each returns
-findings-only in its envelope; all fixes remain YOUR routed fix dispatches (the review skills'
-own fix/commit flows are skipped).
+review methodology — you never read source, diffs, or logs. Each returns findings-only; all fixes
+remain YOUR routed fix dispatches (the review skills' own fix/commit flows are skipped).
 
 1. **/plan-eng-review** on the milestone design/diff — a Fable / Opus-4.8-max / Opus-5.5 subagent READS
    `~/.claude/skills/gstack/plan-eng-review/SKILL.md` from disk and follows the review
@@ -763,20 +906,21 @@ own fix/commit flows are skipped).
    **Fix-First / Step 5 flow and any commit** (fixes are the orchestrator's job), the Greptile
    comment resolution, and the review-log persist. It returns findings-only in the envelope.
 3. **Adversarial cross-model forum (Codex + Grok)** on the diff — two independent external-CLI
-   reviews, each run inside its OWN Haiku (or Sonnet-low) subagent's Bash, boundary-prefixed, read-only (Quick
-   reference). Codex runs `gpt-5.6-sol` and Grok runs the CLI's own current default (= latest), each at
-   `high` effort with ONE `medium`-effort retry if it times out — a slow model steps down instead of
-   dropping out of the forum. Cross-model gate
-   on `[P1]` — a `[P1]` from EITHER model FAILs the gate. If one member is unavailable/disabled,
-   note it and continue on the other's cross-model coverage; if BOTH are unavailable, this becomes a
-   single Claude adversarial subagent with findings tagged `[single-model]` and a printed notice —
-   the gate stays satisfiable.
+   reviews you launch through `gstack-lane run --mode review` (top-level Bash, background),
+   boundary-prefixed, each in its OWN detached worktree over the same frozen
+   `base_sha...reviewed_sha` endpoints (Quick reference). Codex runs `gpt-6.1-sol` (`gpt-6-astra`
+   when the milestone contains a T3 task, and on the FINAL milestone), Grok the CLI's latest default,
+   each at `high` with ONE `medium` retry on timeout; `gstack-lane adjudicate` decides each seat and
+   counts its `[P1]`s — its line is relayed verbatim, never re-interpreted. Cross-model gate
+   on `[P1]` — a `[P1]` from EITHER model FAILs the gate. INVALID evidence is a FAIL, never ABSENT.
+   An ABSENT member makes an ordinary milestone's gate `DEGRADED` (never `CLEAN`); a T3-containing
+   or FINAL milestone needs one other-vendor member PRESENT and valid or the gate is `BLOCKED`
+   (diversity floor, Quick reference).
 
-Collect findings into a compact list — this consolidation is synthesis-tier work and happens
-on Fable/Opus 4.8/Opus 5.5 (that is YOU, whose model the loop-start self-check already verified; the
-forum members never self-consolidate, and earlier Opus 5 builds never consolidate). Dispatch fix subagents
-(routed by complexity) until the gate is clean, then re-run the gate. Log one review-log entry
-PER review (see Quick reference).
+Collect findings into a compact list — synthesis-tier work on Fable/Opus 4.8/Opus 5.5 (that is YOU,
+verified by the loop-start self-check; forum members never self-consolidate, earlier Opus 5 builds
+never consolidate). Dispatch fix subagents (routed by tier, author lane first — Fix rounds row) until
+the gate is clean, then re-run the gate. Log one review-log entry PER review (Quick reference).
 
 **Bounded deferral valve (not a free skip).** A genuinely small milestone's gate may be batched
 into the NEXT milestone's gate under strict bounds, all four of which hold:
@@ -788,7 +932,8 @@ into the NEXT milestone's gate under strict bounds, all four of which hold:
    to `<!-- status: built-gate-pending -->` when the plan carries one), NOT complete, until its
    covering gate runs clean. The covering gate reviews the UNION: both milestones' full diff
    range AND both sets of acceptance criteria in its brief — a gate that only looks at the
-   newer milestone has not covered the deferred one.
+   newer milestone has not covered the deferred one. If EITHER milestone in the union contains a
+   T3 task, the covering gate's `GATE_CLASS` is `critical`.
 Say so explicitly when you batch. If you cannot satisfy all four, gate the milestone now.
 
 **d. LOCAL DOCKER VERIFICATION (MANDATORY — before a milestone counts as done).**
@@ -802,7 +947,7 @@ Say so explicitly when you batch. If you cannot satisfy all four, gate the miles
     and verification proceeds.
   - **B) Waive Docker verification** — the final verdict becomes `COMPLETE_UNVERIFIED`. Record
     the waiver in the Build Audit Trail (`waived_by_user: true`, timestamp, reason, residual
-    risk). This is the ONLY path to `COMPLETE_UNVERIFIED`.
+    risk). This is the ONLY Docker path to `COMPLETE_UNVERIFIED` (the other is a degraded forum).
   - **C) Stop** — surface `BLOCKED`.
   Absent a recorded user waiver, "no Docker setup found" is `BLOCKED`, never an implicit waiver.
 - **Bring it up:** a subagent runs the project's own wrapper first (`make up`), else
@@ -827,7 +972,7 @@ Say so explicitly when you batch. If you cannot satisfy all four, gate the miles
   in the audit trail. CODE fixes made during this step happened AFTER the gate reviewed the
   diff — re-run step c on the fix delta before step e. Post-gate code is ungated code.
 
-**e. Mark complete.** A **Haiku (or Sonnet-low)** subagent marks the milestone complete in the plan/
+**e. Mark complete.** An **R-class Haiku** subagent marks the milestone complete in the plan/
 TODOS.md (or **"built — gate pending"** if its gate was batched per the deferral valve) and
 returns confirmation. When the milestone carries a `/plan-deliverables` status marker, update it
 in place — set `<!-- status: complete -->` on a gated-clean milestone, or
@@ -952,8 +1097,9 @@ suggest — do NOT run — the business skills.
 ╠══════════════════════════════════════════════════════════════╣
 ║  Milestones:   N/N built                                     ║
 ║  Ship units:   K/K via /ship — max unit <M> LOC (target ≤5k) ║
-║  Review gate:  CLEAN (eng-review + /review + <actual forum   ║
-║                members that were PRESENT — never list an     ║
+║  Review gate:  CLEAN | DEGRADED (<k>/N gates missing a forum ║
+║                member) — eng-review + /review + <the forum   ║
+║                members that were PRESENT; never list an      ║
 ║                ABSENT member as if it reviewed>              ║
 ║  Docker:       VERIFIED FUNCTIONAL (port PORT, 0 console err) ║
 ║  Residual risk: <one line, or "none">                        ║
@@ -962,12 +1108,15 @@ suggest — do NOT run — the business skills.
 
 Verdict is one of `COMPLETE_VERIFIED` / `COMPLETE_UNVERIFIED` / `BLOCKED`:
 
-- `COMPLETE_VERIFIED` — every milestone gated clean and Docker-verified functional, AND every
+- `COMPLETE_VERIFIED` — every milestone gated `CLEAN` and Docker-verified functional, AND every
   ship-unit checkpointed through /ship. Unshipped checkpoints block this verdict — completed
-  work that never hit its checkpoint is unshipped risk, not a verified plan.
-- `COMPLETE_UNVERIFIED` — legal ONLY with a recorded user Docker-verify waiver (step d, option
-  B) captured in the audit trail (`waived_by_user`, timestamp, reason, residual risk). Absent
-  that recorded waiver, the only legal verdicts are `COMPLETE_VERIFIED` or `BLOCKED`.
+  work that never hit its checkpoint is unshipped risk, not a verified plan. ILLEGAL if ANY gate
+  was `DEGRADED` or any other-vendor seat was waived — such a run ends `COMPLETE_UNVERIFIED`.
+- `COMPLETE_UNVERIFIED` — legal ONLY with (a) a recorded user Docker-verify waiver (step d,
+  option B) captured in the audit trail (`waived_by_user`, timestamp, reason, residual risk), or
+  (b) `DEGRADED` gates / waived other-vendor seats recorded in the audit trail — the verdict names
+  the reason (`forum degraded: <gates>`) and the Completion Status is `DONE_WITH_CONCERNS`. Absent
+  either record, the only legal verdicts are `COMPLETE_VERIFIED` or `BLOCKED`.
 - `BLOCKED` — a task or gate could not be driven clean. A `BLOCKED` exit MUST list any
   milestones still marked "built — gate pending" in the completion report.
 
@@ -998,7 +1147,7 @@ the moment — and each is wrong.
 |---|---|---|
 | "I need to understand the codebase first — let me just read the key files myself real quick." | Raw file contents in the orchestrator context poison every downstream routing/gate decision and force early compaction. | Dispatch a scoped-read subagent; receive a distilled summary. |
 | "This is a trivial two-line change; a subagent is pure overhead." | The trivial-edit exception has no boundary — take it once and you're the worker; the edit also skips routing and the review path. | Dispatch it. Every edit goes through a subagent. |
-| "I'm already Opus and perfectly capable — routing is a nice-to-have." | "I can do it all myself" is the exact centralizing instinct the user forbade; it's slower/pricier for bulk work and wastes the specialized tiers. | Classify, then emit `model:` on every dispatch. |
+| "I'm already Opus and perfectly capable — routing is a nice-to-have." | "I can do it all myself" is the centralizing instinct the user forbade; it burns the root quota and idles the other lanes. | Classify the tier, then route every dispatch through the lane table. |
 | "Tests are green and it looks clean — I'll batch one eng-review at the end." | Deferring the gate lets defects compound across milestones and become expensive to unwind; a self-check by the plan's author is not independent review. | Gate every milestone (eng-review + /review + codex + grok). Batch at most ONE small, non-sensitive milestone forward and say so. |
 | "Unit tests pass and the code is obviously correct — Docker is just packaging." | Unit tests don't prove the composed system runs; wiring, env vars, networking, migrations, and startup are exactly what only a real bring-up catches. | Bring the stack up in Docker and exercise it; "should work" ≠ verified. |
 | "Shipping mid-run breaks my flow — I'll ship everything together at the end." | That is exactly how runs balloon to 10-20k lines nobody can hold in context; unshipped verified work is accumulating risk, not progress, and a giant final deploy is where clean delivery dies. | Hard checkpoint: /ship each ≤5k-LOC unit (warn at 4k), reset the meter, then continue. |
@@ -1010,6 +1159,7 @@ the moment — and each is wrong.
 ### Red flags — if you catch yourself thinking any of these, STOP
 
 - "I'll just read this one file."
+- "I'll run the suite / sweep the grep myself." (dispatch an R Haiku)
 - "One quick inline fix."
 - "Skip the gate, it's trivial."
 - "The build probably works, mark it done."
@@ -1026,26 +1176,38 @@ Docker run, or the user.
 ```
 Agent (subagent_type: general-purpose):
   description: "<one-line task>"
-  model: <fable|claude-opus-4-8|claude-opus-5|claude-opus-5-5|sonnet|haiku>   # REQUIRED — never omit; bare `opus` only after the alias probe
+  model: <fable|claude-opus-4-8|claude-opus-5-5|sonnet|haiku>   # REQUIRED; bare `opus` only after the alias probe; `claude-opus-5` = T2/T3 coding ONLY, never orchestration/review
   run_in_background: <true|false> # true = parallel / long work
+  isolation: "worktree"           # every L1 implementer that runs concurrently with another task
   prompt: |
     Read your brief first: <ABS_BRIEF_PATH>   # requirements live here, verbatim
     <one line on where this fits + interfaces from prior tasks>
     Work at <max|high|medium> reasoning effort.   # effort in prose (host may lack an effort param)
     Write your full report to: <ABS_REPORT_PATH under $RUN_DIR/reports/>
-    Return only the envelope: STATUS, requested_model, actual_model, fallback_reason,
-    files_touched, change_summary, tests_run, test_result, follow_ups.
+    Return only the envelope: STATUS, attempt_id, lane, requested_model, actual_model,
+    fallback_reason, base_sha, result_sha, files_touched, change_summary, tests_run,
+    test_result, checks, report_path, follow_ups.
+```
+
+**Class R dispatch:**
+```
+Agent (subagent_type: general-purpose | Explore for read-only search):
+  model: haiku          # never sonnet/opus/fable for R
+  effort: "low"         # R only; drop the key if the host rejects it
+  prompt: "<exact command or read/extract task>. Return ≤10 lines: file:line refs, counts, verbatim
+    failing names. On failure: exit code + last lines verbatim, no retry."
 ```
 
 Default to `run_in_background: false`: every sequential or gating dispatch (resolver, parse,
 scribe, step-e marker, /ship, gate reviews) must return before the loop moves on. Use `true`
-only for step b's independent tasks with DISJOINT file sets.
+only for step b's ready tasks with DISJOINT `owns` sets.
 
-**Envelope contract (what a subagent returns):** `STATUS` (DONE / DONE_WITH_CONCERNS /
-NEEDS_CONTEXT / BLOCKED) + `requested_model` + `actual_model` + `fallback_reason` (so silent
-downgrades surface) + `files_touched` + one-line `change_summary` + `tests_run` +
-`test_result` + `follow_ups`. Never full diffs/logs/files. Parallel = N dispatch calls in
-ONE turn.
+**Envelope contract (what a subagent or lane attempt returns):** `STATUS` (DONE / DONE_WITH_CONCERNS /
+NEEDS_CONTEXT / BLOCKED) + `attempt_id` + `lane` + `requested_model` + `actual_model` (CLI lanes:
+`runtime_model` from the CLI's own output, never self-report; null = unknown) + `fallback_reason` +
+`base_sha` + `result_sha` + `files_touched` + one-line `change_summary` + `tests_run` +
+`test_result` + `checks[]` (cmd + exit status) + `report_path` + `follow_ups`. Never full
+diffs/logs/files. Parallel = N dispatch calls in ONE turn.
 
 **Follow-ups contract.** The milestone set is frozen at resolution (step 0); completion is
 defined over that frozen set only. Each `follow_up` a subagent returns is EITHER resolved
@@ -1054,197 +1216,188 @@ work with a status. A follow-up is NEVER silently promoted into a new milestone 
 prevent termination) and NEVER silently dropped (that would fake completion). New milestones
 require explicit user approval.
 
-**Adversarial cross-model forum (Codex + Grok) — two independent external CLIs, each run inside
-its OWN Haiku (or Sonnet-low) subagent's Bash, boundary-prefixed, read-only, gate on `[P1]`.** The forum is
-what makes the gate cross-model: Codex is OpenAI, Grok is xAI — two vendors, two model families,
-so neither's blind spots decide the gate alone. The gate is mandatory, so it must never hard-fail
-or hang the loop. Each member's subagent runs its recipe and returns the envelope
-`{model, gate: PASS|FAIL, p1_findings[], p2_count, tokens}`, writing the verbatim CLI output to a
-report file. The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]`.
+**Adversarial cross-model forum (Codex + Grok) — two independent external CLIs, launched by YOU
+via `gstack-lane run --mode review` (top-level Bash, `run_in_background: true`), boundary-prefixed,
+read-only, gate on `[P1]`.** Two vendors (OpenAI, xAI), so neither's blind spots decide the gate
+alone; the gate is mandatory, so it must never hard-fail or hang the loop. Every recipe below is an
+INDEPENDENT, self-contained Bash call — substitute `$RUN_DIR`, `<m>` and `<base>` with literals
+before running. Each member yields the gate record `{member, attempt_id, requested_model,
+runtime_model, model_mismatch, base_sha, reviewed_sha, sandbox, gate: PASS|FAIL|INVALID|ABSENT,
+p1_count}` — copied from the helper's `VERDICT=` and `summary` lines, never composed from review
+text. The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]`.
 
-*Codex member — `gpt-5.6-sol`, error-class-aware retry (timeout → step down effort; capacity/overload → back off + retry; quota → ABSENT this gate only):*
+*Gate start — ONE top-level Bash call per gate round (re-run it at the new HEAD after fix commits):*
 
 ```bash
-source ~/.claude/skills/gstack/bin/gstack-codex-probe 2>/dev/null || true
-# Honor config + availability. If codex is not_installed / not_authed, or the user has
-# codex_reviews disabled, mark the Codex member ABSENT (see Forum fallback below — do NOT fail
-# the gate on that alone). codex_reviews=disabled is the ONLY run-durable disable: a quota / capacity /
-# timeout failure in a PRIOR gate must NEVER carry forward — run this full recipe at EVERY gate.
-# gstack-config vocabulary is enabled/disabled (default enabled). Gate on the EXPLICIT
-# negative only — an unknown or empty value must not silently drop the member (live
-# failure 2026-08-15: a literal `!= "on"` check classified enabled-as-disabled).
-_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
+_LANE=~/.claude/skills/gstack/bin/gstack-lane
+# Re-probe lanes that were absent/cooling in the last roster — a repaired login or an expired cooldown
+# must be seen at THIS gate; only `codex_reviews`/`grok_reviews`=disabled persists across gates. (Skip when none.)
+$_LANE probe --run-dir "$RUN_DIR" --lanes <absent/cooling lanes from the last roster, e.g. l3,l4>
+GATE_CLASS=<ordinary|critical>   # critical = the milestone (or a deferred one in its union) contains a T3 task, or it is the FINAL milestone
+# BOTH diff endpoints are IMMUTABLE SHAs resolved ONCE here — never a moving ref (origin/<base> can advance
+# between the two member launches; HEAD moves with fix commits). Recorded as base_sha / reviewed_sha.
+BASE_SHA=$(git rev-parse --verify "origin/<base>^{commit}" 2>/dev/null || git rev-parse --verify "<base>^{commit}") || { echo "gate: base <base> does not resolve — BLOCKED"; exit 1; }
+REVIEWED_SHA=$(git rev-parse --verify "HEAD^{commit}") || { echo "gate: HEAD does not resolve — BLOCKED"; exit 1; }
+mkdir -p "$RUN_DIR/gates/<m>" && printf 'GATE_CLASS=%s\nBASE_SHA=%s\nREVIEWED_SHA=%s\n' "$GATE_CLASS" "$BASE_SHA" "$REVIEWED_SHA" > "$RUN_DIR/gates/<m>/env"
+for _mem in codex grok; do   # one disposable detached worktree PER member — never shared
+  $_LANE worktree add --run-dir "$RUN_DIR" --task "gate-<m>-$_mem" --base "$REVIEWED_SHA" --detach >/dev/null || echo "gate: worktree for $_mem failed — that member is ABSENT this round"
+done
+echo "gate <m>: class=$GATE_CLASS base_sha=$BASE_SHA reviewed_sha=$REVIEWED_SHA"
+```
 
-TMPERR=$(mktemp "${TMP_ROOT:-/tmp}/codex-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
-CODEX_PROMPT=$(cat <<'EOF'
+*Adjudication is mechanical — `gstack-lane adjudicate` decides every seat; you only branch on its
+line.* It applies INVALID-before-ABSENT: `tainted` (any class), any helper `class: error` (a
+`rejected` refusal, a crash, a non-zero exit — even with `[P1]`s in the body), an empty body, a
+non-zero exit, an attempt or `reviewed_sha` mismatch, and — Codex seat only — a `runtime_model` that
+is null or not policy-compatible (`critical` → `gpt-6-astra`; `ordinary` → `gpt-6.1-sol` or
+`gpt-6-astra`) ⇒ `INVALID`, a FAIL that NEVER maps to ABSENT; L4's family mismatch is a
+`,model_mismatch` note only. `auth` / `quota` / `timeout` / `throttle` / skipped ⇒ `ABSENT`.
+A body whose last non-empty line is not `REVIEW_COMPLETE: findings=<n>` is INVALID (reason=no-completion-marker), so an "unable to review" reply never counts as clean. Otherwise it counts `[P1]`/`[P0]` tags that lead a line (or follow a list marker) in the published
+body → `PRESENT_P1` or `PRESENT_CLEAN`. The skill adds exactly two ABSENT mappings of its own: a
+member disabled by config, and a helper that never ran (denied / missing: exit 126/127 or no
+`VERDICT=` line). **Gate verdicts are mechanical:** an R/Haiku worker may only run `adjudicate` and
+relay its line verbatim; reading or interpreting finding text beyond `p1_count` — e.g. briefing the
+fix round — is synthesis-tier work (you, or an Opus 5.5 / Fable subagent), never Haiku's. Every
+invocation uses a FRESH attempt dir `$RUN_DIR/attempts/gate-<m>-<member>/<attempt_id>/` (`run`
+refuses an existing `--out`); the skill reads only the helper's one-line outputs.
+
+*Codex member — `gpt-6.1-sol` on an ordinary milestone, `gpt-6-astra` on a `critical` one (Astra is
+quota-scarce), under the hermetic `CODEX_HOME` the helper keeps OUTSIDE the run tree
+(`${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/`, config rewritten and verified per use):*
+
+```bash
+# codex not authed (class `auth`) or codex_reviews disabled → ABSENT (Forum fallback — never fail the gate on
+# that alone). codex_reviews=disabled is the ONLY run-durable disable; quota/capacity/timeout from a PRIOR
+# gate never carries forward — run this full recipe at EVERY gate. Gate on the EXPLICIT negative only — an
+# unknown/empty value must not drop the member (live failure 2026-08-15: a literal `!= "on"` check did).
+_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
+# Ladders are helper-run; NEVER `ultra` — only ever step down, and only for REVIEWS: TIMEOUT (exit 124 at
+# high) -> ONE retry, stepping down to medium under --retry-timeout; THROTTLE -> backoff inside the deadline;
+# QUOTA -> not retried now, lane cools until next_probe_at, ABSENT for THIS gate only. Never latch a member off.
+_LANE=~/.claude/skills/gstack/bin/gstack-lane
+. "$RUN_DIR/gates/<m>/env"   # GATE_CLASS + BASE_SHA + REVIEWED_SHA from the gate-start block
+case "$GATE_CLASS" in critical) _CM=gpt-6-astra; _to=900; _rto=420 ;; *) _CM=gpt-6.1-sol; _to=600; _rto=300 ;; esac
+_AID=$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM; _ADIR="$RUN_DIR/attempts/gate-<m>-codex/$_AID"; _OUT="$_ADIR/review.md"
+cat > "$RUN_DIR/briefs/gate-<m>-codex.prompt" <<EOF
 IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.
 
-Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes.
+Review the commits $BASE_SHA...$REVIEWED_SHA (this checkout is at $REVIEWED_SHA). Run git diff $BASE_SHA...$REVIEWED_SHA to see the diff and review only those changes. Tag every finding [P1] (ship-blocker) or [P2] (lower severity), one finding per line with the tag first. If there are no [P1] issues, say so explicitly. End your review with exactly this final line and nothing after it: REVIEW_COMPLETE: findings=<n> (n = the number of [P1]/[P2] findings you listed; 0 if none) — but ONLY if you actually read and reviewed the diff; if you could not, end instead with REVIEW_INCOMPLETE: <reason>.
 EOF
-)
-# Retry that branches on FAILURE CLASS, not just exit code — the exit code alone conflates three
-# very different failures (a July run proved this: exit-1 quota AND exit-1 capacity both looked
-# like "Codex gone"):
-#   * TIMEOUT (exit 124)  -> step DOWN effort once (high@900s -> medium@420s), then give up this gate.
-#                            NOT `ultra`: codex's heaviest tier; this project's codex/SKILL.md docs
-#                            it causing 50+min hangs, and `high` finished this review class in 470s
-#                            (live bisection 2026-07-16). Only ever step down, never escalate.
-#   * TRANSIENT (exit !=0, stderr "at capacity"/"overloaded"/"rate limit"/5xx/network) -> short
-#                            backoff + retry at the SAME effort (an immediate retry of a "model at
-#                            capacity" error succeeded in a live gate). Backend load, not our budget.
-#   * QUOTA (exit !=0, stderr "usage limit"/"try again at"/"quota") -> do NOT retry now (won't help
-#                            until reset); mark ABSENT for THIS gate only. The NEXT gate re-attempts
-#                            and it self-heals at the reset time — NEVER latch Codex off for the run.
-# Max 4 attempts so a hard failure can't spin. `sleep` here runs on the user's machine at gate time.
 if [ "$_CODEX_ENABLED" = "disabled" ] || [ "$_CODEX_ENABLED" = "off" ]; then
   _CODEX_STATUS=disabled   # the config gate must actually GATE — a computed-but-untested flag is dead code
   echo "Codex member disabled (codex_reviews=$_CODEX_ENABLED) — ABSENT by user config (the one run-durable skip)."
+elif ! mkdir -p "$_ADIR" || [ -e "$_OUT" ]; then
+  _CODEX_STATUS=ABSENT; echo "Codex attempt dir not fresh ($_ADIR) — ABSENT this gate; never reuse a prior attempt's evidence."
 else
-  # If the probe source failed, run unwrapped rather than dying on a missing function.
-  if ! command -v _gstack_codex_timeout_wrapper >/dev/null 2>&1; then _gstack_codex_timeout_wrapper() { shift; "$@"; }; fi
-  # Substitute <base> in $CODEX_PROMPT with the detected base branch BEFORE running.
-  _eff=high; _to=900; _CODEX_EXIT=1; _CODEX_STATUS=""; _try=0
-  while [ "$_try" -lt 4 ]; do
-    _try=$((_try + 1))
-    _gstack_codex_timeout_wrapper "$_to" codex review "$CODEX_PROMPT" -c 'model="gpt-5.6-sol"' -c "model_reasoning_effort=\"$_eff\"" < /dev/null 2>"$TMPERR"
-    _CODEX_EXIT=$?
-    [ "$_CODEX_EXIT" = "0" ] && { _CODEX_STATUS=ok; break; }
-    _elc=$(tr 'A-Z' 'a-z' < "$TMPERR" 2>/dev/null)
-    case "$_elc" in *"usage limit"*|*"try again at"*|*"quota"*|*"exceeded your"*) _CODEX_STATUS=quota; break ;; esac
-    if [ "$_CODEX_EXIT" = "124" ]; then
-      if [ "$_eff" = "high" ]; then
-        # Step-down never consumes an attempt — the medium rung is GUARANTEED even if
-        # transient retries already spent the budget at high.
-        echo "Codex timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=420; _try=$((_try - 1)); continue
-      fi
-      _CODEX_STATUS=timeout; break
-    fi
-    case "$_elc" in
-      *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
-        if [ "$_try" -lt 4 ]; then echo "Codex transient error (exit $_CODEX_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); fi
-        continue ;;
-      *) _CODEX_STATUS=error; break ;;
-    esac
-  done
-  [ -z "$_CODEX_STATUS" ] && _CODEX_STATUS=error   # retries exhausted
+  # The helper enforces the deadline on the whole process tree; there is NO unwrapped fallback — a missing/denied
+  # helper never adjudicates (exit 126/127, no VERDICT line) and maps to ABSENT, never to an unbounded run.
+  $_LANE run --run-dir "$RUN_DIR" --lane l3 --mode review --model "$_CM" --effort high \
+    --timeout "$_to" --retry-timeout "$_rto" --cwd "$RUN_DIR/wt/gate-<m>-codex" \
+    --prompt-file "$RUN_DIR/briefs/gate-<m>-codex.prompt" --out "$_OUT" >/dev/null 2>&1
+  $_LANE summary --out "$_OUT" 2>/dev/null
+  _V=$($_LANE adjudicate --out "$_OUT" --seat codex --gate-class "$GATE_CLASS" --reviewed-sha "$REVIEWED_SHA" --requested-model "$_CM" 2>/dev/null); _RC=$?
+  echo "codex ${_V:-VERDICT=ABSENT reason=no_verdict_line adjudicate_exit=$_RC}"
+  case "$_RC" in 0) _CODEX_STATUS=PRESENT_CLEAN ;; 10) _CODEX_STATUS=PRESENT_P1 ;; 11) _CODEX_STATUS=INVALID ;; *) _CODEX_STATUS=ABSENT ;; esac
 fi
 case "$_CODEX_STATUS" in
-  ok) : ;;                                        # completed review is on stdout
-  disabled) : ;;                                  # already reported above
-  quota)   echo "Codex QUOTA-limited ($(grep -iEo 'try again at[^\"}]*' "$TMPERR" | head -1 || echo 'usage limit hit')). ABSENT for THIS gate ONLY — the next milestone's gate re-attempts; do NOT carry this forward as a run-wide skip." ;;
-  timeout) echo "Codex timed out at high AND medium — ABSENT for this gate; the next gate re-attempts." ;;
-  error)   echo "[codex exit $_CODEX_EXIT] $(head -1 "$TMPERR" 2>/dev/null || echo 'no stderr') — ABSENT for this gate; the next gate re-attempts." ;;
+  PRESENT_CLEAN|PRESENT_P1) : ;;   # PRESENT — p1_count on the VERDICT line decides; the findings text is read only by a synthesis-tier fix dispatch
+  disabled) : ;;                   # already reported above
+  INVALID)  echo "Codex INVALID — never ABSENT: critical gate → BLOCKED; ordinary gate → re-run this member clean before the gate can pass." ;;
+  *)        echo "Codex ABSENT for THIS gate ONLY (quota cooling / auth / timeout / throttle / helper never ran) — the next gate re-probes and re-attempts; never a run-wide skip." ;;
 esac
-rm -f "$TMPERR"
 ```
 
-*Grok member — read-only sandbox, effort ladder `high` → `medium` on timeout, no `-m` pin (let the
-CLI use its own current default rather than hardcoding a model id that can silently deprecate —
-`grok-build` did exactly that between 2026-07-15 and 2026-07-16, turning into an instant "unknown
-model id" error and losing this forum member; the current default IS the latest, grok-4.5 as of
-2026-07-17). Grok has no `review` subcommand, so the diff scope lives in the prompt:*
+*Grok member — latest model (no `-m` in the recipe; the helper resolves and pins the CLI default; a
+family mismatch is `model_mismatch: true`, a coercion NOTE — the only seat with that concession),
+ladder `high`@600s → `medium`@300s, `--permission-mode plan` in its OWN detached worktree. `--sandbox
+read-only` is tried first and falls back to plan-only on the "could not apply the 'read-only' sandbox
+profile" refusal (`sandbox: none`) — NOT an OS boundary, so the helper fingerprints both worktrees AND
+the shared git control state before/after (bounded); any change or snapshot timeout → `tainted: true`
+→ INVALID. NEVER `--always-approve`. `grok_reviews=disabled` (bin default) makes L4 ABSENT for EVERY
+use. No `review` subcommand — the diff scope lives in the prompt:*
 
 ```bash
-# Honor config + availability. If grok is missing or grok_reviews is disabled, mark the Grok
-# member ABSENT (see Forum fallback below — do NOT fail the gate on that alone).
-# grok_reviews may be unset (gstack-config returns EMPTY, exit 0 — the || fallback does
-# NOT fire). Empty/unknown means enabled; gate on the explicit negative only.
-_GROK_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get grok_reviews 2>/dev/null || echo enabled)
+# grok_reviews defaults to `disabled` (paid, opt-in): ONLY an explicit `enabled` turns this member on — an
+# empty/unknown value is NOT enabled; a missing CLI is `absent`. Same helper-owned ladder/classes as Codex.
+_GROK_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get grok_reviews 2>/dev/null || echo disabled)
+[ "$_GROK_ENABLED" = "enabled" ] || _GROK_ENABLED=disabled
 command -v grok >/dev/null 2>&1 || _GROK_ENABLED=absent
-
-TMPERR_GROK=$(mktemp "${TMP_ROOT:-/tmp}/grok-err-XXXXXX")   # no .txt suffix: BSD mktemp needs trailing X's
-GROK_PROMPT=$(cat <<'EOF'
+_LANE=~/.claude/skills/gstack/bin/gstack-lane   # self-contained: this recipe is its own Bash call
+. "$RUN_DIR/gates/<m>/env"
+_AIDG=$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM; _ADIRG="$RUN_DIR/attempts/gate-<m>-grok/$_AIDG"; _OUTG="$_ADIRG/review.md"
+cat > "$RUN_DIR/briefs/gate-<m>-grok.prompt" <<EOF
 IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify any files. Stay focused on the repository code only.
 
-You are an adversarial code reviewer. Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review ONLY those changes. Think like an attacker and a chaos engineer: edge cases, race conditions, security holes, resource leaks, failure modes, silent data-corruption paths. Tag every finding [P1] (ship-blocker) or [P2] (lower severity). No compliments — only problems. If there are no [P1] issues, say so explicitly.
+You are an adversarial code reviewer. Review the commits $BASE_SHA...$REVIEWED_SHA (this checkout is at $REVIEWED_SHA). Run git diff $BASE_SHA...$REVIEWED_SHA to see the diff and review ONLY those changes. Think like an attacker and a chaos engineer: edge cases, race conditions, security holes, resource leaks, failure modes, silent data-corruption paths. Tag every finding [P1] (ship-blocker) or [P2] (lower severity), one finding per line with the tag first. No compliments — only problems. If there are no [P1] issues, say so explicitly. End your review with exactly this final line and nothing after it: REVIEW_COMPLETE: findings=<n> (n = the number of [P1]/[P2] findings you listed; 0 if none) — but ONLY if you actually read and reviewed the diff; if you could not, end instead with REVIEW_INCOMPLETE: <reason>.
 EOF
-)
-# Reuse codex's command-agnostic timeout wrapper (gtimeout -> timeout -> unwrapped; exit 124 =
-# timeout). --sandbox read-only is grok's OS-level guardrail (reads anywhere, cannot write repo
-# files, child network blocked — its own inference still works); --always-approve stops headless
-# from hanging on an approval prompt. Still no -m pin (see above). The CLI's current default
-# (grok-4.5) DOES accept --effort high|medium|low — verified 2026-07-17; the older "the default
-# model has no reasoning-effort flag" note applied to grok-build and is obsolete.
-# Same error-class-aware retry as the Codex member (grok can also hit quota / capacity / rate
-# limits, all exit !=0): TIMEOUT (124) -> step down high@600s -> medium@300s; TRANSIENT (capacity/
-# overload/rate/5xx/network) -> backoff + retry same effort; QUOTA -> ABSENT this gate only, next
-# gate re-attempts. Max 4 attempts. grok_reviews=disabled is the only run-durable disable.
 if [ "$_GROK_ENABLED" = "absent" ] || [ "$_GROK_ENABLED" = "disabled" ] || [ "$_GROK_ENABLED" = "off" ]; then
   _GROK_STATUS=disabled   # gate on the flag for real — absent/off must skip the invocation
   echo "Grok member disabled/absent (grok_reviews=$_GROK_ENABLED) — ABSENT ($([ "$_GROK_ENABLED" = "absent" ] && echo 'CLI not installed' || echo 'user config'))."
+elif ! mkdir -p "$_ADIRG" || [ -e "$_OUTG" ]; then
+  _GROK_STATUS=ABSENT; echo "Grok attempt dir not fresh ($_ADIRG) — ABSENT this gate; never reuse a prior attempt's evidence."
 else
-  if ! command -v _gstack_codex_timeout_wrapper >/dev/null 2>&1; then _gstack_codex_timeout_wrapper() { shift; "$@"; }; fi
-  # Substitute <base> in $GROK_PROMPT with the detected base branch BEFORE running.
-  _eff=high; _to=600; _GROK_EXIT=1; _GROK_STATUS=""; _try=0
-  while [ "$_try" -lt 4 ]; do
-    _try=$((_try + 1))
-    _gstack_codex_timeout_wrapper "$_to" grok -p "$GROK_PROMPT" --effort "$_eff" --sandbox read-only --always-approve --output-format json < /dev/null 2>"$TMPERR_GROK"
-    _GROK_EXIT=$?
-    [ "$_GROK_EXIT" = "0" ] && { _GROK_STATUS=ok; break; }
-    _glc=$(tr 'A-Z' 'a-z' < "$TMPERR_GROK" 2>/dev/null)
-    case "$_glc" in *"usage limit"*|*"try again at"*|*quota*|*"exceeded your"*) _GROK_STATUS=quota; break ;; esac
-    if [ "$_GROK_EXIT" = "124" ]; then
-      if [ "$_eff" = "high" ]; then
-        echo "Grok timed out at high (${_to}s) — stepping down to medium…"; _eff=medium; _to=300; _try=$((_try - 1)); continue   # step-down never consumes an attempt
-      fi
-      _GROK_STATUS=timeout; break
-    fi
-    case "$_glc" in
-      *capacity*|*overloaded*|*"rate limit"*|*temporarily*|*connection*|*network*|*429*|*500*|*502*|*503*|*504*)
-        if [ "$_try" -lt 4 ]; then echo "Grok transient error (exit $_GROK_EXIT) — backoff $((_try * 5))s, retry $((_try + 1))/4 at $_eff…"; sleep $((_try * 5)); fi
-        continue ;;
-      *) _GROK_STATUS=error; break ;;
-    esac
-  done
-  [ -z "$_GROK_STATUS" ] && _GROK_STATUS=error
+  $_LANE run --run-dir "$RUN_DIR" --lane l4 --mode review --effort high --timeout 600 --retry-timeout 300 \
+    --cwd "$RUN_DIR/wt/gate-<m>-grok" --prompt-file "$RUN_DIR/briefs/gate-<m>-grok.prompt" --out "$_OUTG" >/dev/null 2>&1
+  $_LANE summary --out "$_OUTG" 2>/dev/null
+  _VG=$($_LANE adjudicate --out "$_OUTG" --seat grok --gate-class "$GATE_CLASS" --reviewed-sha "$REVIEWED_SHA" 2>/dev/null); _RCG=$?
+  echo "grok ${_VG:-VERDICT=ABSENT reason=no_verdict_line adjudicate_exit=$_RCG}"
+  case "$_RCG" in 0) _GROK_STATUS=PRESENT_CLEAN ;; 10) _GROK_STATUS=PRESENT_P1 ;; 11) _GROK_STATUS=INVALID ;; *) _GROK_STATUS=ABSENT ;; esac
 fi
 case "$_GROK_STATUS" in
-  ok) : ;;
+  PRESENT_CLEAN|PRESENT_P1) : ;;   # PRESENT — a `,model_mismatch` note on the line is recorded, never a failure
   disabled) : ;;
-  quota)   echo "Grok QUOTA-limited — ABSENT for THIS gate ONLY; the next milestone's gate re-attempts. Do NOT carry forward." ;;
-  timeout) echo "Grok timed out at high AND medium — ABSENT for this gate; the next gate re-attempts." ;;
-  error)   echo "[grok exit $_GROK_EXIT] $(head -1 "$TMPERR_GROK" 2>/dev/null || echo 'no stderr') — ABSENT for this gate; the next gate re-attempts." ;;
+  INVALID)  echo "Grok INVALID (tainted worktree or git control state / rejected / stale sha / empty body) — never ABSENT: critical gate → BLOCKED; ordinary gate → re-run this member clean before the gate can pass." ;;
+  *)        echo "Grok ABSENT for THIS gate ONLY (quota cooling / auth / timeout / throttle / helper never ran) — the next gate re-probes and re-attempts. Do NOT carry forward." ;;
 esac
-rm -f "$TMPERR_GROK"
 ```
 
-**Forum fallback (the station must stay satisfiable).** Run BOTH members; each independently
-resolves to PRESENT (ran and returned a completed review) or ABSENT (missing / disabled /
-unable-to-review / timed-out). If at least ONE member is PRESENT, the forum stands on cross-model
-coverage — note any ABSENT member in the envelope and continue. If BOTH are ABSENT, fall back to a
-SINGLE Claude adversarial subagent — dispatched at **Opus 4.8-max** (`claude-opus-4-8`), fresh
-context, findings tagged `[single-model]`; like every dispatch it names its `model:` explicitly
-rather than inheriting the session default — and print one line:
-`"Codex + Grok both unavailable/disabled; ran a single-model Claude adversarial pass ([single-model])."`
+After both members return: `gstack-lane worktree rm --run-dir "$RUN_DIR" --task gate-<m>-codex`
+(and `-grok`; `--force` for a tainted one — it is evidence of a bad review, not work).
 
-**ABSENT is PER-GATE, never per-run (this is not optional).** A member that was ABSENT in one
-milestone's gate — for ANY reason: quota, capacity, timeout, transient error — MUST be re-attempted
-by running its full recipe above at the NEXT milestone's gate. Do NOT cache "Codex/Grok
-unavailable" and skip it for the rest of the run: quota self-heals at its reset time, and
-capacity/timeout/network are per-attempt conditions. Dispatch the member's recipe fresh every gate.
-The ONLY run-durable disable is the `codex_reviews` / `grok_reviews` config being off (a user
-choice). If a member is ABSENT, the audit-trail/review-log entry states the class (quota / timeout /
-transient / disabled) so the skip is visible and the reader knows it will be retried, not abandoned.
+**Forum fallback and the diversity floor.** Each member resolves to PRESENT (valid completed
+review), INVALID (completed but unusable — adjudicated above) or ABSENT (missing / disabled / quota /
+timeout / throttle-exhausted). Then:
+- **INVALID never counts as ABSENT.** On a `critical` gate an INVALID member → the gate is
+  **`BLOCKED`** (AskUserQuestion below). On an `ordinary` gate the gate cannot pass until that member
+  is re-run clean at the same `REVIEWED_SHA` — each re-run counts as a gate round toward the >3 cap.
+- **`GATE_CLASS=ordinary`:** both PRESENT, no `[P1]` → `CLEAN`. One ABSENT, the other PRESENT
+  without `[P1]` → the gate passes as **`DEGRADED`** — never `CLEAN` (audit-trailed; the run can
+  then end `COMPLETE_UNVERIFIED` at best, never `COMPLETE_VERIFIED`). BOTH ABSENT → one
+  SINGLE Claude adversarial subagent (fresh context, **Opus 5.5** `claude-opus-5-5` on L2 when
+  present, else L1, or **Opus 4.8-max**; `model:` named explicitly), findings tagged
+  `[single-model]`, print `"Codex + Grok both unavailable/disabled; ran a single-model Claude
+  adversarial pass ([single-model])."` — `DEGRADED` at best.
+- **`GATE_CLASS=critical`** (contains a T3 task, or the FINAL milestone): at least ONE
+  other-vendor (non-Claude) member must be PRESENT and valid, else the gate is **`BLOCKED`** —
+  AskUserQuestion ONCE (decision-brief format): **A) Retry later** (re-run the forum after the
+  lane's `next_probe_at`, or after the INVALID cause is fixed), **B) Waive the other-vendor seat for
+  this gate** (audit-trailed; the gate is then `DEGRADED`), **C) Stop**. Never a `[single-model]`
+  pass-through here.
+- Per task (step b) the same floor applies: diversity no enabled, present vendor can satisfy →
+  the task is `BLOCKED` with that reason immediately, never an indefinite PENDING.
+
+**ABSENT is PER-GATE, never per-run (this is not optional).** A member ABSENT at one gate — quota,
+capacity, timeout, transient, auth — MUST be re-attempted at the NEXT gate: the gate-start block
+re-probes absent/cooling lanes and the full recipe runs again. Never cache "Codex/Grok unavailable"
+for the run: quota resets, logins get repaired, capacity/timeout are per-attempt. The ONLY
+run-durable disable is `codex_reviews` / `grok_reviews` being off. An ABSENT member's audit-trail /
+review-log entry states its class so the skip is visible and known to be retried, not abandoned.
 
 **Gate verdict (fail-closed — absence of a positive success signal is a FAIL):** PASS only when
 every PRESENT member returned an explicit completed review whose max severity is `[P2]` or none.
-FAIL on any `[P1]`/P0 from EITHER model, or on "unable to review" / "no diff" / empty or
-malformed output from a member that RAN (exit 0 but unusable = FAIL, not ABSENT). A member whose
-recipe classified it ABSENT (disabled / quota / timeout after both rungs / transient-exhausted /
-CLI missing) is ABSENT — those exits were already adjudicated by the recipe and are NOT
-re-counted as FAILs here. A member being ABSENT is not by itself a PASS or a FAIL — but if BOTH are ABSENT and even the `[single-model]`
-fallback did not complete, the station FAILs. Never read a silent no-op as clean. Log EACH member's
-verdict to the review-log so a skipped/failed review is visible.
+FAIL on any `[P1]`/P0 from EITHER model, or on INVALID evidence per the adjudication order above
+(incl. "unable to review" / "no diff" / malformed output — exit 0 but unusable = FAIL, not ABSENT).
+An ABSENT member is already adjudicated — NOT re-counted as a FAIL; the diversity floor decides
+`CLEAN` / `DEGRADED` / `BLOCKED`. If BOTH are ABSENT and even the `[single-model]` fallback did not
+complete, the station FAILs. Never read a silent no-op as clean.
 
-**Filesystem-boundary note:** the codex boundary text above uses the host-neutral phrasing
-(matching autoplan's codex recipes) so it renders correctly on every host — keep its intent in
-sync with codex/SKILL.md.tmpl's canonical boundary, since this recipe calls `codex review`
-directly. The grok member enforces read-only at the OS level via `--sandbox read-only` (writes and
-child network blocked), so it cannot mutate the repo even if the boundary prose is ignored.
+**Filesystem-boundary note:** the codex boundary text above is host-neutral (matching autoplan's
+codex recipes) — keep its intent in sync with codex/SKILL.md.tmpl's canonical boundary. Codex
+reviews run `-s read-only`; Grok's plan mode is NOT an OS boundary, so each member gets its own
+disposable worktree and the helper's before/after snapshot turns any write into `tainted` → INVALID.
 
-**Per-gate dashboard log — one entry PER review PER gate** (the gate runs four reviews —
-eng-review, /review, and the Codex + Grok forum; log four entries, all `via: "autobuilder-loop"`,
-sharing the same commit):
+**Per-gate dashboard log — one entry PER review PER gate** (four reviews → four entries, all
+`via: "autobuilder-loop"`, same commit):
 ```bash
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null)
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -1254,13 +1407,10 @@ TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"grok","timestamp":"'"$TIMESTAMP"'","status":"STATUS","unresolved":N,"via":"autobuilder-loop","commit":"'"$COMMIT"'"}'
 ```
 `status` = `clean` if no unresolved issues, else `issues_open`. Log the codex and grok entries
-separately so the forum's cross-model coverage is visible per member. If a member is ABSENT
-(unavailable/disabled), still log its entry with a status noting the absence; when BOTH members
-are ABSENT and the loop falls back to the single-model Claude pass, note the fallback in the codex
-and grok entries' status/fields so the substitution is visible. This is separate from — and in
-addition to — the run-level telemetry the preamble renders in the "Telemetry (run last)" block
-above; the preamble handles that one, do not duplicate it. All review-log calls are best-effort —
-never block the loop.
+separately so cross-model coverage is visible per member; an ABSENT / INVALID member still gets its
+entry with a status naming the class, and a `[single-model]` fallback is noted in both entries. This
+is separate from the preamble's run-level "Telemetry (run last)" block — do not duplicate it. All
+review-log calls are best-effort — never block the loop.
 
 ---
 
@@ -1268,15 +1418,15 @@ never block the loop.
 
 - **Orchestrator only.** Never write/edit code, never read source/diffs/logs into your
   context, never run the build yourself. Your tools are `Agent`, `Bash`, `AskUserQuestion` —
-  top-level Bash is only for the Codex + Grok adversarial gate, review-log/telemetry, step 0
-  workspace setup, and the SHIP_METER (number-emitting git commands only — same list as Core
-  principles; the two lists are one rule). Everything real happens in a subagent that returns
-  a compact envelope.
-- **Route every dispatch.** Classify complexity first; emit `model:` every time. Probe Fable
-  once at loop start; on unavailability route orchestration/synthesis to Opus 4.8-max
-  (explicit `claude-opus-4-8`) and say so. **Earlier Opus 5 builds code, they never
-  orchestrate; Opus 5.5 may do both**; Fable/Opus 4.8/Opus 5.5 orchestrate and consolidate; Sonnet takes moderate work, Haiku the mechanical
-  and utility work. Hard work never silently degrades below the Opus class.
+  top-level Bash is only for `gstack-lane`, review-log/telemetry, step 0 setup and the SHIP_METER
+  (same list as Core principles; the two lists are one rule). Everything real happens in a
+  subagent or an external lane that returns a compact envelope.
+- **Route every dispatch through the lane table.** Classify (R or T0–T3) first; emit `model:`
+  (and lane) every time. Probe Fable + lanes once at loop start; on Fable unavailability route
+  orchestration/synthesis to Opus 4.8-max and say so. Earlier Opus 5 builds never orchestrate;
+  L3 Codex is the T0–T2 pool, L2 Opus 5.5 owns T3, L1 implements only as last spillover (R and T0
+  on L1 Haiku are exempt from that reserve), Fable only as an escalation.
+  A tier never silently degrades below its class — never to Sonnet/Luna/Haiku (R is Haiku by design).
 - **Ship in chunks — the 5k/4k rule.** Chunk the plan into ship-units of ≤5,000 LOC at
   resolution; meter the diff after every milestone (`SHIP_METER`); warn at 4,000 (current
   milestone becomes the unit's last) and HARD-STOP at 5,000 — gate, Docker-verify, /ship the
@@ -1285,11 +1435,13 @@ never block the loop.
 - **Gate EVERY milestone.** eng-review + /review + Codex + Grok (the adversarial forum), fix
   until clean. There is no major/minor distinction and no "it's small" skip — the only carve-out is a plan-labeled
   docs-only milestone. The deferral valve batches at most one small, non-sensitive milestone
-  forward, marks it "built — gate pending", and never applies to the final milestone.
-- **Re-attempt the forum members every gate.** A Codex/Grok ABSENT from a prior gate (quota,
-  capacity, timeout, transient) is NEVER carried forward — run each member's full recipe fresh at
-  every milestone's gate; quota self-heals at reset and capacity/timeout are per-attempt. Only the
-  `codex_reviews`/`grok_reviews` config being off is a durable skip.
+  forward, marks it "built — gate pending", and never applies to the final milestone. Forum
+  verdicts come from `gstack-lane adjudicate`, relayed verbatim: INVALID evidence is a FAIL, never
+  ABSENT; a gate with an ABSENT forum member is `DEGRADED`, never `CLEAN`; a T3-containing or final
+  milestone with no valid other-vendor member is `BLOCKED` (ask: retry / waive / stop).
+- **Re-attempt the forum members every gate.** An ABSENT member (quota, capacity, timeout, auth)
+  is NEVER carried forward — the gate-start block re-probes absent/cooling lanes and each member's
+  full recipe runs fresh. Only the `codex_reviews`/`grok_reviews` config being off is a durable skip.
 - **Docker-verify before done.** App reachable (2xx/3xx) on its port, zero console/network
   errors, every acceptance path PASS, tests+build green on fresh evidence. `NO_SERVER` = fail;
   4xx/5xx = fail. No Docker setup → AskUserQuestion (fix / waive / stop), never a silent skip.

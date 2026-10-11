@@ -1,0 +1,2651 @@
+#!/usr/bin/env bash
+# gstack-lane — execution-lane MECHANICS for /autobuilder-loop (v1.7.0).
+#
+# Design contract: docs/designs/AUTOBUILDER_LANES.md — sections "bin/gstack-lane
+# (helper contract)", "Quota & health" and "Evidence" (+ fix-round decisions D1–D9,
+# E1–E10). Routing POLICY lives in the skill; this script only builds each lane's CLI
+# command, runs it under a hard deadline, classifies the outcome from the CLI's
+# STRUCTURED output, persists lane health in <run-dir>/lanes.json, and writes
+# attempt-scoped evidence.
+#
+# Lanes
+#   l2  second Claude account  `claude -p` with CLAUDE_CONFIG_DIR=<claude dir>
+#   l3  Codex (ChatGPT sub)    `codex exec --json` with a hermetic CODEX_HOME outside the run tree
+#   l4  Grok                   `grok --prompt-file` (only when gstack-config grok_reviews=enabled)
+#
+# SUBCOMMANDS
+#   gstack-lane probe --run-dir <dir> [--json] [--lanes l2,l3,l4] [--timeout <s>]
+#                     [--claude-dir <d>]
+#       Cheap "reply OK" round trip per lane, in parallel: l2 claude-haiku-5-5
+#       (plan mode, read-only tools), l3 gpt-6-luna effort low (read-only), l4 the
+#       grok default model resolved from `grok models`, passed as an explicit -m, at
+#       effort low with a deadline of at least 120 s (H11: a reachability check). These
+#       are the ONLY built-in model defaults. A lane whose next_probe_at is still in the
+#       future is NOT probed ("still cooling"); l4 is ABSENT without any invocation
+#       when grok_reviews is not `enabled`. Merges into <dir>/lanes.json; prints one
+#       line per lane (or, with --json, the whole lanes.json). Default --timeout 60.
+#       Probe mapping: ok→ok, quota→cooling, auth→absent, throttle→ok (reachable,
+#       rate-limited), timeout/error→cooling for GSTACK_LANE_PROBE_RETRY_S (300 s) —
+#       subject to EVENT ORDERING (H16/V2, every lanes.json update, probe or run): a result
+#       never shortens an active longer cooldown, never replaces an `absent` lane with
+#       cooling, and never overwrites a quota/auth event recorded after the attempt began
+#       (a late ok, quota OR auth result keeps the newer state).
+#       Probe evidence: <dir>/attempts/probe-<lane>/<generated id>/out.txt.
+#
+#   gstack-lane run --run-dir <dir> --lane l2|l3|l4 --mode impl|review
+#                   --effort <e> --cwd <dir> --prompt-file <f>
+#                   --out <dir>/attempts/<task>/<attempt_id>/<file>
+#                   [--model <id>] [--schema <f>] [--timeout <s>] [--retry-timeout <s>]
+#                   [--tier T0|T1|T2|T3] [--claude-dir <d>] [--allow-cmd <prefix>]...
+#                   [--allow-credit-billing] [--task <id>] [--attempt-id <id>]
+#       ATTEMPT-SCOPED OUTPUT (D3): --out must be <run-dir>/attempts/<task>/<attempt_id>/<file>
+#       (the caller mints the attempt dir and may put the prompt in it). <out>,
+#       <out>.status.json, <out>.stdout.log, <out>.stderr.log and <out>.logs must NOT
+#       exist — the run claims the attempt by mkdir <out>.logs and never deletes
+#       anything. status attempt_id = the <attempt_id> path segment when it matches
+#       ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (then --attempt-id, if given, must equal it),
+#       else --attempt-id, else a generated id; task likewise from <task> / --task.
+#       PER-INVOCATION OUTPUTS (E3): every internal invocation (first try, throttle
+#       retry, sandbox-refusal rerun, timeout step-down) writes <out>.logs/inv-<n>/
+#       {stdout,stderr,out}. Only the FINAL invocation's verified output is published
+#       to <out>, and only when the class is ok; checks (empty review body, model) read
+#       that invocation only.
+#       --model: required for l2/l3; optional for l4 (omitted → the `Default model:`
+#       line of `grok models` is resolved and passed as -m, requested_model_source
+#       "grok-default"; unresolvable → class auth / lane absent, or timeout if `grok models`
+#       hit its deadline — never a run without -m).
+#       --timeout default 600. --retry-timeout default: 300 when --timeout is 600,
+#       420 when it is 900, otherwise half (min 1) — used only by the REVIEW step-down.
+#       --schema <f>: l3 --output-schema <f>; l2 and l4 --json-schema <schema json>
+#       (recorded as <schema-file> in cmd_redacted).
+#       --allow-cmd (repeatable, D9/E10): a vetted check-command prefix → Bash(<prefix>:*)
+#       on l2 --allowedTools / l4 --allow. Accepted only as a structured runner +
+#       subcommand from a fixed table: bun test · bun run <s> · npm test · npm run <s> ·
+#       pnpm test · pnpm run <s> · yarn test · yarn run <s> · make <target> · cargo test ·
+#       cargo build · go test · pytest · python -m pytest · python3 -m pytest ·
+#       uv run pytest · swift test · xcodebuild test · ./gradlew test · gradle test ·
+#       mvn test · dotnet test · mix test · bundle exec rspec · rspec — optionally
+#       followed by plain arguments. Every token's basename is checked: shells,
+#       interpreters and downloaders (sh bash zsh dash ksh fish csh tcsh env eval exec
+#       python python3 node deno perl ruby php lua osascript curl wget nc ssh sudo xargs
+#       npx bunx …) are refused, as are absolute paths and any `..` path component.
+#       Per-lane commands (process cwd = --cwd):
+#         l3 impl   env CODEX_HOME=<home> codex exec --json -C <cwd> -s workspace-write
+#                   -c approval_policy="never" -c service_tier="default" -c model="<m>"
+#                   -c model_reasoning_effort="<e>" [--output-schema <f>] - < prompt
+#                   (stdin is the prompt FILE — a regular file, never an open pipe)
+#         l3 review same with -s read-only
+#         l2 impl   env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN
+#                   [-u every other CLAUDE_CODE_*TOKEN*] CLAUDE_CONFIG_DIR=<dir> claude -p
+#                   --restricted --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+#                   --settings '{"disableAllHooks":true}' --model <m> --effort <e>
+#                   --permission-mode dontAsk --tools Read,Grep,Glob,Edit,Write,Bash
+#                   --allowedTools Read,Grep,Glob,Edit,Write[,Bash(<vetted>:*)…]
+#                   --output-format json [--json-schema <schema json>] < prompt
+#         l2 review same isolation, --permission-mode plan, --tools Read,Grep,Glob
+#                   --allowedTools Read,Grep,Glob (no Bash at all)
+#                   The isolation prefix (env -u … claude -p --restricted --strict-mcp-config
+#                   --mcp-config '{"mcpServers":{}}' --settings '{"disableAllHooks":true}') is on
+#                   EVERY l2 mode (impl, review, probe). claude's own --help (2.1.294):
+#                   --restricted "ignores user, project and local settings files (managed
+#                   settings and --settings still apply)" — so a repo .claude/settings.json
+#                   (permissions, env such as ANTHROPIC_BASE_URL) is never loaded, and
+#                   --setting-sources is not needed (H20).
+#         l4 review grok --prompt-file <f> -m <m> --reasoning-effort <e> --sandbox read-only
+#                   --permission-mode plan [--json-schema <schema json>] --output-format json;
+#                   on "could not apply the
+#                   'read-only' sandbox profile" it reruns at once without --sandbox and
+#                   records "sandbox":"none". --cwd must be a registered, detached LINKED
+#                   worktree directly under <run-dir>/wt/ (one per forum member). TAINT
+#                   (E5/E6): before and after, a deadline-bounded, inert snapshot
+#                   fingerprints the shared git control state (common dir config, HEAD,
+#                   packed-refs, hooks/, info/, every ref, core.hooksPath target, and EVERY
+#                   snapshotted worktree's own config.worktree — H3) and the
+#                   review worktree, the primary worktree and EVERY other linked worktree
+#                   under <run-dir>/wt/ (HEAD, branch, status, diff, untracked contents —
+#                   computed with every configured filter.<name> made a pass-through);
+#                   <run-dir>/lanes.json must still hold bytes the helper itself wrote
+#                   (journal lanes.json.hashes, read under the writers' flock — F6); a
+#                   lanes.json that existed at launch and is missing/unreadable after is
+#                   tainted too (F5). Every hooks/config entry is fingerprinted with its
+#                   type+mode bits (F5: chmod +x on a disabled hook shows). Any change,
+#                   or a snapshot that fails/times out → class error, "tainted": true
+#                   (the review is INVALID; a failed pre-snapshot refuses to launch).
+#         l4 impl   grok --prompt-file <f> -m <m> --reasoning-effort <e> --permission-mode
+#                   dontAsk --allow Read --allow Edit --allow Write [--allow Bash(<vetted>:*)…]
+#                   [--json-schema <schema json>] --output-format json (T0/T1 only)
+#       `--always-approve` is NEVER passed. `--schema` reaches grok as --json-schema (H13;
+#       grok 1.0.40: "JSON Schema for structured output").
+#       Policy refusals (class "error", exit 1, status written with "rejected"):
+#         l3 effort ultra|max; efforts outside l2 low|medium|high|xhigh|max ·
+#         l3 none|minimal|low|medium|high|xhigh · l4 low|medium|high|xhigh; l2 Fable
+#         (claude-fable-* / fable) without --allow-credit-billing; l4 impl without
+#         --tier T0|T1; l4 review outside a registered detached <run-dir>/wt/<id>;
+#         any --cwd that is, contains, or lies inside the hermetic CODEX_HOME.
+#       Lane refusals (nothing invoked): grok_reviews≠enabled → l4 absent (class auth,
+#       exit 5, reason "disabled by grok_reviews"); lane cooling with next_probe_at in
+#       the future → class quota (exit 4, "skipped":"cooling"); lane absent → class
+#       auth (exit 5, "skipped":"absent") until a probe clears it.
+#       CLASSIFICATION (E1) — only from STRUCTURED output, never stderr or agent text:
+#         l3: the `codex exec --json` event stream on stdout. `turn.completed` (exit 0)
+#             = ok; `turn.failed` → its error.message is classified; `{"type":"error"}`
+#             events are transient-retry notices and never a final class; no terminal
+#             event (or a nonzero exit after turn.completed) = error.
+#         l2/l4: the top-level JSON object on stdout — is_error / subtype "error…" /
+#             type "error" / an `error` field → that error text is classified; exit 0
+#             with no error = ok; nonzero exit without a structured error = error. The
+#             error text is the vendor's error/message/errors fields (+ result/text only
+#             when the subtype is not "error…": an agent-ended run — error_max_turns,
+#             error_during_execution — carries the AGENT's prose there, never classified).
+#         Error text → quota (usage limit, insufficient_quota, exceeded your [current]
+#         quota, quota exceeded/exhausted, "limit reached|<epoch>") > auth (401/403,
+#         unauthorized, forbidden, not logged in, authentication, …) > throttle (429, rate
+#         limit — incl. OpenAI's "Rate limit reached … try again in 20s" — overloaded, 5xx,
+#         Reconnecting, network, …) > error. A bare "limit reached" is never quota (H19).
+#         (The grok sandbox-refusal phrase on stderr only triggers the plan-only rerun;
+#         it is never a class.)
+#       Outcome handling:
+#         timeout  → review: exactly ONE retry, effort stepped down (max/xhigh/high →
+#                    medium, medium → low, lower stays), under --retry-timeout. impl: NO
+#                    retry — class timeout at once, so an implementation never silently
+#                    runs below its tier's routing floor (H14).
+#         throttle → jittered exponential backoff retries, only while the next attempt
+#                    still fits inside the SAME deadline.
+#         quota    → lane cooling; next_probe_at = parsed reset ("try again at <time>",
+#                    "try again in …", "limit reached|<epoch>", "resets at …") else
+#                    now+15 min doubling per consecutive hit up to 60 min. Hits during an
+#                    active cooldown count once; every quota/auth event re-stamps
+#                    last_event_at (E9).
+#         auth     → lane absent (also: CLI missing, l2 dir without credentials, l3
+#                    without auth.json / CODEX_API_KEY / OPENAI_API_KEY).
+#         ok       → lane ok, consecutive counters reset, runtime_model recorded — but only
+#                    if this attempt STARTED after the lane's last quota/auth event
+#                    (attempt_started_at > last_event_at, ms precision); otherwise the
+#                    newer cooling/absent state is kept.
+#         review with an empty/whitespace body → class error.
+#       l3 hermetic home (E4, addendum b): EVERY codex invocation gets a FRESH
+#       ${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/<task>+<attempt_id>-inv<n>/ (0700;
+#       the full attempt identity, H15 — `+` cannot occur in an id, so no two attempts share it): a
+#       0600 copy of ${CODEX_HOME:-~/.codex}/auth.json plus config.toml written to a temp
+#       file, mv -f'd over, re-read and byte-compared to the fixed template; ANY failure
+#       refuses that launch (class error, "hermetic codex config not installed" — also
+#       for the step-down retry). After the invocation its rollout is copied into
+#       inv-<n>/rollout.jsonl and the home is removed. If codex rotated the token, the new
+#       auth.json is written BACK to ${CODEX_HOME:-~/.codex}/auth.json (temp + mv, 0600)
+#       under a global flock (lane-codex-home/auth.lock) — only when the source still
+#       holds the bytes that were copied (compare-and-swap) and both files are JSON for
+#       the same tokens.account_id — so a rotation never strands the user's main login.
+#       The thread id that locates the rollout comes from a JSON parse of the
+#       `thread.started` event (the classifier emits it; a sed match is only the fallback).
+#       SIGTERM/SIGINT/SIGHUP mid-invocation: after the process tree is stopped, the same
+#       write-back (lock wait capped at 2 s) and home removal run before exit (H17).
+#
+#   gstack-lane summary --out <f>
+#       Prints ONE line from <f>.status.json — attempt_id lane model runtime_model class
+#       exit duration result_sha (+ reviewed_sha / tainted / model_mismatch /
+#       lane_update / skipped / rejected when present) — never the CLI transcript.
+#       Exits with the recorded exit_code (1 when the status file is missing/invalid).
+#
+#   gstack-lane adjudicate --out <f> --seat codex|grok --gate-class ordinary|critical
+#                          --reviewed-sha <sha> [--requested-model <m>]
+#       The forum-member verdict for ONE review attempt (D4: mechanics live here, the
+#       skill only reads the result). Reads <f>.status.json and the published <f>; prints
+#       exactly one line
+#         VERDICT=<PRESENT_CLEAN|PRESENT_P1|INVALID|ABSENT> reason=<token[,note]> p1_count=<n> runtime_model=<id|null>
+#       and exits 0 / 10 / 11 / 12 respectively (2 = usage, no line). --requested-model is
+#       required for the codex seat. Order — INVALID before ABSENT, never the reverse:
+#         no status file (the helper never ran: denied/missing)          → ABSENT  no_status
+#         unparseable status / no class                                  → INVALID status_unreadable
+#         tainted (any class)                                            → INVALID tainted
+#         class error (rejected refusal, crash, non-zero exit, empty body, taint — even
+#           with [P1]s in a body)                                        → INVALID rejected|class_error
+#         class auth|quota|timeout|throttle (incl. skipped cooling/absent) → ABSENT <class>[_skipped_<why>]
+#         any other non-ok class                                         → INVALID unknown_class
+#         class ok, but: lane ≠ seat (codex=l3, grok=l4) → seat_mismatch; mode ≠ review →
+#           not_a_review; exit_code or CLI exit ≠ 0 → nonzero_exit; status out/attempt_id ≠
+#           this --out → attempt_mismatch; reviewed_sha ≠ --reviewed-sha → stale_sha; grok
+#           without taint_checked → taint_unchecked; nothing published / whitespace-only
+#           review text → empty_body; no completion marker → no-completion-marker (V4: the
+#           review text's LAST non-empty line must be exactly `REVIEW_COMPLETE: findings=<n>`,
+#           n = its [P0]–[P3] finding count, optionally wrapped in ` ** or __ — an "I could
+#           not review / no diff" answer has none); codex runtime_model null → runtime_model_unverified,
+#           or not policy-compatible (critical: gpt-6-astra; ordinary: gpt-6.1-sol or
+#           gpt-6-astra; always ∈ {--requested-model, gpt-6-astra}) → runtime_model_not_allowed
+#                                                                        → INVALID
+#         otherwise PRESENT: p1_count = review-text lines whose FIRST token is a [P1] or
+#           [P0] tag (case-insensitive) — at line start, or after a list marker (- * + 1.
+#           1), optionally a [ ]/[x] checkbox), a heading #…, a blockquote >, a table pipe |,
+#           or an emphasis/code wrapper
+#           (** __ * _ `); a tag later in a line ("no [P1] issues") never counts. > 0 →
+#           PRESENT_P1 reason=p1_found, else PRESENT_CLEAN reason=no_p1. A grok family
+#           mismatch is a NOTE only (",model_mismatch"); codex gets no such concession. A
+#           marker count that differs from the tagged finding lines is a NOTE
+#           (",findings_count_mismatch"), never a verdict change.
+#       Review text: l3 = the published agent message; l2/l4 = the result/text/response
+#       string (or structured_output) of the published JSON.
+#
+#   gstack-lane commit --run-dir <dir> --task <id> --base <sha> -m <msg> [--out <f>]
+#   gstack-lane commit --cwd <worktree> --base <sha> -m <msg> [--run-dir <dir>] [--out <f>]
+#       --base is REQUIRED and must be an ancestor of HEAD. --task form (F3): <dir>/wt/<id>
+#       (a registered branch worktree); --base must EQUAL the base_sha that worktree add
+#       printed and recorded (refused if the record is missing or differs), and the
+#       repo-controlled execution surface (common-dir config, config.worktree, hooks/,
+#       info/, the core.hooksPath target — names, type+mode bits, contents; refs excluded)
+#       must match the fingerprint recorded at worktree add, else one stdout line
+#       `control_changed=<config|config.worktree|hooks|info|hookspath>` per change and
+#       exit 1 before anything is staged. --cwd form (the milestone/primary worktree, e.g.
+#       the skill's WIP commit): the top level of a git worktree on a branch, not a task
+#       worktree of --run-dir, and never on an `ab/*/*` task branch (H12: task commits
+#       must use --task --base, so the base record and fingerprint cannot be bypassed).
+#       Every git call is INERT (F2): GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null
+#       (identity and core.excludesFile — H8 — are read from the normal config and passed
+#       explicitly; an ignore file executes nothing), GIT_NO_REPLACE_OBJECTS=1 (H5: no
+#       refs/replace substitution can hide history), core.hooksPath=/dev/null + commit
+#       --no-verify, no fsmonitor, no signing or signature verification (gpg.program=
+#       /usr/bin/false, log.showSignature=false), no auto-gc, and every configured
+#       filter.<name> made a pass-through (clean/smudge=cat, process=, required=false) — no
+#       repo-controlled command runs.
+#       Both: `git add -A`, then REFUSE (exit 1, index reset, nothing committed, offenders
+#       reported, no result_sha) when any path touched by ANY commit in <base>..HEAD —
+#       each commit enumerated separately (rev-list), merges diffed against EACH parent
+#       (diff-tree -m, F1), even if a later commit deleted it — or by the net <base>→HEAD
+#       diff or by the staged delta — pre- AND post-image names (--no-renames: a rename is
+#       checked as delete + add), every list NUL-delimited (-z, H4: no quoted names) — is
+#       secret-shaped (H7):
+#         basename auth.json · .credentials.json · .claude.json · *.pem · *.key · *.ppk ·
+#           id_rsa* · id_ed25519* · id_ecdsa* · id_dsa* · .env · .env.* · .netrc · _netrc ·
+#           .git-credentials · *.p12 · *.pfx · *.keystore · *.jks · .pgpass · .envrc ·
+#           kubeconfig · *.kubeconfig; a path ending in .aws/credentials or .kube/config;
+#           any path containing "codex-home";
+#         under a .claude*/ directory: only credential-shaped basenames (*.key, *token*,
+#           plus the names above) — .claude/settings.json and .claude/commands/* commit fine;
+#         .npmrc · .pypirc · .yarnrc.yml only when a pre- or post-image blob holds an
+#           auth/token/password key (_authToken, _auth, _password, npmAuthToken,
+#           npmAuthIdent, password, token, …) — a blob that cannot be read fails closed;
+#         never refused (templates): *.example · .env.sample · .env.template.
+#       A refusal prints one stdout line per offender: `secret_path=<path>
+#       commit=<sha|net|staged>` (control characters in <path> shown as `?`). A staged
+#       added/modified path whose `filter` attribute names a driver is refused too —
+#       `filter_path=<path> filter=<driver>` — because the pass-through would store it raw
+#       (an LFS pointer's binary, a git-crypt file's PLAINTEXT). Any enumeration failure
+#       fails closed. Otherwise commit and print `result_sha=<sha>` and `base_sha=<sha>`
+#       (nothing staged → `no_changes=true`, exit 0). --out stamps result_sha/base_sha into
+#       <f>.status.json.
+#
+#   gstack-lane worktree add --run-dir <dir> --task <id> [--base <ref>] [--detach] [--repo <path>]
+#       Creates <dir>/wt/<id> on new branch ab/<basename(dir)>/<id> from --base (default
+#       HEAD), or with --detach a detached checkout at the resolved SHA (frozen review
+#       snapshot; one per forum member). Records the base SHA in <dir>/wt-meta/<id>.base.
+#       Prints the worktree path, then `base_sha=<sha>` (keep it: `commit --task` requires
+#       it as --base), and records the base + a control fingerprint in <dir>/wt-meta/
+#       <id>.{base,control}. --repo defaults to the repo containing the cwd. With
+#       --detach, an existing DETACHED registered worktree of this run with the same id
+#       is removed and recreated at the new --base (branch worktrees are never replaced).
+#       INERT (H1): every git call of add/rm/prune (and the checkout add implies) runs with
+#       GIT_CONFIG_NOSYSTEM=1, GIT_NO_REPLACE_OBJECTS=1, core.hooksPath=/dev/null (no
+#       post-checkout), core.fsmonitor=false, submodule.recurse=false and every configured
+#       filter.<name> a pass-through (no smudge: LFS/git-crypt files arrive as stored). V1:
+#       the worktree is registered with --no-checkout, its filters are enumerated INSIDE it
+#       (conditional includes — gitdir:, hasconfig: — resolve against the new gitdir/HEAD),
+#       and only then is it populated by an inert hard reset to <sha>. A repo whose own
+#       config (local/worktree, incl. included files) has an includeIf "onbranch:…"
+#       section is refused: one stdout line `control_changed=includeif-onbranch`, exit 1.
+#       The common-dir part of the control fingerprint (config, hooks/, info/) is recorded
+#       BEFORE the add — commit --task compares against exactly that record, so a change
+#       made while the add ran is refused there; config.worktree and the core.hooksPath
+#       target (relative to the new worktree) are recorded right after it.
+#   gstack-lane worktree rm --run-dir <dir> --task <id> [--force] [--repo <path>]
+#       Removes a registered worktree that resolves to exactly <dir>/wt/<id> (git
+#       refuses a dirty one unless --force). Branch worktree: deletes the branch only if
+#       fully merged (`git branch -d`), or with --force (`-D`); an unmerged branch is
+#       KEPT and reported. A detached worktree has no branch to delete. Inert like add.
+#
+# EXIT CODES
+#   run:      0 ok · 1 error (unclassified failure, policy refusal, tainted review, empty
+#             review, config not installed, internal error) · 2 usage (malformed
+#             invocation, --out exists or outside the attempts layout — nothing ran, no
+#             status file) · 3 throttle · 4 quota · 5 auth · 124 timeout (impl: the only
+#             attempt; review: the first attempt AND the step-down retry). Exit 0 ⇔
+#             status "class":"ok".
+#   summary:  the recorded exit_code; 1 when the status file is missing/invalid.
+#   adjudicate: 0 PRESENT_CLEAN · 10 PRESENT_P1 · 11 INVALID (also: the adjudicator
+#             itself failed — fail closed) · 12 ABSENT · 2 usage.
+#   probe/worktree/commit: 0 ok · 1 failure/refusal · 2 usage.
+#
+# FILES WRITTEN (run/probe create everything with umask 077: dirs 0700, files 0600)
+#   <run-dir>/lanes.json        {"l2"|"l3"|"l4": {status: ok|cooling|absent, reason,
+#                               next_probe_at, runtime_model, updated_at, status_since,
+#                               last_event_at, consecutive_quota, throttle_count}} —
+#                               temp file + rename while holding a KERNEL flock on
+#                               <run-dir>/lanes.lock (perl Fcntl, E8): released by the
+#                               kernel when the holder dies, so there is no stale-lock
+#                               reclamation. throttle_count = consecutive attempts that
+#                               ended in throttle (reset on ok).
+#   <out>                       published ONLY for class ok: l3 = the final agent_message
+#                               of the final invocation; l2/l4 = that invocation's stdout JSON.
+#   <out>.status.json           FLAT top-level keys: attempt_id, task, lane, mode, tier,
+#                               requested_model (+_source), requested_effort, effort (final),
+#                               runtime_model (+_source, runtime_models[]), runtime_effort
+#                               (l3, from the rollout), model_mismatch (bool), exit (CLI),
+#                               class, class_detail, exit_code, duration_s,
+#                               attempt_started_at, sandbox, reviewed_sha (review HEAD, else
+#                               null), tainted (bool) + taint_checked, throttle_count
+#                               (throttle-classified invocations in this attempt),
+#                               lane_throttle_count, result_sha / base_sha (null until
+#                               `commit --out`), published (bool), lane_update
+#                               (applied|none|pending), cmd_redacted (stdin prompt →
+#                               <prompt-file>, schema → <schema-file>), attempts[] (each
+#                               with its inv-<n> dir), lane_status{}.
+#   <out>.stdout.log / .stderr.log   final invocation's raw streams
+#   <out>.logs/inv-<n>/{stdout,stderr,out,rollout.jsonl}   every invocation; plus snapshot.* and grok-models.*
+#   ${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/<task>+<attempt_id>-inv<n>/   per-invocation
+#                               hermetic CODEX_HOME (removed after the invocation, also on
+#                               a signal): auth.json copy + a FIXED verified config.toml
+#                               (approval_policy="never", service_tier="default";
+#                               model/effort go only via -c). Never inside the run tree;
+#                               lane-codex-home/<run-id> is never usable as a cwd.
+#   ${CODEX_HOME:-~/.codex}/auth.json   rewritten ONLY for a same-account token rotation (see run)
+#   <run-dir>/lanes.lock        flock target (kept; its existence means nothing)
+#   <run-dir>/lanes.json.hashes sha256 of every lanes.json version the helper wrote (taint journal)
+#   <run-dir>/probe-cwd/        empty cwd for probes
+#   <run-dir>/wt/<id>, <run-dir>/wt-meta/<id>.{base,control}   worktrees (worktree add)
+#   ${TMPDIR:-/tmp}/gstack-lane-bun.XXXXXX/   empty, private cwd for this process's bun
+#                               calls (H2); removed when the helper exits
+#
+# runtime_model comes only from the CLI's own records: l2/l4 = the JSON modelUsage key
+# (requested-model prefix match, else highest cost/output); l3 (E2) = the `turn_context`
+# record (payload.model / payload.effort) of <CODEX_HOME>/sessions/**/rollout-*<thread_id>.jsonl
+# (thread_id from the `thread.started` event; copied to inv-<n>/rollout.jsonl before the
+# per-invocation home is removed; source "rollout"), else null (source "none").
+# model_mismatch = the requested and runtime model FAMILIES differ (date stamps and
+# -build/-fast/-mini/-latest/-preview stripped).
+#
+# Deadlines: each CLI invocation runs as a job-control background job (`set -m` → own
+# process group). A bash watchdog in its own group fires at the deadline: it snapshots
+# the CLI's descendant tree (ps pid/ppid walk), then TERMs the group, the leader and
+# every descendant, and ALWAYS follows with KILL after GSTACK_LANE_KILL_GRACE_S (even
+# if the group TERM failed). No gtimeout/timeout binary is needed, so nothing runs
+# unbounded. On a NORMAL exit the group is reaped AND every descendant the watchdog
+# sampled (once a second: pid + start time) that is still the same process is TERMed,
+# then KILLed — so a server that double-forked out of the group does not outlive its
+# invocation (a recycled pid is never touched); the deadline and signal paths reap the
+# sampled set too (F4), so a worker that re-parented before the deadline still dies. Taint
+# snapshots run under the same supervisor (GSTACK_LANE_SNAPSHOT_TIMEOUT_S, default 30)
+# with GIT_CONFIG_NOSYSTEM=1, GIT_NO_REPLACE_OBJECTS=1, GIT_OPTIONAL_LOCKS=0,
+# core.fsmonitor=false, core.hooksPath=/dev/null, diff.external=, core.pager=cat,
+# --no-ext-diff --no-textconv and every configured filter.<name> a pass-through (H3).
+# SIGINT/SIGTERM/SIGHUP to this script kill the in-flight group + descendants, then
+# clean up an in-flight codex home (H17).
+#
+# BUN ISOLATION (H2): every helper-side `bun` call runs from the private empty dir above
+# (never the repo/worktree cwd), with --no-env-file and --config=/dev/null (no .env
+# autoload, no bunfig.toml preload) and with every BUN_* variable (BUN_OPTIONS can
+# inject --preload), NODE_OPTIONS and NODE_PATH removed from its environment.
+#
+# RESIDUAL RISKS (documented, not solved)
+#   - A process that fully daemonizes (double fork + setsid, re-parented to init) AND
+#     detaches within the same one-second sampling window escapes both the group kill
+#     and the descendant sampling.
+#   - An UNSANDBOXED grok (sandbox refused → "sandbox":"none") runs as the SAME USER: it
+#     can write any file the user can write. Tamper detection (worktree/control snapshots,
+#     the lanes.json hash journal, the wt-meta base/control records) is BEST-EFFORT and a
+#     deliberately adversarial model can defeat it (e.g. by also appending to the journal,
+#     or by editing other attempts' status files). Worst case of a forged lanes.json is
+#     spill/cost (lanes skipped or retried), never a CLEAN/VERIFIED verdict: verdicts come
+#     from `adjudicate` over each member's own status file plus the integration
+#     worker's independent re-check. The helper always tries the OS sandbox first; the
+#     operator fix is `grok update` or a docker.sock that is not a symlink.
+#   - Filters are pass-throughs everywhere the helper runs git, so a repo that relies on
+#     one (git-lfs, git-crypt) gets its worktrees checked out as STORED (pointers /
+#     ciphertext), and a task commit that stages such a path is refused (filter_path=)
+#     instead of storing it raw — commit those by hand. A filter configured in a file that
+#     git config reads through include.path is neutralized too (names come from git
+#     config itself).
+#   - Grok taint detection: a concurrent legitimate change in the primary worktree or
+#     the shared git dir during an l4 review marks it tainted (false positive, fail
+#     closed); writes to ignored files are not seen.
+#   - flock: a child process that inherits the held lock fd keeps the lock until it
+#     exits (the locked sections — bun, a short install — spawn no long-lived children).
+#   - The l2 credential check is a heuristic (.credentials.json, or oauthAccount /
+#     primaryApiKey in <dir>/.claude.json — macOS keeps the token in Keychain).
+#   - l2 same-account guard: a --claude-dir resolving to $HOME, $HOME/.claude or
+#     $CLAUDE_CONFIG_DIR, or whose oauthAccount.accountUuid equals the root's
+#     (CLAUDE_CODE_ACCOUNT_UUID, else $HOME/.claude.json) makes l2 ABSENT (class auth,
+#     no launch). When the overflow account id is unknown the guard cannot apply.
+#   - l3 accepts CODEX_API_KEY / OPENAI_API_KEY as credentials when there is no
+#     auth.json (codex may then bill API usage); the hermetic config pins no login
+#     method (codex 0.159.3 has no preferred_auth_method key; forced_login_method is a
+#     policy change left to the operator).
+#
+# Env tunables (mainly tests): GSTACK_LANE_KILL_GRACE_S (5), GSTACK_LANE_BACKOFF_MS
+# (4000; jitter adds up to one base), GSTACK_LANE_THROTTLE_RETRIES (3),
+# GSTACK_LANE_LOCK_WAIT_S (30), GSTACK_LANE_PROBE_RETRY_S (300),
+# GSTACK_LANE_GROK_MODELS_TIMEOUT_S (30), GSTACK_LANE_SNAPSHOT_TIMEOUT_S (30).
+# JSON/date handling uses `bun -e` (isolated, above); the lanes lock uses perl (Fcntl flock).
+#
+# Hygiene: bash 3.2 compatible; no `set -e` (many non-zero statuses are captured on
+# purpose, as in bin/gstack-panel); never `set -x` (would echo env/argv); CDPATH unset.
+
+# bash 5.2+ hands a heredoc body of <= 64 KiB to the reader through a PIPE, written before
+# the command starts; on macOS under pipe-buffer pressure a fresh pipe can be 512 bytes,
+# so the 26 KB `<<'JS'` body below would block forever at startup. Compat level 50
+# restores the pre-5.2 tempfile path (ignored by bash < 4.3, e.g. macOS /bin/bash 3.2).
+# The guard is per-script, so it also survives `bash gstack-lane …` call sites.
+BASH_COMPAT=50
+
+set -u -o pipefail
+unset CDPATH   # a relative `cd` must never resolve through the caller's CDPATH (or echo it)
+
+GL_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+GL_BIN_DIR="$(dirname "$GL_SELF")"
+
+GL_KILL_GRACE_S="${GSTACK_LANE_KILL_GRACE_S:-5}"
+GL_BACKOFF_MS="${GSTACK_LANE_BACKOFF_MS:-4000}"
+GL_THROTTLE_RETRIES="${GSTACK_LANE_THROTTLE_RETRIES:-3}"
+GL_LOCK_WAIT_S="${GSTACK_LANE_LOCK_WAIT_S:-30}"
+GL_PROBE_RETRY_S="${GSTACK_LANE_PROBE_RETRY_S:-300}"
+GL_GROK_MODELS_TIMEOUT_S="${GSTACK_LANE_GROK_MODELS_TIMEOUT_S:-30}"
+GL_SNAPSHOT_TIMEOUT_S="${GSTACK_LANE_SNAPSHOT_TIMEOUT_S:-30}"
+
+EX_OK=0; EX_ERROR=1; EX_USAGE=2; EX_THROTTLE=3; EX_QUOTA=4; EX_AUTH=5; EX_TIMEOUT=124
+EX_LOCK=75   # internal: the kernel lock could not be acquired within the wait
+
+for _gl_v in "$GL_KILL_GRACE_S" "$GL_BACKOFF_MS" "$GL_THROTTLE_RETRIES" "$GL_LOCK_WAIT_S" "$GL_PROBE_RETRY_S" "$GL_GROK_MODELS_TIMEOUT_S" "$GL_SNAPSHOT_TIMEOUT_S"; do
+  case "$_gl_v" in ''|*[!0-9]*) echo "gstack-lane: GSTACK_LANE_* tunables must be non-negative integers" >&2; exit 2 ;; esac
+done
+[ "$GL_BACKOFF_MS" -ge 1 ] || GL_BACKOFF_MS=1
+[ "$GL_GROK_MODELS_TIMEOUT_S" -ge 1 ] || GL_GROK_MODELS_TIMEOUT_S=1
+[ "$GL_SNAPSHOT_TIMEOUT_S" -ge 1 ] || GL_SNAPSHOT_TIMEOUT_S=1
+
+# Whole-string id grammar ([[ =~ ]] anchors the whole value; no newline can match).
+GL_ID_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+GL_FILE_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+GL_SANDBOX_REFUSAL="could not apply the 'read-only' sandbox profile"
+GL_TAB=$'\t'
+GL_PERL="$(command -v /usr/bin/perl 2>/dev/null || command -v perl 2>/dev/null || true)"
+
+# Fixed hermetic Codex config (E4). Model/effort travel only as -c overrides, so every
+# install writes identical bytes and concurrent installs can verify each other's result.
+GL_CODEX_CONFIG='# gstack-lane hermetic CODEX_HOME — generated and verified on every use; edits are discarded.
+approval_policy = "never"
+service_tier = "default"
+'
+
+# ── bun helper (JSON, classification, dates) ──────────────────────────────────
+read -r -d '' _GL_JS <<'JS'
+const fs = require("fs");
+const E = process.env;
+const now = Date.now();
+const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+const isoMs = (ms) => new Date(ms).toISOString();
+function readAll(f) { if (!f) return ""; try { return fs.readFileSync(f, "utf8"); } catch { return ""; } }
+const crypto = require("crypto");
+const sha256 = (txt) => crypto.createHash("sha256").update(txt).digest("hex");
+// lanes.json writes are journaled (hash appended to lanes.json.hashes) so a review's taint
+// check can tell helper writes from foreign edits without false positives from the
+// concurrent forum member's legitimate updates.
+function writeLanes(f, obj) {
+  const txt = JSON.stringify(obj, null, 2) + "\n";
+  const tmp = `${f}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
+  fs.writeFileSync(tmp, txt, { mode: 0o600 });
+  fs.renameSync(tmp, f);
+  fs.appendFileSync(`${f}.hashes`, sha256(txt) + "\n", { mode: 0o600 });
+}
+function lanesState() { // "<sha256|absent|unreadable> <1 if the helper wrote exactly these bytes, else 0>"
+  const f = E.GL_LANES_FILE;
+  let txt;
+  try { txt = fs.readFileSync(f, "utf8"); } catch { console.log(fs.existsSync(f) ? "unreadable 0" : "absent 1"); return; }
+  const h = sha256(txt);
+  const known = readAll(`${f}.hashes`).split("\n").includes(h) ? 1 : 0;
+  console.log(`${h} ${known}`);
+}
+function writeAtomic(f, obj) {
+  const tmp = `${f}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, f);
+}
+function readLanes(f, backupCorrupt) {
+  if (!fs.existsSync(f)) return {};
+  try { const j = JSON.parse(fs.readFileSync(f, "utf8")); if (j && typeof j === "object" && !Array.isArray(j)) return j; } catch {}
+  if (backupCorrupt) { try { fs.copyFileSync(f, `${f}.corrupt.${now}`); } catch {} }
+  return {};
+}
+// ── structured output readers ──
+function topJson(txt) { // whole document, else the last JSON line
+  const t = txt.trim();
+  if (!t) return null;
+  const obj = (s) => { try { const j = JSON.parse(s); return j && typeof j === "object" && !Array.isArray(j) ? j : null; } catch { return null; } };
+  let o = obj(t);
+  if (o) return o;
+  const lines = t.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) { const l = lines[i].trim(); if (l.startsWith("{") && (o = obj(l))) return o; }
+  return null;
+}
+const isJsonError = (o) => !!o && (o.is_error === true || o.type === "error" || (typeof o.subtype === "string" && o.subtype.startsWith("error"))
+  || typeof o.error === "string" || (o.error && typeof o.error === "object"));
+function jsonErrorText(o) {
+  // An agent-ENDED run (subtype error_max_turns / error_during_execution …) carries the
+  // AGENT's own prose in result/text — never classified (E1). Otherwise result/text hold
+  // the vendor's error string (e.g. claude's "Claude AI usage limit reached|<epoch>").
+  const agentEnded = typeof o.subtype === "string" && o.subtype.startsWith("error");
+  const parts = [];
+  const take = (v) => {
+    if (typeof v === "string") parts.push(v);
+    else if (v && typeof v === "object" && typeof v.message === "string") parts.push(v.message);
+  };
+  for (const k of agentEnded ? ["error", "message"] : ["error", "result", "message", "text"]) take(o[k]);
+  if (Array.isArray(o.errors)) o.errors.forEach(take);
+  return parts.join("\n") || "structured error";
+}
+function codexEvents(txt) {
+  const ev = [];
+  for (const line of txt.split(/\r?\n/)) {
+    const l = line.trim();
+    if (!l.startsWith("{")) continue;
+    try { const o = JSON.parse(l); if (o && typeof o.type === "string") ev.push(o); } catch {}
+  }
+  return ev;
+}
+function codexSummary(txt) {
+  let thread = null, completed = false, failed = null, message = null;
+  for (const e of codexEvents(txt)) {
+    if (e.type === "thread.started" && typeof e.thread_id === "string") thread = e.thread_id;
+    else if (e.type === "turn.completed") completed = true;
+    else if (e.type === "turn.failed") failed = e.error && typeof e.error.message === "string" ? e.error.message : (typeof e.message === "string" ? e.message : "turn failed");
+    else if (e.type === "item.completed" && e.item && e.item.type === "agent_message" && typeof e.item.text === "string") message = e.item.text;
+  }
+  return { thread, completed, failed, message };
+}
+// The vendor's own structured error text for this invocation ("" when none).
+function structuredErrorText() {
+  const out = readAll(E.GL_STDOUT);
+  if (E.GL_LANE === "l3") { const s = codexSummary(out); return s.failed || ""; }
+  const o = topJson(out);
+  return isJsonError(o) ? jsonErrorText(o) : "";
+}
+// H19: quota ONLY for usage-limit / quota-exceeded / "limit reached|<epoch>" forms. A bare
+// "limit reached" ("Rate limit reached for <model> … try again in 20s", OpenAI's 429) is a
+// rate limit → throttle.
+const CLASS_RE = {
+  quota: /usage limit|insufficient_quota|exceeded (?:your |the )?(?:current )?quota|quota (?:exceeded|exhausted|reached)|out of quota|limit reached\|\d{10,13}/i,
+  auth: /\b40[13]\b|unauthori[sz]ed|forbidden|not logged in|not signed in|sign ?in\b|log ?in\b|authenticat|invalid (?:x-)?api[ -]?key|token (?:has )?expired|credential/i,
+  throttle: /\b429\b|rate[ _-]?limit|too many requests|overloaded|\b5\d\d\b|reconnecting|stream disconnected|timed? ?out|connection|network|temporarily|unavailable|capacity|bad gateway|internal server error/i,
+};
+function classifyText(t) {
+  for (const c of ["quota", "auth", "throttle"]) if (CLASS_RE[c].test(t)) return c;
+  return "error";
+}
+const clip = (s) => String(s).replace(/\s+/g, " ").slice(0, 300);
+let classifiedThread = ""; // l3: the thread.started id (D5/H10 — a real JSON parse, not a sed literal)
+function classify() {
+  const rc = Number(E.GL_RC);
+  const out = readAll(E.GL_STDOUT);
+  let body = null; // this invocation's publishable output
+  let result;
+  if (E.GL_LANE === "l3") {
+    const s = codexSummary(out);
+    if (typeof s.thread === "string" && /^[A-Za-z0-9-]{8,80}$/.test(s.thread)) classifiedThread = s.thread;
+    if (s.message !== null) body = s.message.endsWith("\n") ? s.message : `${s.message}\n`;
+    if (rc === 124) result = ["timeout", "deadline"];
+    else if (s.failed !== null) { const c = classifyText(s.failed); result = [c, `turn.failed: ${clip(s.failed)}`]; }
+    else if (s.completed && rc === 0) result = ["ok", ""];
+    else if (s.completed) result = ["error", `exit ${rc} after turn.completed`];
+    else result = ["error", rc === 0 ? "no terminal event" : `exit ${rc} without turn.failed`];
+  } else {
+    const o = topJson(out);
+    body = out;
+    if (rc === 124) result = ["timeout", "deadline"];
+    else if (isJsonError(o)) { const t = jsonErrorText(o); result = [classifyText(t), `structured error: ${clip(t)}`]; }
+    else if (rc === 0) result = ["ok", ""];
+    else result = ["error", `exit ${rc} without a structured error`];
+  }
+  if (body !== null && E.GL_INV_OUT) fs.writeFileSync(E.GL_INV_OUT, body, { mode: 0o600 });
+  if (result[0] === "ok" && E.GL_RUN_MODE === "review" && reviewBodyEmpty(body)) result = ["error", "empty review body"];
+  return result;
+}
+function reviewBodyEmpty(body) {
+  if (body === null) return true;
+  if (E.GL_LANE === "l3") return !body.trim();
+  const o = topJson(body);
+  if (o) {
+    for (const k of ["result", "text", "response", "structured_output"]) {
+      const v = o[k];
+      if (typeof v === "string") return !v.trim();
+      if (v && typeof v === "object") return Object.keys(v).length === 0;
+    }
+    return true;
+  }
+  return !body.trim();
+}
+// ── dates ──
+function durMs(s) {
+  let t = 0, m;
+  const re = /(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi;
+  while ((m = re.exec(s))) { const v = parseFloat(m[1]), u = m[2].toLowerCase(); t += v * (u[0] === "d" ? 864e5 : u[0] === "h" ? 36e5 : u[0] === "m" ? 6e4 : 1e3); }
+  return t;
+}
+function parseAt(raw) {
+  let s = String(raw).split(/\.(?:\s|$)/)[0];
+  s = s.replace(/\([^)]*\)/g, " ").replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, "$1")
+       .replace(/\b([ap])\.m\b\.?/gi, "$1m").replace(/\s+/g, " ").trim().replace(/[,;!]+$/, "").trim();
+  if (/^\d{10}$/.test(s)) return +s * 1000;
+  if (/^\d{13}$/.test(s)) return +s;
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(utc|gmt|z))?$/i);
+  if (m && (m[2] || m[3])) {
+    let h = +m[1]; const mi = +(m[2] || 0); const ap = (m[3] || "").toLowerCase();
+    if (ap === "pm" && h < 12) h += 12;
+    if (ap === "am" && h === 12) h = 0;
+    if (h > 23 || mi > 59) return NaN;
+    const d = new Date(now);
+    if (m[4]) d.setUTCHours(h, mi, 0, 0); else d.setHours(h, mi, 0, 0);
+    let t = d.getTime();
+    if (t <= now) t += 864e5;
+    return t;
+  }
+  let t = Date.parse(s);
+  if (!Number.isFinite(t)) return NaN;
+  if (!/\b\d{4}\b/.test(s)) {
+    const d = new Date(t); d.setFullYear(new Date(now).getFullYear()); t = d.getTime();
+    if (t < now - 864e5) { d.setFullYear(d.getFullYear() + 1); t = d.getTime(); }
+  }
+  return t;
+}
+function parseReset(text) {
+  const ok = (t) => (Number.isFinite(t) && t > now && t <= now + 8 * 864e5 ? t : NaN);
+  let m, t;
+  if ((m = text.match(/try again at\s+([^\n"]+)/i)) && Number.isFinite(t = ok(parseAt(m[1])))) return t;
+  if ((m = text.match(/try again in\s+([^\n".]+)/i)) && Number.isFinite(t = ok(now + durMs(m[1])))) return t;
+  if ((m = text.match(/limit reached\|(\d{10,13})/i)) && Number.isFinite(t = ok(m[1].length === 10 ? +m[1] * 1000 : +m[1]))) return t;
+  if ((m = text.match(/resets?\s+(?:at\s+)?([^\n"]+)/i)) && Number.isFinite(t = ok(parseAt(m[1])))) return t;
+  return NaN;
+}
+// ── runtime model ──
+function runtimeModel() {
+  const none = { model: null, effort: null, source: "none", all: [] };
+  if (!E.GL_STDOUT) return none; // nothing was invoked
+  const req = E.GL_REQ_MODEL || "";
+  if (E.GL_LANE === "l3") {
+    const file = E.GL_ROLLOUT; // copied from the per-invocation home before it was removed
+    if (!file || !fs.existsSync(file)) return none;
+    let model = null, effort = null;
+    for (const line of readAll(file).split("\n")) {
+      if (!line.includes("turn_context")) continue;
+      try {
+        const o = JSON.parse(line);
+        if (o && o.type === "turn_context" && o.payload && typeof o.payload === "object") {
+          if (typeof o.payload.model === "string") model = o.payload.model;
+          const ef = o.payload.effort ?? (o.payload.collaboration_mode && o.payload.collaboration_mode.settings && o.payload.collaboration_mode.settings.reasoning_effort);
+          if (typeof ef === "string") effort = ef;
+        }
+      } catch {}
+    }
+    return model ? { model, effort, source: "rollout", all: [model] } : none;
+  }
+  const o = topJson(readAll(E.GL_STDOUT));
+  let usage = null;
+  if (o && o.modelUsage && typeof o.modelUsage === "object") usage = o.modelUsage;
+  else if (o && o.result && typeof o.result === "object" && o.result.modelUsage && typeof o.result.modelUsage === "object") usage = o.result.modelUsage;
+  const keys = usage ? Object.keys(usage) : [];
+  if (!keys.length) return none;
+  const num = (k, f) => (usage[k] && typeof usage[k][f] === "number" ? usage[k][f] : 0);
+  let pick = req ? keys.find((k) => k === req || k.startsWith(req)) : undefined;
+  if (!pick) pick = keys.slice().sort((a, b) => (num(b, "costUSD") - num(a, "costUSD")) || (num(b, "outputTokens") - num(a, "outputTokens")))[0];
+  return { model: pick, effort: null, source: "modelUsage", all: keys };
+}
+function family(id) {
+  if (!id) return null;
+  let s = String(id).toLowerCase().replace(/-\d{8}$/, ""), prev;
+  do { prev = s; s = s.replace(/-(?:build|fast|mini|latest|preview|beta)$/, ""); } while (s !== prev);
+  return s;
+}
+// ── lanes.json (always called while the kernel lock is held) ──
+function laneUpdate(rm, cls) {
+  const f = E.GL_LANES_FILE, lane = E.GL_LANE, kind = E.GL_UPDATE;
+  const lanes = readLanes(f, true);
+  const prev = lanes[lane] && typeof lanes[lane] === "object" ? lanes[lane] : {};
+  const prevNext = Date.parse(prev.next_probe_at || "");
+  const coolingActive = prev.status === "cooling" && prevNext > now;
+  const lastEvent = Date.parse(prev.last_event_at || prev.status_since || "");
+  const attemptStart = Number(E.GL_ATTEMPT_STARTED_MS) || Date.parse(E.GL_ATTEMPT_STARTED || "");
+  const e = {
+    status: prev.status || "ok",
+    reason: prev.reason ?? null,
+    next_probe_at: prev.next_probe_at ?? null,
+    runtime_model: prev.runtime_model ?? null,
+    updated_at: iso(now),
+    status_since: prev.status_since ?? isoMs(now),
+    last_event_at: prev.last_event_at ?? null,
+    consecutive_quota: Number.isInteger(prev.consecutive_quota) ? prev.consecutive_quota : 0,
+    throttle_count: Number.isInteger(prev.throttle_count) ? prev.throttle_count : 0,
+  };
+  let reason = E.GL_REASON || null;
+  if (rm && rm.model) e.runtime_model = rm.model;
+  // H16 event ordering (every update, probe or run): a quota/auth event recorded AFTER this
+  // attempt began is newer than this attempt's result and is never overwritten by a weaker
+  // one; an active longer cooldown is never shortened; a failed probe never clears absent.
+  const newerEvent = (prev.status === "cooling" || prev.status === "absent") && Number.isFinite(lastEvent)
+    && (!Number.isFinite(attemptStart) || lastEvent >= attemptStart);
+  const kept = (what) => `${prev.reason || prev.status} (kept: ${what})`;
+  if (kind === "ok") {
+    // E9: an ok clears cooling/absent only when this attempt began AFTER the last quota/auth event.
+    if (newerEvent) reason = kept("newer than this attempt's ok");
+    else { e.status = "ok"; e.next_probe_at = null; e.consecutive_quota = 0; e.throttle_count = 0; }
+  } else if (kind === "absent" && prev.status === "cooling" && newerEvent) {
+    // V2: a late auth result never clears a quota cooldown recorded after this attempt began.
+    reason = kept("a newer quota event outranks this attempt's auth result");
+  } else if (kind === "absent") {
+    e.status = "absent"; e.next_probe_at = null; e.last_event_at = isoMs(now);
+  } else if (kind === "quota" && prev.status === "absent" && newerEvent) {
+    reason = kept("a newer auth failure outranks this attempt's quota");
+  } else if (kind === "quota") {
+    const n = coolingActive ? Math.max(1, e.consecutive_quota) : e.consecutive_quota + 1;
+    const parsed = parseReset(structuredErrorText());
+    let next, why;
+    if (Number.isFinite(parsed)) { next = parsed; why = "reset parsed from CLI output"; }
+    else { const mins = Math.min(60, 15 * 2 ** (n - 1)); next = now + mins * 6e4; why = `reset unknown; backoff ${mins}m`; }
+    if (coolingActive && prevNext > next) next = prevNext;
+    e.status = "cooling"; e.consecutive_quota = n; e.next_probe_at = iso(next); e.last_event_at = isoMs(now);
+    reason = `${reason || "quota"} (${why})`;
+  } else if (kind === "cooling-short") {
+    const next = now + (Number(E.GL_SHORT_S) || 300) * 1e3;
+    if (prev.status === "absent") reason = kept("a failed probe never clears absent");
+    else if (coolingActive && prevNext >= next) reason = kept("an active longer cooldown is never shortened");
+    else { e.status = "cooling"; e.next_probe_at = iso(next); }
+  } else if (kind === "keep" && cls === "throttle") {
+    e.throttle_count += 1;
+  }
+  if (reason) e.reason = reason;
+  if (e.status !== prev.status) e.status_since = isoMs(now);
+  lanes[lane] = e;
+  writeLanes(f, lanes);
+  return e;
+}
+function shq(a) { return /^[A-Za-z0-9_@%+=:,.\/<>-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`; }
+function finalize() {
+  const rm = E.GL_RM === "1" ? runtimeModel() : { model: null, effort: null, source: "none", all: [] };
+  const cls = E.GL_CLASS;
+  const lane = E.GL_UPDATE && E.GL_UPDATE !== "none" ? laneUpdate(rm, cls) : null;
+  const attempts = readAll(E.GL_ATTEMPTS_FILE).split("\n").filter(Boolean).map((l) => {
+    const [n, effort, timeout_s, exit, c, duration_s, sandbox, dir, detail] = l.split("\t");
+    return { n: +n, effort: effort || null, timeout_s: +timeout_s, exit: exit === "" ? null : +exit, class: c,
+             detail: detail || null, duration_s: +duration_s, sandbox: sandbox || null, dir: dir || null };
+  });
+  const args = readAll(E.GL_CMD_FILE).split("\n");
+  if (args.length && args[args.length - 1] === "") args.pop();
+  let cmd = args.map(shq).join(" ");
+  if (cmd && E.GL_STDIN_REDACT) cmd += ` < ${E.GL_STDIN_REDACT}`;
+  const int = (v) => (v === undefined || v === "" ? null : Number(v));
+  const req = E.GL_REQ_MODEL || null;
+  const fr = family(req), ft = family(rm.model);
+  const s = {
+    attempt_id: E.GL_ATTEMPT_ID,
+    task: E.GL_TASK || null,
+    lane: E.GL_LANE,
+    mode: E.GL_RUN_MODE,
+    tier: E.GL_TIER || null,
+    requested_model: req,
+    requested_model_source: E.GL_REQ_MODEL_SOURCE || (req ? "argument" : null),
+    requested_effort: E.GL_REQ_EFFORT || null,
+    effort: E.GL_EFFORT || null,
+    runtime_model: rm.model,
+    runtime_model_source: rm.source,
+    runtime_models: rm.all,
+    runtime_effort: rm.effort,
+    model_mismatch: !!(fr && ft && fr !== ft),
+    exit: int(E.GL_EXIT),
+    class: cls,
+    class_detail: E.GL_DETAIL || null,
+    exit_code: Number(E.GL_EXIT_CODE),
+    duration_s: Number(E.GL_DURATION || 0),
+    attempt_started_at: E.GL_ATTEMPT_STARTED,
+    finished_at: iso(Date.now()),
+    sandbox: E.GL_SANDBOX || null,
+    cmd_redacted: cmd || null,
+    cwd: E.GL_CWD || null,
+    out: E.GL_OUT || null,
+    published: E.GL_PUBLISHED === "1",
+    timeout_retry: E.GL_RETRIED === "1",
+    reviewed_sha: E.GL_RUN_MODE === "review" ? (E.GL_REVIEWED_SHA || null) : null,
+    tainted: E.GL_TAINTED === "1",
+    taint_checked: E.GL_TAINT_CHECKED === "1",
+    throttle_count: Number(E.GL_THROTTLE_INV || 0),
+    lane_throttle_count: lane ? lane.throttle_count : null,
+    result_sha: null,
+    base_sha: null,
+    attempts,
+    lane_update: E.GL_LANE_UPDATE || (lane ? "applied" : "none"),
+    lane_status: lane ? { status: lane.status, next_probe_at: lane.next_probe_at, consecutive_quota: lane.consecutive_quota, throttle_count: lane.throttle_count, last_event_at: lane.last_event_at, reason: lane.reason } : null,
+  };
+  if (E.GL_TAINT_DETAIL) s.taint_detail = E.GL_TAINT_DETAIL;
+  if (E.GL_LANE_UPDATE === "pending") s.lane_update_kind = E.GL_LANE_UPDATE_KIND || null;
+  if (E.GL_REJECTED) s.rejected = E.GL_REJECTED;
+  if (E.GL_SKIPPED) s.skipped = E.GL_SKIPPED;
+  if (E.GL_NOTE) s.note = E.GL_NOTE;
+  if (E.GL_STATUS_FILE) writeAtomic(E.GL_STATUS_FILE, s);
+  console.log(lineFor(s));
+}
+function lineFor(s) {
+  const v = (x) => (x === null || x === undefined || x === "" ? "-" : String(x).replace(/\s+/g, "_"));
+  const parts = [`attempt_id=${v(s.attempt_id)}`, `lane=${v(s.lane)}`, `model=${v(s.requested_model)}`, `runtime_model=${v(s.runtime_model)}`,
+    `class=${v(s.class)}`, `exit=${v(s.exit)}`, `duration=${v(s.duration_s)}s`, `result_sha=${v(s.result_sha)}`];
+  if (s.mode === "review") parts.push(`reviewed_sha=${v(s.reviewed_sha)}`);
+  if (s.tainted) parts.push("tainted=true");
+  if (s.model_mismatch) parts.push("model_mismatch=true");
+  if (s.lane_update === "pending") parts.push("lane_update=pending");
+  if (s.skipped) parts.push(`skipped=${v(s.skipped)}`);
+  if (s.rejected) parts.push("rejected=true");
+  return parts.join(" ");
+}
+function statusLine() {
+  let s;
+  try { s = JSON.parse(fs.readFileSync(E.GL_STATUS_FILE, "utf8")); } catch { s = null; }
+  if (!s || typeof s !== "object") {
+    console.log(`attempt_id=- lane=- model=- runtime_model=- class=missing exit=- duration=- result_sha=- status=${E.GL_STATUS_FILE}`);
+    process.exitCode = 1; return;
+  }
+  console.log(lineFor(s));
+  process.exitCode = Number.isInteger(s.exit_code) ? s.exit_code : 1;
+}
+function stamp() {
+  const s = JSON.parse(fs.readFileSync(E.GL_STATUS_FILE, "utf8"));
+  s.result_sha = E.GL_RESULT_SHA || null;
+  s.base_sha = E.GL_BASE_SHA || null;
+  s.committed_at = iso(now);
+  writeAtomic(E.GL_STATUS_FILE, s);
+}
+function laneGet() {
+  const e = readLanes(E.GL_LANES_FILE, false)[E.GL_LANE];
+  let txt = null;
+  try { txt = fs.readFileSync(E.GL_LANES_FILE, "utf8"); } catch {}
+  const h = txt === null ? "absent" : sha256(txt);
+  if (!e || typeof e !== "object") { console.log(["none", 0, "-", 0, now, h].join("\t")); return; }
+  const active = e.status === "cooling" && Date.parse(e.next_probe_at || "") > now ? 1 : 0;
+  console.log([e.status || "none", active, e.next_probe_at || "-", e.consecutive_quota || 0, now, h].join("\t"));
+}
+// ── adjudicate (D4/H9): one forum member's review attempt → PRESENT_CLEAN|PRESENT_P1|INVALID|ABSENT ──
+// Order: INVALID before ABSENT (a completed-but-unusable review never counts as absent).
+// The completion marker: the review's LAST non-empty line, optionally wrapped in ` / ** / _.
+const REVIEW_MARKER = /^[ \t]*(?:\*\*|__|`)?REVIEW_COMPLETE: findings=(\d{1,4})(?:\*\*|__|`)?[ \t]*$/;
+const FINDING_LINE = /^[ \t]*(?:(?:>|\|)[ \t]*)*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?(?:#{1,6}[ \t]+)?(?:\*\*|__|\*|_|`)?\[P[0-3]\]/i;
+const P1_LINE = /^[ \t]*(?:(?:>|\|)[ \t]*)*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?(?:#{1,6}[ \t]+)?(?:\*\*|__|\*|_|`)?\[P[01]\]/i;
+function reviewText(lane, body) { // the review prose inside a published body (null = none)
+  if (lane === "l3") return body;
+  const o = topJson(body);
+  if (!o) return body;
+  for (const k of ["result", "text", "response"]) if (typeof o[k] === "string") return o[k];
+  if (o.structured_output && typeof o.structured_output === "object") return JSON.stringify(o.structured_output, null, 2);
+  return null;
+}
+function adjudicate() {
+  const tok = (v) => (v === null || v === undefined || v === "" ? "null" : String(v).replace(/[^A-Za-z0-9._:\/@+-]/g, "_").slice(0, 128));
+  const CODE = { PRESENT_CLEAN: 0, PRESENT_P1: 10, INVALID: 11, ABSENT: 12 };
+  const say = (verdict, reason, p1, rm) => {
+    console.log(`VERDICT=${verdict} reason=${reason} p1_count=${p1} runtime_model=${tok(rm)}`);
+    process.exitCode = CODE[verdict];
+  };
+  let raw;
+  try { raw = fs.readFileSync(E.GL_STATUS_FILE, "utf8"); }
+  catch (e) { return e && e.code === "ENOENT" ? say("ABSENT", "no_status", 0, null) : say("INVALID", "status_unreadable", 0, null); }
+  let s = null;
+  try { s = JSON.parse(raw); } catch {}
+  if (!s || typeof s !== "object" || Array.isArray(s) || typeof s.class !== "string") return say("INVALID", "status_unreadable", 0, null);
+  const rm = typeof s.runtime_model === "string" && s.runtime_model ? s.runtime_model : null;
+  if (s.tainted === true) return say("INVALID", "tainted", 0, rm);
+  if (s.class === "error") return say("INVALID", s.rejected ? "rejected" : "class_error", 0, rm);
+  if (["auth", "quota", "timeout", "throttle"].includes(s.class)) {
+    return say("ABSENT", s.skipped ? `${s.class}_skipped_${tok(s.skipped)}` : s.class, 0, rm);
+  }
+  if (s.class !== "ok") return say("INVALID", "unknown_class", 0, rm);
+  const seat = E.GL_SEAT, lane = seat === "codex" ? "l3" : "l4";
+  if (s.lane !== lane) return say("INVALID", "seat_mismatch", 0, rm);
+  if (s.mode !== "review") return say("INVALID", "not_a_review", 0, rm);
+  if (s.exit_code !== 0 || s.exit !== 0) return say("INVALID", "nonzero_exit", 0, rm);
+  if (s.out !== E.GL_OUT_REAL || (E.GL_OUT_ATTEMPT && s.attempt_id !== E.GL_OUT_ATTEMPT)) return say("INVALID", "attempt_mismatch", 0, rm);
+  if (s.reviewed_sha !== E.GL_REVIEWED_SHA) return say("INVALID", "stale_sha", 0, rm);
+  if (lane === "l4" && s.taint_checked !== true) return say("INVALID", "taint_unchecked", 0, rm);
+  let body = null;
+  try { body = s.published === true ? fs.readFileSync(E.GL_OUT_REAL, "utf8") : null; } catch { body = null; }
+  const text = body === null ? null : reviewText(lane, body);
+  if (text === null || !text.trim()) return say("INVALID", "empty_body", 0, rm);
+  // V4: a review only counts once it ATTESTS completion — its last non-empty line must be
+  // `REVIEW_COMPLETE: findings=<n>`. "I could not review / no diff" prose has no marker.
+  const lines = text.split(/\r?\n/);
+  const lastLine = lines.filter((l) => l.trim()).pop() || "";
+  const marker = lastLine.match(REVIEW_MARKER);
+  if (!marker) return say("INVALID", "no-completion-marker", 0, rm);
+  const notes = [];
+  if (seat === "codex") {
+    if (!rm) return say("INVALID", "runtime_model_unverified", 0, rm);
+    const policy = E.GL_GATE_CLASS === "critical" ? ["gpt-6-astra"] : ["gpt-6.1-sol", "gpt-6-astra"];
+    const allowed = policy.filter((m) => m === E.GL_REQ_MODEL || m === "gpt-6-astra");
+    if (!allowed.includes(rm)) return say("INVALID", "runtime_model_not_allowed", 0, rm);
+  } else {
+    // L4: a family mismatch is a coercion NOTE, never a failure.
+    const req = E.GL_REQ_MODEL || s.requested_model || "";
+    if (s.model_mismatch === true || (req && rm && family(req) !== family(rm))) notes.push("model_mismatch");
+  }
+  const p1 = lines.filter((l) => P1_LINE.test(l)).length;
+  if (Number(marker[1]) !== lines.filter((l) => FINDING_LINE.test(l)).length) notes.push("findings_count_mismatch");
+  const reason = [p1 > 0 ? "p1_found" : "no_p1", ...notes].join(",");
+  return say(p1 > 0 ? "PRESENT_P1" : "PRESENT_CLEAN", reason, p1, rm);
+}
+function summary() {
+  const lanes = readLanes(E.GL_LANES_FILE, false);
+  const skipped = (E.GL_SKIPPED_LANES || "").split(",").filter(Boolean);
+  if (E.GL_JSON === "1") { console.log(JSON.stringify(lanes, null, 2)); return; }
+  for (const l of (E.GL_LANE_LIST || "").split(",").filter(Boolean)) {
+    const e = lanes[l];
+    if (!e) { console.log(`${l}: unknown (not probed)`); continue; }
+    let line = `${l}: ${e.status}`;
+    if (e.status === "cooling" && e.next_probe_at) line += ` until ${e.next_probe_at}`;
+    if (skipped.includes(l)) line += " — still cooling (skipped, not probed)";
+    if (e.runtime_model) line += ` — runtime_model=${e.runtime_model}`;
+    if (e.reason) line += ` — ${e.reason}`;
+    console.log(line);
+  }
+}
+try {
+  const fn = E.GL_FN;
+  if (fn === "classify") { const r = classify(); console.log([r[0], r[1], classifiedThread].join("\t")); }
+  else if (fn === "adjudicate") adjudicate();
+  else if (fn === "finalize") finalize();
+  else if (fn === "lane-get") laneGet();
+  else if (fn === "summary") summary();
+  else if (fn === "status-line") statusLine();
+  else if (fn === "stamp") stamp();
+  else if (fn === "lanes-state") lanesState();
+  else if (fn === "same-account") { // exit 0 only when GL_A and GL_B are JSON for the SAME tokens.account_id
+    const acct = (f) => { try { const j = JSON.parse(fs.readFileSync(f, "utf8")); return j && j.tokens && typeof j.tokens.account_id === "string" ? j.tokens.account_id : null; } catch { return null; } };
+    const a = acct(E.GL_A), b = acct(E.GL_B);
+    process.exitCode = a && b && a === b ? 0 : 1;
+  }
+  else if (fn === "account-uuid") { // oauthAccount.accountUuid of GL_FILE, or "" — nothing else is ever printed
+    let id = "";
+    try { const j = JSON.parse(fs.readFileSync(E.GL_FILE, "utf8")); const v = j && j.oauthAccount && j.oauthAccount.accountUuid; if (typeof v === "string" && /^[A-Za-z0-9-]{8,64}$/.test(v)) id = v; } catch {}
+    console.log(id);
+  }
+  else { process.stderr.write("gstack-lane js: unknown fn\n"); process.exit(2); }
+} catch (e) {
+  process.stderr.write(`gstack-lane js: ${e && e.message ? e.message : e}\n`);
+  process.exit(1);
+}
+JS
+
+# ── bun isolation (H2) ────────────────────────────────────────────────────────
+# A bare `bun -e` honors <cwd>/bunfig.toml (preload = repo code), auto-loads <cwd>/.env and
+# obeys BUN_OPTIONS (--preload). Every helper-side bun call therefore runs from a private
+# empty dir (created once per helper process, in the MAIN shell, removed at exit), with
+# --no-env-file --config=/dev/null and with BUN_* / NODE_OPTIONS / NODE_PATH unset.
+GL_BUN_CWD=""
+GL_BUN_UNSET=()
+GL_BUN_FLAGS=(--no-env-file --config=/dev/null)
+_gl_bun_init() {
+  local v
+  [ -n "$GL_BUN_CWD" ] && return 0
+  GL_BUN_CWD="$(mktemp -d "${TMPDIR:-/tmp}/gstack-lane-bun.XXXXXX" 2>/dev/null || true)"
+  [ -n "$GL_BUN_CWD" ] && [ -d "$GL_BUN_CWD" ] || GL_BUN_CWD=/
+  GL_BUN_UNSET=()
+  for v in $(compgen -e); do
+    case "$v" in BUN_*|NODE_OPTIONS|NODE_PATH) GL_BUN_UNSET+=(-u "$v") ;; esac
+  done
+}
+# shellcheck disable=SC2329  # invoked via trap
+_gl_exit_cleanup() {
+  case "$GL_BUN_CWD" in */gstack-lane-bun.*) rmdir "$GL_BUN_CWD" 2>/dev/null ;; esac
+  return 0
+}
+trap '_gl_exit_cleanup' EXIT
+# _gl_bun_js: `env -u… bun <flags> -e "$_GL_JS"` from the neutral cwd (GL_* travel in the env).
+_gl_bun_js() {
+  ( cd "${GL_BUN_CWD:-/}" 2>/dev/null || exit 1
+    exec env ${GL_BUN_UNSET[@]+"${GL_BUN_UNSET[@]}"} bun "${GL_BUN_FLAGS[@]}" -e "$_GL_JS" )
+}
+_gl_bun_js_locked() { # <wait_s> — the same, holding the lanes kernel lock (E8)
+  ( cd "${GL_BUN_CWD:-/}" 2>/dev/null || exit 1
+    _gl_locked "$1" env ${GL_BUN_UNSET[@]+"${GL_BUN_UNSET[@]}"} bun "${GL_BUN_FLAGS[@]}" -e "$_GL_JS" )
+}
+_gl_js() { GL_FN="$1" _gl_bun_js; }
+_gl_abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
+
+# ── kernel lock (E8) ──────────────────────────────────────────────────────────
+# _gl_locked <wait_s> cmd... — runs cmd while holding an exclusive flock on
+# <run-dir>/lanes.lock. perl takes the lock (non-blocking polls until the wait expires,
+# then exits 75) and EXECs cmd with the locked fd inherited ($^F), so the lock lives
+# exactly as long as cmd and the kernel drops it if cmd dies. No stale-lock logic.
+_gl_locked() { _gl_locked_at "$GL_RUN_DIR/lanes.lock" "$@"; }
+_gl_locked_at() { # <lockfile> <wait_s> cmd...
+  local lockfile="$1" wait_s="$2"
+  shift 2
+  [ -n "$GL_PERL" ] || return "$EX_LOCK"
+  # shellcheck disable=SC2016  # perl code, not shell expansions
+  "$GL_PERL" -MFcntl=:flock -e '
+    $^F = 255;
+    my ($lock, $wait) = (shift, shift);
+    open(my $fh, ">>", $lock) or exit 75;
+    my $deadline = time + $wait;
+    until (flock($fh, LOCK_EX | LOCK_NB)) {
+      exit 75 if time >= $deadline;
+      select(undef, undef, undef, 0.05);
+    }
+    exec { $ARGV[0] } @ARGV or exit 127;
+  ' "$lockfile" "$wait_s" "$@"
+}
+
+# ── small helpers ─────────────────────────────────────────────────────────────
+_gl_usage_err() {
+  echo "gstack-lane: $*" >&2
+  echo "Run 'gstack-lane --help' for usage." >&2
+  exit "$EX_USAGE"
+}
+_gl_iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+_gl_now() { date +%s; }
+_gl_is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+_gl_valid_id() { [[ "${1:-}" =~ $GL_ID_RE ]]; }
+_gl_realdir() { (cd "$1" 2>/dev/null && pwd -P); }
+_gl_realfile() { # existing parent resolved; the leaf itself is kept as given
+  local d
+  d="$(_gl_realdir "$(dirname "$1")")" || return 1
+  printf '%s/%s\n' "$d" "$(basename "$1")"
+}
+_gl_ms_to_s() { printf '%d.%03d' $(( $1 / 1000 )) $(( $1 % 1000 )); }
+
+# ── process-group runner with a hard deadline ─────────────────────────────────
+GL_CHILD_PID=""
+GL_WATCH_PID=""
+GL_PROBE_PIDS=""
+
+_gl_descendants() { # <pid> → space-separated descendant pids (one ps snapshot, BFS)
+  ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END {
+      n = split(kids[root], q, " "); i = 1
+      while (i <= n) { p = q[i]; printf "%s ", p; m = split(kids[p], c, " "); for (j = 1; j <= m; j++) q[++n] = c[j]; i++ }
+    }'
+}
+_gl_group_alive() { kill -0 -- "-$1" 2>/dev/null; }
+_gl_reap_group() { # TERM the group, wait up to the grace, then KILL whatever is left
+  local pg="$1" i=0 lim=$(( GL_KILL_GRACE_S * 10 ))
+  _gl_group_alive "$pg" || return 0
+  kill -TERM -- "-$pg" 2>/dev/null
+  while [ "$i" -lt "$lim" ] && _gl_group_alive "$pg"; do sleep 0.1; i=$(( i + 1 )); done
+  kill -KILL -- "-$pg" 2>/dev/null
+  return 0
+}
+
+# _gl_bounded <timeout_s> <stdin> <stdout> <stderr> <cwd> cmd... → GL_RC (124 on deadline)
+_gl_bounded() {
+  local to="$1" in="$2" so="$3" se="$4" dir="$5" marker pids
+  shift 5
+  marker="$so.deadline"
+  GL_CUR_SEEN="$marker.seen"
+  set -m
+  ( cd "$dir" && exec "$@" ) <"$in" >"$so" 2>"$se" &
+  GL_CHILD_PID=$!
+  # Watchdog: snapshot the descendant tree while the leader still lives (re-parented
+  # children lose their ppid link once it dies), record it, mark the deadline, then
+  # signal group + leader + descendants: TERM, grace, and ALWAYS the KILL.
+  # It also SAMPLES the descendant tree every second (pid + start time) so that the
+  # success path can reap a worker that double-forked out of the group (addendum d).
+  # shellcheck disable=SC2086  # $pids is a deliberate word-split pid list
+  ( end=$(( $(date +%s) + to ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      sleep 1
+      pids="$(_gl_descendants "$GL_CHILD_PID")"
+      [ -n "${pids// /}" ] && ps -o pid=,lstart= -p "$(printf '%s' "$pids" | sed 's/ *$//; s/  */,/g')" >> "$marker.seen" 2>/dev/null
+    done
+    pids="$(_gl_descendants "$GL_CHILD_PID")"
+    printf '%s\n' "$pids" > "$marker.pids"
+    : > "$marker"
+    kill -TERM -- "-$GL_CHILD_PID" 2>/dev/null
+    kill -TERM "$GL_CHILD_PID" $pids 2>/dev/null
+    sleep "$GL_KILL_GRACE_S"
+    kill -KILL -- "-$GL_CHILD_PID" 2>/dev/null
+    kill -KILL "$GL_CHILD_PID" $pids 2>/dev/null
+    exit 0 ) </dev/null >/dev/null 2>&1 &
+  GL_WATCH_PID=$!
+  set +m
+  wait "$GL_CHILD_PID" 2>/dev/null
+  GL_RC=$?
+  kill -TERM -- "-$GL_WATCH_PID" 2>/dev/null
+  wait "$GL_WATCH_PID" 2>/dev/null
+  if [ -f "$marker" ]; then
+    GL_RC=124
+    # The leader is gone; TERM-immune stragglers get no second grace.
+    pids="$(cat "$marker.pids" 2>/dev/null || true)"
+    kill -KILL -- "-$GL_CHILD_PID" 2>/dev/null
+    # shellcheck disable=SC2086
+    [ -n "$pids" ] && kill -KILL $pids 2>/dev/null
+    # F4: a descendant that left the session AND re-parented before the deadline is no
+    # longer in the ppid walk — kill every identity-checked sampled descendant too.
+    _gl_reap_seen "$marker.seen"
+  else
+    _gl_reap_group "$GL_CHILD_PID"
+    _gl_reap_seen "$marker.seen"
+  fi
+  GL_CHILD_PID=""
+  GL_WATCH_PID=""
+}
+# Success path: TERM, then KILL, every sampled descendant that is STILL the same process
+# (pid + start time match, so a recycled pid is never touched).
+_gl_reap_seen() { # <seen file>
+  local f="$1" pid start now_start i=0 lim=$(( GL_KILL_GRACE_S * 10 )) live=""
+  [ -s "$f" ] || return 0
+  while read -r pid start; do
+    [ -n "$pid" ] || continue
+    now_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//; s/ *$//')"
+    [ -n "$now_start" ] && [ "$now_start" = "$(printf '%s' "$start" | sed 's/^ *//; s/ *$//')" ] && live="$live $pid"
+  done < <(LC_ALL=C sort -u "$f")
+  [ -n "$live" ] || return 0
+  # shellcheck disable=SC2086
+  kill -TERM $live 2>/dev/null
+  while [ "$i" -lt "$lim" ]; do
+    # shellcheck disable=SC2086
+    kill -0 $live 2>/dev/null || break
+    sleep 0.1; i=$(( i + 1 ))
+  done
+  # shellcheck disable=SC2086
+  kill -KILL $live 2>/dev/null
+  return 0
+}
+
+# shellcheck disable=SC2329  # invoked via trap
+_gl_on_signal() {
+  local code="$1" p pids
+  if [ -n "$GL_CHILD_PID" ]; then
+    pids="$(_gl_descendants "$GL_CHILD_PID")"
+    kill -TERM -- "-$GL_CHILD_PID" 2>/dev/null
+    # shellcheck disable=SC2086
+    kill -TERM "$GL_CHILD_PID" $pids 2>/dev/null
+    sleep 0.2
+    kill -KILL -- "-$GL_CHILD_PID" 2>/dev/null
+    # shellcheck disable=SC2086
+    kill -KILL "$GL_CHILD_PID" $pids 2>/dev/null
+  fi
+  [ -n "$GL_WATCH_PID" ] && kill -TERM -- "-$GL_WATCH_PID" 2>/dev/null
+  [ -n "$GL_CHILD_PID" ] && [ -n "${GL_CUR_SEEN:-}" ] && GL_KILL_GRACE_S=1 _gl_reap_seen "$GL_CUR_SEEN"
+  # H17: an in-flight codex invocation's home (0600 auth.json copy, rollout with the prompt)
+  # must not outlive a cancel — bounded write-back of a rotated token, then removal.
+  if [ "${GL_CODEX_HOME_LIVE:-0}" = 1 ]; then
+    GL_LOCK_WAIT_S=2 _gl_codex_inv_cleanup "${GL_CUR_INV:-}" "" 2>/dev/null
+  fi
+  for p in $GL_PROBE_PIDS; do kill -TERM "$p" 2>/dev/null; done
+  exit "$code"
+}
+trap '_gl_on_signal 129' HUP
+trap '_gl_on_signal 130' INT
+trap '_gl_on_signal 143' TERM
+
+# ── classification + effort ladder ────────────────────────────────────────────
+_gl_classify() { # rc stdout inv_out → "class<TAB>detail" (structured output only, E1)
+  GL_RC="$1" GL_STDOUT="$2" GL_INV_OUT="$3" GL_LANE="$GL_LANE" GL_RUN_MODE="$GL_MODE" _gl_js classify
+}
+_gl_class_exit() {
+  case "$1" in
+    ok) echo "$EX_OK" ;; throttle) echo "$EX_THROTTLE" ;; quota) echo "$EX_QUOTA" ;;
+    auth) echo "$EX_AUTH" ;; timeout) echo "$EX_TIMEOUT" ;; *) echo "$EX_ERROR" ;;
+  esac
+}
+_gl_step_down() {
+  case "$1" in
+    max|xhigh|high) echo medium ;;
+    medium) echo low ;;
+    *) echo "$1" ;;
+  esac
+}
+_gl_default_retry_timeout() {
+  case "$1" in
+    600) echo 300 ;;
+    900) echo 420 ;;
+    *) local h=$(( $1 / 2 )); [ "$h" -ge 1 ] || h=1; echo "$h" ;;
+  esac
+}
+_gl_valid_effort() { # lane effort
+  case "$1:$2" in
+    l2:low|l2:medium|l2:high|l2:xhigh|l2:max) return 0 ;;
+    l3:none|l3:minimal|l3:low|l3:medium|l3:high|l3:xhigh) return 0 ;;
+    l4:low|l4:medium|l4:high|l4:xhigh) return 0 ;;
+  esac
+  return 1
+}
+
+# ── --allow-cmd vetting (D9 / E10) ────────────────────────────────────────────
+_gl_denied_basename() { # <token> → 0 when its basename is a shell/interpreter/downloader
+  case "${1##*/}" in
+    sh|bash|zsh|dash|ksh|fish|csh|tcsh|env|eval|exec|python|python3|python2|node|nodejs|deno|perl|ruby|php|lua|osascript|curl|wget|nc|ncat|ssh|scp|sudo|su|xargs|npx|bunx|x|dlx) return 0 ;;
+  esac
+  return 1
+}
+_gl_vet_allow_cmd() { # <prefix> → 0 when it is a table-listed runner + subcommand
+  local c="$1" n i tok skip=0
+  local -a t
+  [[ "$c" =~ ^[A-Za-z0-9./][A-Za-z0-9\ ._/:=@+-]*$ ]] || return 1
+  case "$c" in *"  "*|*" ") return 1 ;; esac
+  read -r -a t <<<"$c"
+  n=${#t[@]}
+  local a0="${t[0]:-}" a1="${t[1]:-}" a2="${t[2]:-}"
+  case "$a0 $a1 $a2" in
+    "python -m pytest"|"python3 -m pytest"|"uv run pytest"|"bundle exec rspec") skip=3 ;;
+  esac
+  if [ "$skip" = 0 ]; then
+    case "$a0 $a1" in
+      "bun test"|"npm test"|"pnpm test"|"yarn test"|"cargo test"|"cargo build"|"go test"|"swift test"|"xcodebuild test"|"./gradlew test"|"gradle test"|"mvn test"|"dotnet test"|"mix test") skip=2 ;;
+      "bun run"|"npm run"|"pnpm run"|"yarn run")
+        [[ "$a2" =~ ^[A-Za-z0-9][A-Za-z0-9:._-]*$ ]] || return 1
+        _gl_denied_basename "$a2" && return 1
+        skip=3 ;;
+      *)
+        case "$a0" in
+          pytest|rspec) skip=1 ;;
+          make)
+            [[ "$a1" =~ ^[A-Za-z0-9][A-Za-z0-9:._-]*$ ]] || return 1
+            _gl_denied_basename "$a1" && return 1
+            skip=2 ;;
+          *) return 1 ;;
+        esac
+        ;;
+    esac
+  fi
+  [ "$n" -ge "$skip" ] || return 1
+  # Remaining arguments: plain, worktree-relative, never an interpreter/shell.
+  i="$skip"
+  while [ "$i" -lt "$n" ]; do
+    tok="${t[$i]}"
+    case "$tok" in /*) return 1 ;; esac          # absolute paths point outside the worktree
+    case "/$tok/" in */../*) return 1 ;; esac     # so does any `..` path component (./... is fine)
+    _gl_denied_basename "$tok" && return 1
+    i=$(( i + 1 ))
+  done
+  return 0
+}
+
+# ── lane-specific setup ───────────────────────────────────────────────────────
+_gl_grok_enabled() { # gstack-config grok_reviews must be exactly "enabled" (fail closed)
+  local v
+  v="$("$GL_BIN_DIR/gstack-config" get grok_reviews 2>/dev/null || true)"
+  [ "$v" = enabled ]
+}
+_gl_claude_dir() { # → resolved claude dir (from --claude-dir or gstack-config)
+  local d="${GL_CLAUDE_DIR_ARG:-}"
+  if [ -z "$d" ]; then
+    d="$("$GL_BIN_DIR/gstack-config" get claude_overflow_dir 2>/dev/null || true)"
+  fi
+  [ -z "$d" ] && d="$HOME/.claude-overflow"
+  # shellcheck disable=SC2088  # matching a LITERAL leading ~ from config on purpose
+  case "$d" in "~") d="$HOME" ;; "~/"*) d="$HOME/${d#\~/}" ;; esac
+  printf '%s' "$d"
+}
+_gl_claude_has_creds() {
+  local d="$1"
+  [ -d "$d" ] || return 1
+  [ -s "$d/.credentials.json" ] && return 0
+  [ -f "$d/.claude.json" ] && LC_ALL=C grep -Eq '"(oauthAccount|primaryApiKey)"[[:space:]]*:[[:space:]]*[{"]' "$d/.claude.json" 2>/dev/null && return 0
+  return 1
+}
+_gl_claude_is_root_account() { # <claude dir> → 0 when it is (or logs into) the root session's own account
+  local d="$1" dr r rr ov rt
+  dr="$(_gl_realdir "$d" || printf '%s' "$d")"
+  for r in "$HOME" "$HOME/.claude" "${CLAUDE_CONFIG_DIR:-}"; do
+    [ -n "$r" ] || continue
+    rr="$(_gl_realdir "$r" || printf '%s' "$r")"
+    [ "$dr" = "$rr" ] && return 0
+  done
+  ov="$(GL_FILE="$(_gl_abs "$d/.claude.json")" _gl_js account-uuid 2>/dev/null)"
+  [ -n "$ov" ] || return 1
+  rt="${CLAUDE_CODE_ACCOUNT_UUID:-}"
+  [ -n "$rt" ] || rt="$(GL_FILE="$(_gl_abs "$HOME/.claude.json")" _gl_js account-uuid 2>/dev/null)"
+  [ -n "$rt" ] && [ "$ov" = "$rt" ]
+}
+_gl_claude_env_unsets() { # → GL_ENV_UNSETS array of `-u NAME` for account-overriding tokens
+  local v
+  GL_ENV_UNSETS=(-u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN)
+  for v in $(compgen -e); do
+    case "$v" in
+      CLAUDE_CODE_OAUTH_TOKEN) ;;
+      CLAUDE_CODE_*TOKEN*) GL_ENV_UNSETS=("${GL_ENV_UNSETS[@]}" -u "$v") ;;
+    esac
+  done
+}
+
+# Hermetic CODEX_HOME (D6): outside the run tree, keyed by the run id.
+_gl_codex_home_path() {
+  local base="${GSTACK_HOME:-$HOME/.gstack}" rid real
+  rid="$(basename "$GL_RUN_DIR")"
+  _gl_valid_id "$rid" || rid="run-$(printf '%s' "$GL_RUN_DIR" | cksum | cut -d' ' -f1)"
+  real="$(_gl_realdir "$base" || true)"
+  [ -n "$real" ] && base="$real"
+  printf '%s/lane-codex-home/%s' "$base" "$rid"
+}
+_gl_cwd_conflicts_codex_home() { # <real cwd> → 0 when cwd is, contains, or is inside the home
+  local cw="$1" ch
+  ch="$(_gl_codex_home_path)"
+  [ "$cw" = / ] && return 0
+  case "$cw" in "$ch"|"$ch"/*) return 0 ;; esac
+  case "$ch" in "$cw"/*) return 0 ;; esac
+  return 1
+}
+# Per-INVOCATION hermetic CODEX_HOME (E4 + addendum b): every codex invocation gets a
+# fresh <lane-codex-home>/<run-id>/<task>+<attempt_id>-inv<n>/ (0700; the FULL attempt
+# identity, H15 — `+` never occurs in an id, so two tasks' attempts cannot share a name)
+# with a 0600 copy of the source auth.json and a freshly written, re-read and
+# byte-verified config.toml; it is removed after the invocation (or on a signal, H17), so
+# there is no shared mutable config at all. Any failure refuses the launch. Returns 0 on
+# success.
+GL_CODEX_HOME_LIVE=0
+_gl_codex_inv_home() { # <n>
+  local n="$1" base home cfg tmp got
+  base="$(_gl_codex_home_path)"
+  home="$base/${GL_TASK:-task}+$GL_ATTEMPT_ID-inv$n"
+  GL_CODEX_HOME="$home"
+  GL_AUTH_SRC="${CODEX_HOME:-$HOME/.codex}/auth.json"
+  GL_AUTH_INITIAL=""
+  ( umask 077; mkdir -p "$base" ) 2>/dev/null || return 1
+  chmod 700 "$base" "$(dirname "$base")" 2>/dev/null
+  ( umask 077; mkdir "$home" ) 2>/dev/null || return 1      # must be FRESH
+  GL_CODEX_HOME_LIVE=1                                      # from here a signal cleans it up (H17)
+  if [ -f "$GL_AUTH_SRC" ]; then
+    if ! { ( umask 077; cp "$GL_AUTH_SRC" "$home/auth.json" ) 2>/dev/null && chmod 600 "$home/auth.json"; }; then
+      rm -rf "$home"; return 1
+    fi
+    GL_AUTH_INITIAL="$(git hash-object --no-filters "$home/auth.json" 2>/dev/null || true)"
+  fi
+  cfg="$home/config.toml"; tmp="$cfg.tmp.$$"
+  { ( umask 077; printf '%s' "$GL_CODEX_CONFIG" > "$tmp" ) && chmod 600 "$tmp" && mv -f "$tmp" "$cfg"; } 2>/dev/null || { rm -rf "$home"; return 1; }
+  if ! { [ -f "$cfg" ] && [ ! -L "$cfg" ]; }; then rm -rf "$home"; return 1; fi
+  got="$(cat "$cfg" 2>/dev/null; printf x)"
+  [ "$got" = "${GL_CODEX_CONFIG}x" ] || { rm -rf "$home"; return 1; }
+  return 0
+}
+# After the invocation: keep its rollout (E2 reads it later), write a rotated token
+# back to the user's login (compare-and-swap under a global flock), remove the home.
+# The thread id comes from the classifier's JSON parse (D5/H10); the sed literal is only
+# the fallback (classifier failed, or the signal path, which runs no bun).
+_gl_codex_inv_cleanup() { # <inv dir> [<thread id>]
+  local inv="$1" thread="${2:-}" f
+  case "$thread" in *[!A-Za-z0-9-]*) thread="" ;; esac
+  if [ -z "$thread" ] && [ -n "$inv" ]; then
+    thread="$(sed -n 's/.*"type" *: *"thread.started" *, *"thread_id" *: *"\([A-Za-z0-9-]\{8,80\}\)".*/\1/p' "$inv/stdout" 2>/dev/null | head -1)"
+  fi
+  if [ -n "$thread" ] && [ -n "$inv" ]; then
+    f="$(find "$GL_CODEX_HOME/sessions" -type f -name "rollout-*-$thread.jsonl" 2>/dev/null | head -1)"
+    [ -n "$f" ] && cp "$f" "$inv/rollout.jsonl" 2>/dev/null
+  fi
+  if [ -n "$GL_AUTH_INITIAL" ] && [ -f "$GL_CODEX_HOME/auth.json" ]; then
+    _gl_locked_at "$(dirname "$(_gl_codex_home_path)")/auth.lock" "$GL_LOCK_WAIT_S" \
+      "$GL_SELF" _codex-auth-writeback "$GL_CODEX_HOME/auth.json" "$GL_AUTH_SRC" "$GL_AUTH_INITIAL" >/dev/null 2>&1
+  fi
+  case "$GL_CODEX_HOME" in "$(_gl_codex_home_path)"/*-inv[0-9]*) rm -rf "$GL_CODEX_HOME" ;; esac
+  GL_CODEX_HOME_LIVE=0
+}
+# Internal (under the global auth flock): if the invocation rotated its token, the
+# source still holds the bytes we copied (nobody else rotated it), and both files are
+# JSON for the SAME tokens.account_id → atomically replace the source (temp + mv, 0600).
+cmd_codex_auth_writeback() {
+  local inv_auth="$1" src="$2" initial="$3" cur srch tmp
+  cur="$(git hash-object --no-filters "$inv_auth" 2>/dev/null)" || exit 0
+  [ "$cur" = "$initial" ] && exit 0
+  [ -f "$src" ] || exit 0
+  srch="$(git hash-object --no-filters "$src" 2>/dev/null)" || exit 0
+  [ "$srch" = "$initial" ] || exit 0
+  GL_A="$(_gl_abs "$inv_auth")" GL_B="$(_gl_abs "$src")" _gl_js same-account 2>/dev/null || exit 0
+  umask 077
+  tmp="$src.tmp.$$"
+  cp "$inv_auth" "$tmp" 2>/dev/null && chmod 600 "$tmp" && mv -f "$tmp" "$src" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null
+  exit 0
+}
+
+# Registered LINKED worktree directly under <run-dir>/wt (never the primary checkout).
+_gl_registered_wt() { # <real dir>
+  local d="$1" root id line p rp top first=1 found=0
+  root="$(_gl_realdir "$GL_RUN_DIR/wt")" || return 1
+  case "$d" in "$root"/*) ;; *) return 1 ;; esac
+  id="${d#"$root"/}"
+  _gl_valid_id "$id" || return 1
+  top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$top" ] && [ "$(_gl_realdir "$top" || true)" = "$d" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        p="${line#worktree }"
+        rp="$(_gl_realdir "$p" || printf '%s' "$p")"
+        if [ "$first" = 1 ]; then
+          first=0
+          [ "$rp" = "$d" ] && return 1
+        elif [ "$rp" = "$d" ]; then
+          found=1
+        fi
+        ;;
+    esac
+  done < <(git -C "$d" worktree list --porcelain 2>/dev/null)
+  [ "$found" = 1 ]
+}
+_gl_primary_wt() { # <dir> → realpath of the repo's primary (main) worktree
+  local p
+  p="$(git -C "$1" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
+  [ -n "$p" ] && _gl_realdir "$p"
+}
+
+# ── inert, bounded taint snapshots (E5/E6) ────────────────────────────────────
+_gl_inert_git() { # git with every configured external program disabled
+  GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat \
+    git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat \
+        -c core.untrackedCache=false "$@"
+}
+# _gl_filter_off <dir> → GL_FILTER_OFF: `-c filter.<n>.{clean,smudge}=cat -c filter.<n>.process=
+# -c filter.<n>.required=false` for EVERY filter name git config reports for <dir> (global,
+# local, config.worktree, include.path files — no system config). An empty `process` makes
+# git skip the driver entirely, so the content passes through untouched.
+GL_FILTER_OFF=()
+_gl_filter_off() { # <dir>... — the UNION over every dir's config context (conditional includes
+  local d k n seen=" "                         # such as gitdir:/onbranch: resolve per worktree)
+  GL_FILTER_OFF=()
+  for d in "$@"; do
+    while IFS= read -r k; do
+      n="${k#filter.}"; n="${n%.*}"            # filter.<name>.<key> → <name> (a name may contain dots)
+      [ -n "$n" ] && [ "$n" != "$k" ] || continue
+      case "$seen" in *" $n "*) continue ;; esac
+      seen="$seen$n "
+      GL_FILTER_OFF+=(-c "filter.$n.clean=cat" -c "filter.$n.smudge=cat" -c "filter.$n.process=" -c "filter.$n.required=false")
+    done < <(GIT_CONFIG_NOSYSTEM=1 git -C "$d" config --name-only --get-regexp '^filter\.' 2>/dev/null)
+  done
+}
+# V1: an `includeIf "onbranch:…"` in the repo's OWN config (local/worktree, following include
+# files) activates only once a branch is checked out — config that cannot be enumerated
+# before the checkout it would arm. Lane worktrees refuse such repos outright.
+_gl_has_onbranch() { # <dir> → 0 when its local/worktree config (incl. included files) has one
+  [ -n "$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$1" config --includes --name-only \
+          --get-regexp '^includeif\.onbranch:' 2>/dev/null)" ]
+}
+GL_STAT_FMT=()
+_gl_stat_init() { # GNU first (BSD stat rejects -c); `stat -f` on GNU means filesystem mode
+  [ "${#GL_STAT_FMT[@]}" -gt 0 ] && return 0
+  if stat -c '%A' / >/dev/null 2>&1; then GL_STAT_FMT=(-c '%A %n'); else GL_STAT_FMT=(-f '%Sp %N'); fi
+}
+_gl_modes() { # <path>... → "<type+permission bits> <path>" per path (F5: chmod +x on a hook shows)
+  _gl_stat_init
+  stat "${GL_STAT_FMT[@]}" "$@" 2>/dev/null
+}
+# <dir> → the dir itself if it is a symlink (its target string: retargeting shows), then
+# for the RESOLVED dir: every entry's own type+mode (lstat), every regular file reached
+# through symlinks with its FOLLOWED type+mode and blob hash, and every symlink target.
+# A symlinked hooks dir / core.hooksPath target is therefore fingerprinted by content.
+_gl_tree_digest() {
+  local d="$1" r l
+  if [ -L "$d" ]; then printf 'link %s -> %s\n' "$d" "$(readlink "$d")"; fi
+  if [ ! -e "$d" ]; then
+    if [ -L "$d" ]; then echo "dangling $d"; else echo "absent $d"; fi
+    return 0
+  fi
+  r="$d"
+  [ -d "$d" ] && r="$(_gl_realdir "$d" || printf '%s' "$d")"
+  echo "resolved $r"
+  _gl_stat_init
+  find "$r" -exec stat "${GL_STAT_FMT[@]}" {} + 2>/dev/null | LC_ALL=C sort -k2
+  find -L "$r" -type f -exec stat -L "${GL_STAT_FMT[@]}" {} + 2>/dev/null | LC_ALL=C sort -k2
+  find -L "$r" -type f -print 2>/dev/null | LC_ALL=C sort | git hash-object --no-filters --stdin-paths 2>/dev/null
+  find "$r" -type l -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r l; do printf '%s -> %s\n' "$l" "$(readlink "$l")"; done
+}
+# Internal: `_snapshot <before-file|-> <dir>...` → a deterministic fingerprint on stdout.
+# Section 1 (CONTROL): per snapshotted worktree its own config.worktree (H3); per DISTINCT
+# git common dir — config, HEAD, packed-refs, hooks/, info/, every ref, the core.hooksPath
+# target — plain file hashing, no git config interpretation. If <before-file> is given
+# and its CONTROL section differs, print "CONTROL-CHANGED" and stop: the git status/diff
+# pass never runs in a repo whose config, filters or hooks were just altered. Section 2
+# (TREE): per worktree — status v2 with branch + HEAD, a hash of `diff HEAD --binary` and
+# of untracked file contents, all via _gl_inert_git (no fsmonitor, hooks, external diff,
+# textconv, pager, replace refs or optional locks) with every filter a pass-through (H3).
+_gl_control_digest() { # <dir>... — a function, NOT inline in $(…): bash 3.2 mis-parses `case` there
+  local d dirs common gitdir hp top f seen=""
+  for d in "$@"; do
+    dirs="$(_gl_inert_git -C "$d" rev-parse --path-format=absolute --git-dir --git-common-dir 2>/dev/null)" || { echo "no-git $d"; continue; }
+    gitdir="${dirs%%$'\n'*}"; common="${dirs#*$'\n'}"
+    # H3: each worktree's OWN config.worktree (extensions.worktreeConfig) can define filters,
+    # hooksPath, fsmonitor … — part of the control state, per worktree.
+    if [ -f "$gitdir/config.worktree" ]; then
+      echo "wtconfig $d"; _gl_modes "$gitdir/config.worktree"; git hash-object --no-filters "$gitdir/config.worktree" 2>/dev/null
+    elif [ -e "$gitdir/config.worktree" ] || [ -L "$gitdir/config.worktree" ]; then
+      echo "wtconfig-odd $d"; _gl_modes "$gitdir/config.worktree"
+    else
+      echo "wtconfig-absent $d"
+    fi
+    case " $seen " in *" $common "*) continue ;; esac
+    seen="$seen $common"
+    echo "== control $common"
+    for f in config packed-refs HEAD; do
+      if [ -f "$common/$f" ]; then _gl_modes "$common/$f"; git hash-object --no-filters "$common/$f" 2>/dev/null; else echo "absent $f"; fi
+    done
+    _gl_tree_digest "$common/hooks"
+    _gl_tree_digest "$common/info"
+    _gl_inert_git -C "$d" for-each-ref --format='%(refname) %(objectname)' 2>/dev/null
+    hp="$(git -C "$d" config --get core.hooksPath 2>/dev/null || true)"
+    if [ -n "$hp" ]; then
+      top="$(_gl_inert_git -C "$d" rev-parse --show-toplevel 2>/dev/null || echo "$d")"
+      # shellcheck disable=SC2088  # matching a LITERAL leading ~ from git config on purpose
+      case "$hp" in /*) ;; "~/"*) hp="$HOME/${hp#\~/}" ;; *) hp="$top/$hp" ;; esac
+      echo "hooksPath $hp"
+      _gl_tree_digest "$hp"
+    fi
+  done
+}
+cmd_snapshot() {
+  local before="$1" d ctl
+  shift
+  ctl="$(_gl_control_digest "$@")"
+  printf '%s\n== end-control\n' "$ctl"
+  if [ "$before" != - ] && [ "$(sed -n '1,/^== end-control$/p' "$before" 2>/dev/null)" != "$(printf '%s\n== end-control' "$ctl")" ]; then
+    echo "CONTROL-CHANGED"
+    exit 0
+  fi
+  for d in "$@"; do
+    echo "== tree $d"
+    _gl_filter_off "$d"   # H3: no clean/smudge/process filter runs inside a snapshot
+    _gl_inert_git ${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"} -C "$d" status --porcelain=v2 --branch -uall 2>/dev/null || exit 1
+    _gl_inert_git ${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"} -C "$d" diff HEAD --binary --no-ext-diff --no-textconv 2>/dev/null | git hash-object --no-filters --stdin 2>/dev/null
+    ( cd "$d" && _gl_inert_git ${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"} ls-files -o --exclude-standard 2>/dev/null | git hash-object --no-filters --stdin-paths 2>/dev/null )
+  done
+  exit 0
+}
+_gl_snap() { # <before-file|-> <outfile> <dir>... → 0 when the bounded snapshot completed
+  local before="$1" out="$2"
+  shift 2
+  _gl_bounded "$GL_SNAPSHOT_TIMEOUT_S" /dev/null "$out" "$out.err" "$GL_RUN_DIR" "$GL_SELF" _snapshot "$before" "$@"
+  [ "$GL_RC" -eq 0 ]
+}
+
+# grok default model (D4): the `Default model:` line of `grok models`, deadline-bounded.
+_gl_grok_resolve_model() {
+  local so="$GL_LOG_DIR/grok-models.stdout" se="$GL_LOG_DIR/grok-models.stderr" m
+  _gl_bounded "$GL_GROK_MODELS_TIMEOUT_S" /dev/null "$so" "$se" "$GL_RUN_DIR" grok models
+  m="$(cat "$so" 2>/dev/null | sed -n 's/^[[:space:]]*Default model:[[:space:]]*\([A-Za-z0-9][A-Za-z0-9._:/-]*\).*$/\1/p' | head -1)"
+  [ -n "$m" ] || return 1
+  GL_MODEL="$m"
+  GL_MODEL_SOURCE=grok-default
+  return 0
+}
+
+# ── command construction ──────────────────────────────────────────────────────
+GL_CMD=()
+GL_RED=()
+_gl_add() { local a; for a in "$@"; do GL_CMD[${#GL_CMD[@]}]="$a"; GL_RED[${#GL_RED[@]}]="$a"; done; }
+_gl_add_redacted() { GL_CMD[${#GL_CMD[@]}]="$1"; GL_RED[${#GL_RED[@]}]="$2"; }
+_gl_join() { local IFS=,; printf '%s' "$*"; }
+
+# _gl_build_cmd <effort> <sandbox> → GL_CMD, GL_RED, GL_STDIN, GL_STDIN_REDACT
+_gl_build_cmd() {
+  local effort="$1" sandbox="$2" c
+  GL_CMD=(); GL_RED=()
+  GL_STDIN="$GL_PROMPT_FILE"; GL_STDIN_REDACT="<prompt-file>"
+  case "$GL_LANE" in
+    l3)
+      _gl_add env "CODEX_HOME=$GL_CODEX_HOME" codex exec --json
+      [ "$GL_MODE" = probe ] && _gl_add --skip-git-repo-check
+      _gl_add -C "$GL_CWD" -s "$sandbox" -c 'approval_policy="never"' -c 'service_tier="default"' \
+        -c "model=\"$GL_MODEL\"" -c "model_reasoning_effort=\"$effort\""
+      [ -n "$GL_SCHEMA" ] && _gl_add --output-schema "$GL_SCHEMA"
+      _gl_add -
+      ;;
+    l2)
+      _gl_claude_env_unsets
+      _gl_add env "${GL_ENV_UNSETS[@]}" "CLAUDE_CONFIG_DIR=$GL_CLAUDE_DIR" claude -p \
+        --restricted --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings '{"disableAllHooks":true}' \
+        --model "$GL_MODEL"
+      [ -n "$effort" ] && _gl_add --effort "$effort"
+      if [ "$GL_MODE" = impl ]; then
+        local allowed=(Read Grep Glob Edit Write)
+        for c in ${GL_ALLOW_CMDS[@]+"${GL_ALLOW_CMDS[@]}"}; do allowed[${#allowed[@]}]="Bash($c:*)"; done
+        _gl_add --permission-mode dontAsk --tools Read,Grep,Glob,Edit,Write,Bash --allowedTools "$(_gl_join "${allowed[@]}")"
+      else
+        _gl_add --permission-mode plan --tools Read,Grep,Glob --allowedTools Read,Grep,Glob
+      fi
+      _gl_add --output-format json
+      [ -n "$GL_SCHEMA" ] && { _gl_add --json-schema; _gl_add_redacted "$(cat "$GL_SCHEMA")" "<schema-file>"; }
+      ;;
+    l4)
+      GL_STDIN=/dev/null; GL_STDIN_REDACT=""
+      _gl_add grok --prompt-file "$GL_PROMPT_FILE" -m "$GL_MODEL" --reasoning-effort "$effort"
+      case "$GL_MODE" in
+        review)
+          [ "$sandbox" = read-only ] && _gl_add --sandbox read-only
+          _gl_add --permission-mode plan
+          ;;
+        impl)
+          _gl_add --permission-mode dontAsk --allow Read --allow Edit --allow Write
+          for c in ${GL_ALLOW_CMDS[@]+"${GL_ALLOW_CMDS[@]}"}; do _gl_add --allow "Bash($c:*)"; done
+          ;;
+        probe) _gl_add --permission-mode plan ;;
+      esac
+      # H13: grok 1.0.40 `--json-schema <SCHEMA>` (structured output; implies json output).
+      [ -n "$GL_SCHEMA" ] && { _gl_add --json-schema; _gl_add_redacted "$(cat "$GL_SCHEMA")" "<schema-file>"; }
+      _gl_add --output-format json
+      ;;
+  esac
+}
+
+_gl_initial_sandbox() {
+  case "$GL_LANE:$GL_MODE" in
+    l3:impl) echo workspace-write ;;
+    l3:*) echo read-only ;;
+    l4:review) echo read-only ;;
+    l4:*) echo none ;;
+    *) echo "" ;;
+  esac
+}
+
+# ── one try (one effort level) with in-deadline throttle retries ──────────────
+GL_INV=0
+GL_CUR_INV=""
+GL_LAST_SO=""; GL_LAST_SE=""; GL_LAST_RC=""; GL_LAST_DETAIL=""; GL_LAST_INV_DIR=""
+GL_SANDBOX=""
+GL_SANDBOX_REFUSED=0
+GL_THROTTLE_INV=0
+_gl_record_cmd() { : > "$GL_CMD_FILE"; local a; for a in "${GL_RED[@]}"; do printf '%s\n' "$a" >> "$GL_CMD_FILE"; done; }
+
+_gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
+  local effort="$1" to="$2" deadline now remaining n_thr=0 so se inv t0 dur cls res detail backoff_ms first=1
+  now=$(_gl_now)
+  deadline=$(( now + to ))
+  GL_SANDBOX="$(_gl_initial_sandbox)"
+  # A refusal already seen in this run is deterministic: go straight to plan-only.
+  [ "$GL_SANDBOX_REFUSED" = 1 ] && GL_SANDBOX=none
+  GL_TRY_CLASS=""
+  while :; do
+    if [ "$first" = 1 ]; then first=0; else now=$(_gl_now); fi
+    remaining=$(( deadline - now ))
+    if [ "$remaining" -lt 1 ]; then
+      [ -z "$GL_TRY_CLASS" ] && GL_TRY_CLASS=timeout
+      break
+    fi
+    GL_INV=$(( GL_INV + 1 ))
+    inv="$GL_LOG_DIR/inv-$GL_INV"
+    GL_CUR_INV="$inv"
+    mkdir -p "$inv"
+    if [ "$GL_LANE" = l3 ] && ! _gl_codex_inv_home "$GL_INV"; then
+      # E4: never launch codex on an unverified config — refuse this invocation.
+      printf '%s\t%s\t%s\t\t%s\t0\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" error "$GL_SANDBOX" "$inv" "hermetic codex config not installed" >> "$GL_ATTEMPTS_FILE"
+      GL_TRY_CLASS=error
+      GL_LAST_DETAIL="hermetic codex config not installed"
+      GL_NOTE="codex-config-not-installed"
+      break
+    fi
+    _gl_build_cmd "$effort" "$GL_SANDBOX"
+    _gl_record_cmd
+    so="$inv/stdout"; se="$inv/stderr"
+    t0=$(_gl_now)
+    _gl_bounded "$remaining" "$GL_STDIN" "$so" "$se" "$GL_CWD" "${GL_CMD[@]}"
+    dur=$(( $(_gl_now) - t0 ))
+    GL_LAST_SO="$so"; GL_LAST_SE="$se"; GL_LAST_RC="$GL_RC"; GL_LAST_INV_DIR="$inv"
+    if [ "$GL_LANE" = l3 ]; then
+      # Classify FIRST: its JSON parse yields the thread id that locates the rollout (H10).
+      res="$(_gl_classify "$GL_RC" "$so" "$inv/out")"
+      _gl_codex_inv_cleanup "$inv" "$(printf '%s' "$res" | cut -f3)"
+    fi
+    if [ "$GL_LANE" = l4 ] && [ "$GL_SANDBOX" = read-only ] && [ "$GL_RC" -ne 0 ] \
+       && LC_ALL=C grep -qiF "$GL_SANDBOX_REFUSAL" "$se" 2>/dev/null; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" sandbox-refused "$dur" read-only "$inv" "sandbox refused to start" >> "$GL_ATTEMPTS_FILE"
+      GL_SANDBOX=none
+      GL_SANDBOX_REFUSED=1
+      GL_TRY_CLASS=error
+      GL_LAST_DETAIL="sandbox refused to start"
+      continue
+    fi
+    [ "$GL_LANE" = l3 ] || res="$(_gl_classify "$GL_RC" "$so" "$inv/out")"
+    cls="$(printf '%s' "$res" | cut -f1)"
+    detail="$(printf '%s' "$res" | cut -f2)"
+    [ -n "$cls" ] || { cls=error; detail="classifier failed"; }
+    GL_LAST_DETAIL="$detail"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" "$cls" "$dur" "$GL_SANDBOX" "$inv" "$detail" >> "$GL_ATTEMPTS_FILE"
+    GL_TRY_CLASS="$cls"
+    if [ "$cls" = throttle ]; then
+      GL_THROTTLE_INV=$(( GL_THROTTLE_INV + 1 ))
+      if [ "$n_thr" -lt "$GL_THROTTLE_RETRIES" ]; then
+        backoff_ms=$(( GL_BACKOFF_MS * (1 << n_thr) + RANDOM % (GL_BACKOFF_MS + 1) ))
+        now=$(_gl_now)
+        # Back off only when the sleep PLUS at least one second of run time still fits.
+        if [ $(( now + (backoff_ms + 999) / 1000 + 1 )) -le "$deadline" ]; then
+          sleep "$(_gl_ms_to_s "$backoff_ms")"
+          n_thr=$(( n_thr + 1 ))
+          continue
+        fi
+      fi
+    fi
+    break
+  done
+}
+
+# ── finalize: lane update (under the kernel lock) + status file ───────────────
+# _gl_finalize <class> <update-kind> <reason> <exit_code>
+_gl_finalize() {
+  local cls="$1" kind="$2" reason="$3" code="$4" res js_rc lane_update="" wait_s
+  _gl_finalize_js() { # <update kind> <lane_update marker> [lock wait | ""]
+    GL_LANES_FILE="$GL_RUN_DIR/lanes.json" GL_LANE="$GL_LANE" GL_UPDATE="$1" GL_REASON="$reason" \
+    GL_SHORT_S="$GL_PROBE_RETRY_S" GL_STDOUT="${GL_LAST_SO:-}" GL_STDERR="${GL_LAST_SE:-}" \
+    GL_RM="${GL_RM_ENABLE:-0}" GL_REQ_MODEL="$GL_MODEL" GL_REQ_MODEL_SOURCE="${GL_MODEL_SOURCE:-}" \
+    GL_ROLLOUT="${GL_LAST_INV_DIR:+$GL_LAST_INV_DIR/rollout.jsonl}" \
+    GL_STATUS_FILE="$GL_STATUS_FILE" GL_ATTEMPTS_FILE="$GL_ATTEMPTS_FILE" GL_CMD_FILE="$GL_CMD_FILE" \
+    GL_STDIN_REDACT="${GL_STDIN_REDACT:-}" GL_ATTEMPT_ID="$GL_ATTEMPT_ID" GL_TASK="$GL_TASK" GL_RUN_MODE="$GL_MODE" \
+    GL_TIER="$GL_TIER" GL_REQ_EFFORT="$GL_REQ_EFFORT" GL_EFFORT="$GL_EFFORT_FINAL" GL_EXIT="${GL_LAST_RC:-}" \
+    GL_CLASS="$cls" GL_DETAIL="${GL_CLASS_DETAIL:-}" GL_EXIT_CODE="$code" GL_DURATION="$(( $(_gl_now) - GL_T_START ))" \
+    GL_ATTEMPT_STARTED="$GL_STARTED" GL_ATTEMPT_STARTED_MS="${GL_STARTED_MS:-}" GL_SANDBOX="$GL_SANDBOX" \
+    GL_CWD="$GL_CWD" GL_OUT="$GL_OUT" GL_PUBLISHED="${GL_PUBLISHED:-0}" \
+    GL_RETRIED="$GL_RETRIED" GL_THROTTLE_INV="$GL_THROTTLE_INV" GL_REVIEWED_SHA="${GL_REVIEWED_SHA:-}" \
+    GL_TAINT_CHECKED="${GL_TAINT_CHECKED:-0}" GL_TAINTED="${GL_TAINTED:-0}" GL_TAINT_DETAIL="${GL_TAINT_DETAIL:-}" \
+    GL_LANE_UPDATE="$2" GL_LANE_UPDATE_KIND="${GL_LANE_UPDATE_KIND:-}" \
+    GL_REJECTED="${GL_REJECTED:-}" GL_SKIPPED="${GL_SKIPPED:-}" GL_NOTE="${GL_NOTE:-}" \
+    GL_FN=finalize \
+    _gl_finalize_exec "$3"
+  }
+  _gl_finalize_exec() { # [lock wait] — the JS runs under the kernel lock when a wait is given
+    if [ -n "$1" ]; then _gl_bun_js_locked "$1"; else _gl_bun_js; fi
+  }
+  if [ "$kind" = none ]; then
+    res="$(_gl_finalize_js none "" "")"; js_rc=$?
+  else
+    res="$(_gl_finalize_js "$kind" "" "$GL_LOCK_WAIT_S")"; js_rc=$?
+    if [ "$js_rc" -eq "$EX_LOCK" ] && { [ "$kind" = quota ] || [ "$kind" = absent ]; }; then
+      # A settled quota/auth must never be dropped silently: wait longer first.
+      wait_s=$(( GL_LOCK_WAIT_S * 3 + 1 ))
+      res="$(_gl_finalize_js "$kind" "" "$wait_s")"; js_rc=$?
+    fi
+    if [ "$js_rc" -eq "$EX_LOCK" ]; then
+      echo "gstack-lane: lanes.json NOT updated (lock unavailable) — status records lane_update=pending ($kind)" >&2
+      GL_LANE_UPDATE_KIND="$kind"
+      lane_update=pending
+      res="$(_gl_finalize_js none "$lane_update" "")"; js_rc=$?
+    fi
+  fi
+  if [ "$js_rc" -ne 0 ] || [ -z "$res" ]; then
+    echo "gstack-lane: failed to write $GL_STATUS_FILE / lanes.json" >&2
+    return 1
+  fi
+  printf '%s\n' "$res"   # the one-line summary (same format as `summary`)
+  return 0
+}
+
+# Policy refusal: class error, exit 1, status written, nothing invoked.
+_gl_reject() {
+  GL_REJECTED="$1"
+  GL_CLASS_DETAIL="rejected: $1"
+  echo "gstack-lane: refused: $1" >&2
+  _gl_finalize error none "rejected: $1" "$EX_ERROR" || true
+  exit "$EX_ERROR"
+}
+
+# ── run (shared by `run` and the internal per-lane probe) ─────────────────────
+GL_ALLOW_CMDS=()
+_gl_parse_run_args() {
+  GL_RUN_DIR=""; GL_LANE=""; GL_MODE=""; GL_MODEL=""; GL_EFFORT=""; GL_CWD=""; GL_PROMPT_FILE=""
+  GL_OUT=""; GL_SCHEMA=""; GL_TIMEOUT="600"; GL_RETRY_TIMEOUT=""; GL_TIER=""; GL_CLAUDE_DIR_ARG=""
+  GL_ALLOW_CREDIT=0; GL_ALLOW_CMDS=(); GL_TASK_ARG=""; GL_ATTEMPT_ARG=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --run-dir|--lane|--mode|--model|--effort|--cwd|--prompt-file|--out|--schema|--timeout|--retry-timeout|--tier|--claude-dir|--allow-cmd|--task|--attempt-id)
+        [ "$#" -ge 2 ] || _gl_usage_err "$1 requires a value"
+        case "$1" in
+          --run-dir) GL_RUN_DIR="$2" ;; --lane) GL_LANE="$2" ;; --mode) GL_MODE="$2" ;;
+          --model) GL_MODEL="$2" ;; --effort) GL_EFFORT="$2" ;; --cwd) GL_CWD="$2" ;;
+          --prompt-file) GL_PROMPT_FILE="$2" ;; --out) GL_OUT="$2" ;; --schema) GL_SCHEMA="$2" ;;
+          --timeout) GL_TIMEOUT="$2" ;; --retry-timeout) GL_RETRY_TIMEOUT="$2" ;; --tier) GL_TIER="$2" ;;
+          --claude-dir) GL_CLAUDE_DIR_ARG="$2" ;; --task) GL_TASK_ARG="$2" ;; --attempt-id) GL_ATTEMPT_ARG="$2" ;;
+          --allow-cmd) GL_ALLOW_CMDS[${#GL_ALLOW_CMDS[@]}]="$2" ;;
+        esac
+        shift 2 ;;
+      --allow-credit-billing) GL_ALLOW_CREDIT=1; shift ;;
+      -h|--help) _gl_help; exit 0 ;;
+      *) _gl_usage_err "run: unknown option: $1" ;;
+    esac
+  done
+}
+
+_gl_validate_run_args() {
+  local c
+  [ -n "$GL_RUN_DIR" ] || _gl_usage_err "run: --run-dir is required"
+  case "$GL_LANE" in l2|l3|l4) ;; *) _gl_usage_err "run: --lane must be l2, l3 or l4" ;; esac
+  case "$GL_MODE" in
+    impl|review) ;;
+    probe) [ "${GL_INTERNAL_PROBE:-0}" = 1 ] || _gl_usage_err "run: --mode must be impl or review" ;;
+    *) _gl_usage_err "run: --mode must be impl or review" ;;
+  esac
+  if [ "$GL_LANE" != l4 ] && [ -z "$GL_MODEL" ]; then _gl_usage_err "run: --model is required for $GL_LANE"; fi
+  if [ -n "$GL_MODEL" ] && ! [[ "$GL_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]]; then
+    _gl_usage_err "run: --model contains unsupported characters"
+  fi
+  if [ "$GL_MODE" != probe ] || [ "$GL_LANE" != l2 ]; then
+    [ -n "$GL_EFFORT" ] || _gl_usage_err "run: --effort is required"
+  fi
+  if [ -n "$GL_EFFORT" ] && ! [[ "$GL_EFFORT" =~ ^[a-z]{1,16}$ ]]; then
+    _gl_usage_err "run: --effort must be a lower-case word"
+  fi
+  [ -n "$GL_CWD" ] || _gl_usage_err "run: --cwd is required"
+  [ -d "$GL_CWD" ] || _gl_usage_err "run: --cwd is not a directory: $GL_CWD"
+  [ -n "$GL_PROMPT_FILE" ] || _gl_usage_err "run: --prompt-file is required"
+  [ -f "$GL_PROMPT_FILE" ] && [ -r "$GL_PROMPT_FILE" ] || _gl_usage_err "run: --prompt-file not readable: $GL_PROMPT_FILE"
+  [ -n "$GL_OUT" ] || _gl_usage_err "run: --out is required"
+  if [ -n "$GL_SCHEMA" ]; then [ -f "$GL_SCHEMA" ] || _gl_usage_err "run: --schema not found: $GL_SCHEMA"; fi
+  _gl_is_uint "$GL_TIMEOUT" && [ "$GL_TIMEOUT" -ge 1 ] || _gl_usage_err "run: --timeout must be a positive integer (seconds)"
+  if [ -n "$GL_RETRY_TIMEOUT" ]; then
+    _gl_is_uint "$GL_RETRY_TIMEOUT" && [ "$GL_RETRY_TIMEOUT" -ge 1 ] || _gl_usage_err "run: --retry-timeout must be a positive integer (seconds)"
+  fi
+  case "$GL_TIER" in ''|T0|T1|T2|T3) ;; *) _gl_usage_err "run: --tier must be T0, T1, T2 or T3" ;; esac
+  if [ -n "$GL_TASK_ARG" ]; then _gl_valid_id "$GL_TASK_ARG" || _gl_usage_err "run: --task is not a valid id"; fi
+  if [ -n "$GL_ATTEMPT_ARG" ]; then _gl_valid_id "$GL_ATTEMPT_ARG" || _gl_usage_err "run: --attempt-id is not a valid id"; fi
+  for c in ${GL_ALLOW_CMDS[@]+"${GL_ALLOW_CMDS[@]}"}; do
+    _gl_vet_allow_cmd "$c" || _gl_usage_err "run: --allow-cmd '$c' is not a vetted runner + subcommand (see --help)"
+  done
+}
+
+# D3: --out must be <run-dir>/attempts/<task>/<attempt_id>/<file>, fresh, claimed by mkdir.
+_gl_claim_out() {
+  local out="$GL_OUT" file adir attempt tdir task aroot rparent rreal real_adir c
+  case "$out" in *$'\n'*|*$'\r'*|*"$GL_TAB"*) _gl_usage_err "run: --out must not contain control characters" ;; esac
+  case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+  case "$out/" in */./*|*/../*|*//*) _gl_usage_err "run: --out must be a normalized path (no ., .. or //)" ;; esac
+  file="${out##*/}"; adir="${out%/*}"
+  attempt="${adir##*/}"; tdir="${adir%/*}"
+  task="${tdir##*/}"; aroot="${tdir%/*}"
+  [ "${aroot##*/}" = attempts ] && [ -n "$task" ] && [ -n "$attempt" ] && [[ "$file" =~ $GL_FILE_RE ]] \
+    || _gl_usage_err "run: --out must be <run-dir>/attempts/<task>/<attempt_id>/<file>"
+  rparent="${aroot%/*}"
+  rreal="$(_gl_realdir "$rparent" || true)"
+  [ -n "$rreal" ] && [ "$rreal" = "$GL_RUN_DIR" ] || _gl_usage_err "run: --out is not under --run-dir/attempts/"
+  if _gl_valid_id "$task"; then
+    [ -z "$GL_TASK_ARG" ] || [ "$GL_TASK_ARG" = "$task" ] || _gl_usage_err "run: --task '$GL_TASK_ARG' does not match --out ($task)"
+    GL_TASK="$task"
+  else
+    GL_TASK="$GL_TASK_ARG"
+  fi
+  # attempt_id = the <attempt_id> path segment when it is a valid id (it must then
+  # equal --attempt-id if given); otherwise --attempt-id, else a generated one.
+  if _gl_valid_id "$attempt"; then
+    [ -z "$GL_ATTEMPT_ARG" ] || [ "$GL_ATTEMPT_ARG" = "$attempt" ] || _gl_usage_err "run: --attempt-id '$GL_ATTEMPT_ARG' does not match --out ($attempt)"
+    GL_ATTEMPT_ID="$attempt"
+  elif [ -n "$GL_ATTEMPT_ARG" ]; then
+    GL_ATTEMPT_ID="$GL_ATTEMPT_ARG"
+  else
+    GL_ATTEMPT_ID="a-$GL_LANE-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM$RANDOM"
+  fi
+  ( umask 077; mkdir -p "$adir" ) || _gl_usage_err "run: cannot create the attempt dir"
+  real_adir="$(_gl_realdir "$adir" || true)"
+  [ "$real_adir" = "$GL_RUN_DIR/attempts/$task/$attempt" ] || _gl_usage_err "run: the attempt dir resolves outside --run-dir (symlink?)"
+  GL_OUT="$real_adir/$file"
+  for c in "$GL_OUT" "$GL_OUT.status.json" "$GL_OUT.stdout.log" "$GL_OUT.stderr.log"; do
+    [ -e "$c" ] || [ -L "$c" ] && _gl_usage_err "run: refusing an --out that already exists ($c) — use a fresh attempt id"
+  done
+  ( umask 077; mkdir "$GL_OUT.logs" ) 2>/dev/null || _gl_usage_err "run: refusing an --out that already exists ($GL_OUT.logs) — use a fresh attempt id"
+}
+
+_gl_run_main() {
+  local lane_line lstatus lactive lnext cls code kind reason retry_effort bin p primary=""
+  local snap_dirs lanes_before="" lanes_after
+  umask 077
+  _gl_validate_run_args
+  command -v bun >/dev/null 2>&1 || { echo "gstack-lane: bun is required (JSON handling)" >&2; exit "$EX_ERROR"; }
+
+  mkdir -p "$GL_RUN_DIR" || { echo "gstack-lane: cannot create run dir $GL_RUN_DIR" >&2; exit "$EX_ERROR"; }
+  GL_RUN_DIR="$(_gl_realdir "$GL_RUN_DIR")"
+  _gl_claim_out
+  GL_CWD="$(_gl_realdir "$GL_CWD")"
+  GL_PROMPT_FILE="$(_gl_realfile "$GL_PROMPT_FILE")"
+  [ -n "$GL_SCHEMA" ] && GL_SCHEMA="$(_gl_realfile "$GL_SCHEMA")"
+  for p in "$GL_PROMPT_FILE" "$GL_SCHEMA"; do
+    [ -n "$p" ] || continue
+    case "$p" in "$GL_OUT"|"$GL_OUT".*) _gl_usage_err "run: an input file aliases an output path ($p)" ;; esac
+  done
+  [ -n "$GL_RETRY_TIMEOUT" ] || GL_RETRY_TIMEOUT="$(_gl_default_retry_timeout "$GL_TIMEOUT")"
+
+  GL_STARTED="$(_gl_iso_now)"
+  GL_T_START=$(_gl_now)
+  lane_line="$(GL_LANES_FILE="$GL_RUN_DIR/lanes.json" GL_LANE="$GL_LANE" _gl_js lane-get)"
+  GL_STARTED_MS="$(printf '%s' "$lane_line" | cut -f5)"
+  GL_STATUS_FILE="$GL_OUT.status.json"
+  GL_LOG_DIR="$GL_OUT.logs"
+  GL_REQ_EFFORT="$GL_EFFORT"; GL_EFFORT_FINAL="$GL_EFFORT"; GL_RETRIED=0
+  GL_SANDBOX="$(_gl_initial_sandbox)"
+  GL_STDIN_REDACT=""
+  GL_LAST_SO=""; GL_LAST_SE=""; GL_LAST_RC=""; GL_LAST_INV_DIR=""; GL_RM_ENABLE=0; GL_PUBLISHED=0; GL_CODEX_HOME=""
+  GL_MODEL_SOURCE=""; [ -n "$GL_MODEL" ] && GL_MODEL_SOURCE=argument
+  GL_ATTEMPTS_FILE="$GL_LOG_DIR/attempts.tsv"; : > "$GL_ATTEMPTS_FILE"
+  GL_CMD_FILE="$GL_LOG_DIR/cmd.txt"; : > "$GL_CMD_FILE"
+
+  # Policy refusals (status written, class error, nothing invoked).
+  if [ "$GL_LANE" = l3 ]; then
+    case "$GL_EFFORT" in ultra|max) _gl_reject "l3 never runs effort '$GL_EFFORT' (no ultra/max; operator-budgeted only, outside this helper)" ;; esac
+  fi
+  if [ -n "$GL_EFFORT" ] && ! _gl_valid_effort "$GL_LANE" "$GL_EFFORT"; then
+    case "$GL_LANE" in
+      l2) _gl_reject "l2 effort must be low|medium|high|xhigh|max (got '$GL_EFFORT')" ;;
+      l3) _gl_reject "l3 effort must be none|minimal|low|medium|high|xhigh (got '$GL_EFFORT')" ;;
+      l4) _gl_reject "l4 effort must be low|medium|high|xhigh (got '$GL_EFFORT')" ;;
+    esac
+  fi
+  if [ "$GL_LANE" = l2 ] && [ "$GL_ALLOW_CREDIT" != 1 ] && [[ "$GL_MODEL" =~ ^([Cc][Ll][Aa][Uu][Dd][Ee]-)?[Ff][Aa][Bb][Ll][Ee]([^A-Za-z0-9]|$) ]]; then
+    _gl_reject "l2 model '$GL_MODEL' bills Fable to usage credits under claude -p without prompting; pass --allow-credit-billing to accept"
+  fi
+  if _gl_cwd_conflicts_codex_home "$GL_CWD"; then
+    _gl_reject "--cwd must not be, contain, or lie inside the hermetic CODEX_HOME ($(_gl_codex_home_path))"
+  fi
+  if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = impl ]; then
+    case "$GL_TIER" in T0|T1) ;; *) _gl_reject "l4 impl is T0/T1 spillover only (got tier '${GL_TIER:-none}'); grok is not OS-contained" ;; esac
+  fi
+  if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = review ]; then
+    if ! _gl_registered_wt "$GL_CWD" || git -C "$GL_CWD" symbolic-ref -q HEAD >/dev/null 2>&1; then
+      _gl_reject "l4 review needs --cwd to be a registered DETACHED linked worktree directly under <run-dir>/wt/ (gstack-lane worktree add --detach), one per forum member"
+    fi
+  fi
+  # grok_reviews gates EVERY l4 use (D5).
+  if [ "$GL_LANE" = l4 ] && ! _gl_grok_enabled; then
+    GL_NOTE="grok-disabled"; GL_CLASS_DETAIL="disabled by grok_reviews"
+    _gl_finalize auth absent "auth: disabled by grok_reviews (gstack-config set grok_reviews enabled to allow)" "$EX_AUTH" || true
+    echo "gstack-lane: l4 is disabled by grok_reviews — not invoked" >&2
+    exit "$EX_AUTH"
+  fi
+
+  # Lane-state refusals: never hammer a cooling account; absent until re-probed.
+  if [ "$GL_MODE" != probe ]; then
+    lstatus="$(printf '%s' "$lane_line" | cut -f1)"
+    lactive="$(printf '%s' "$lane_line" | cut -f2)"
+    lnext="$(printf '%s' "$lane_line" | cut -f3)"
+    if [ "$lstatus" = cooling ] && [ "$lactive" = 1 ]; then
+      GL_SKIPPED=cooling; GL_CLASS_DETAIL="lane cooling until $lnext"
+      echo "gstack-lane: $GL_LANE is cooling until $lnext — not invoked" >&2
+      _gl_finalize quota none "" "$EX_QUOTA" || true
+      exit "$EX_QUOTA"
+    fi
+    if [ "$lstatus" = absent ]; then
+      GL_SKIPPED=absent; GL_CLASS_DETAIL="lane absent"
+      echo "gstack-lane: $GL_LANE is absent (see lanes.json reason; re-run probe after repair) — not invoked" >&2
+      _gl_finalize auth none "" "$EX_AUTH" || true
+      exit "$EX_AUTH"
+    fi
+  fi
+
+  # Preflight: CLI present + lane credentials.
+  case "$GL_LANE" in l2) bin=claude ;; l3) bin=codex ;; l4) bin=grok ;; esac
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    GL_NOTE="cli-missing"; GL_CLASS_DETAIL="cli missing"
+    _gl_finalize auth absent "auth: $bin CLI not found on PATH" "$EX_AUTH" || true
+    echo "gstack-lane: $bin not found on PATH — $GL_LANE marked absent" >&2
+    exit "$EX_AUTH"
+  fi
+  if [ "$GL_LANE" = l2 ]; then
+    GL_CLAUDE_DIR="$(_gl_claude_dir)"
+    # L2 must be a DIFFERENT account from the root session, or it adds no quota while
+    # pretending to be overflow: refuse the root's own config dirs, and refuse when the
+    # overflow login's oauthAccount.accountUuid equals the root's (env
+    # CLAUDE_CODE_ACCOUNT_UUID, else $HOME/.claude.json). Unknown ids keep today's path.
+    if _gl_claude_is_root_account "$GL_CLAUDE_DIR"; then
+      GL_NOTE="same-account"; GL_CLASS_DETAIL="same account as the root session"
+      _gl_finalize auth absent "auth: same account as the root session — adds no quota (log a DIFFERENT account into $GL_CLAUDE_DIR)" "$EX_AUTH" || true
+      echo "gstack-lane: l2 is the same account as the root session — adds no quota (log a DIFFERENT account into $GL_CLAUDE_DIR); l2 marked absent" >&2
+      exit "$EX_AUTH"
+    fi
+    if ! _gl_claude_has_creds "$GL_CLAUDE_DIR"; then
+      GL_NOTE="no-credentials"; GL_CLASS_DETAIL="no credentials"
+      _gl_finalize auth absent "auth: no Claude credentials in $GL_CLAUDE_DIR (run: CLAUDE_CONFIG_DIR=$GL_CLAUDE_DIR claude, then /login)" "$EX_AUTH" || true
+      echo "gstack-lane: no Claude credentials in $GL_CLAUDE_DIR — l2 marked absent" >&2
+      exit "$EX_AUTH"
+    fi
+  fi
+  if [ "$GL_LANE" = l3 ] && [ ! -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ] \
+     && [ -z "${CODEX_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    GL_NOTE="no-credentials"; GL_CLASS_DETAIL="no credentials"
+    _gl_finalize auth absent "auth: no codex auth.json in ${CODEX_HOME:-$HOME/.codex} and no CODEX_API_KEY/OPENAI_API_KEY" "$EX_AUTH" || true
+    echo "gstack-lane: no Codex credentials — l3 marked absent" >&2
+    exit "$EX_AUTH"
+  fi
+  if [ "$GL_LANE" = l4 ] && [ -z "$GL_MODEL" ]; then
+    if ! _gl_grok_resolve_model; then
+      # An availability failure, not an unusable result: `grok models` timing out is a
+      # timeout; any other failure (not logged in, broken install, changed output) leaves
+      # the lane ABSENT until a probe resolves a model again. Never run without -m.
+      GL_NOTE="grok-model-unresolved"; GL_CLASS_DETAIL="grok default model unresolved (grok models)"
+      echo "gstack-lane: could not resolve the grok default model — refusing to run without -m" >&2
+      if [ "$GL_RC" -eq 124 ]; then
+        if [ "$GL_MODE" = probe ]; then kind=cooling-short; else kind=keep; fi
+        _gl_finalize timeout "$kind" "timeout: grok models did not answer" "$EX_TIMEOUT" || true
+        exit "$EX_TIMEOUT"
+      fi
+      _gl_finalize auth absent "auth: grok default model unresolved (grok models failed or printed no Default model line)" "$EX_AUTH" || true
+      exit "$EX_AUTH"
+    fi
+  fi
+
+  # Review evidence: the frozen SHA, and (l4) bounded inert tamper snapshots (E5/E6).
+  if [ "$GL_MODE" = review ]; then
+    GL_REVIEWED_SHA="$(git -C "$GL_CWD" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = review ]; then
+    GL_TAINT_CHECKED=1
+    primary="$(_gl_primary_wt "$GL_CWD" || true)"
+    snap_dirs=("$GL_CWD")
+    [ -n "$primary" ] && [ "$primary" != "$GL_CWD" ] && snap_dirs+=("$primary")
+    while IFS= read -r p; do   # every OTHER linked worktree of this run (sibling tasks, the other member)
+      p="$(_gl_realdir "$p" || true)"
+      case "$p" in "$GL_RUN_DIR/wt/"*) [ "$p" != "$GL_CWD" ] && snap_dirs+=("$p") ;; esac
+    done < <(git -C "$GL_CWD" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+    lanes_before="$(printf '%s' "$lane_line" | cut -f6)"
+    if ! _gl_snap - "$GL_LOG_DIR/snapshot.before" "${snap_dirs[@]}"; then
+      GL_TAINTED=1; GL_TAINT_DETAIL="pre-review snapshot failed or timed out"; GL_CLASS_DETAIL="tainted: $GL_TAINT_DETAIL"
+      _gl_finalize error none "" "$EX_ERROR" || true
+      echo "gstack-lane: $GL_TAINT_DETAIL — refusing to launch the l4 review" >&2
+      exit "$EX_ERROR"
+    fi
+  fi
+
+  # Attempt 1, then — REVIEWS only (H14) — exactly one effort step-down retry on timeout.
+  # An impl timeout is final: a silent drop below the tier's routing floor is never taken.
+  _gl_try "$GL_EFFORT" "$GL_TIMEOUT"
+  cls="$GL_TRY_CLASS"
+  if [ "$cls" = timeout ] && [ "$GL_MODE" = review ]; then
+    retry_effort="$(_gl_step_down "$GL_EFFORT")"
+    GL_RETRIED=1
+    GL_EFFORT_FINAL="$retry_effort"
+    _gl_try "$retry_effort" "$GL_RETRY_TIMEOUT"   # installs + verifies its own fresh codex home
+    cls="$GL_TRY_CLASS"
+  fi
+  GL_CLASS_DETAIL="$GL_LAST_DETAIL"
+
+  if [ "$GL_TAINT_CHECKED" = 1 ]; then
+    GL_TAINT_DETAIL=""
+    # F6: read roster + journal under the SAME kernel lock the writers hold, so a write
+    # caught between its rename and its journal append can never look foreign.
+    lanes_after="$(GL_LANES_FILE="$GL_RUN_DIR/lanes.json" GL_FN=lanes-state _gl_bun_js_locked "$GL_LOCK_WAIT_S")" || lanes_after="lock-unavailable 0"
+    # Control state FIRST (plain file hashing); only an unchanged repo config gets the
+    # git status/diff pass, so filters/drivers added during the review never run.
+    if [ "${lanes_after%% *}" = lock-unavailable ]; then
+      GL_TAINT_DETAIL="lanes.json state unverifiable (lock unavailable)"
+    elif [ "$lanes_before" != absent ] && [ "${lanes_after%% *}" = absent ]; then
+      GL_TAINT_DETAIL="lanes.json disappeared during the review"      # F5: existed before launch
+    elif [ "${lanes_after%% *}" = unreadable ]; then
+      GL_TAINT_DETAIL="lanes.json unreadable after the review"
+    elif [ "${lanes_after%% *}" != "$lanes_before" ] && [ "${lanes_after##* }" != 1 ]; then
+      GL_TAINT_DETAIL="lanes.json changed outside gstack-lane"
+    elif ! _gl_snap "$GL_LOG_DIR/snapshot.before" "$GL_LOG_DIR/snapshot.after" "${snap_dirs[@]}"; then
+      GL_TAINT_DETAIL="post-review snapshot failed or timed out"
+    elif [ "$(tail -n 1 "$GL_LOG_DIR/snapshot.after")" = CONTROL-CHANGED ]; then
+      GL_TAINT_DETAIL="shared git control state changed (hooks/config/refs/info)"
+    elif ! cmp -s "$GL_LOG_DIR/snapshot.before" "$GL_LOG_DIR/snapshot.after"; then
+      GL_TAINT_DETAIL="review or primary worktree changed"
+    fi
+    if [ -n "$GL_TAINT_DETAIL" ]; then
+      GL_TAINTED=1; cls=error; GL_CLASS_DETAIL="tainted: $GL_TAINT_DETAIL"
+      echo "gstack-lane: l4 review TAINTED ($GL_TAINT_DETAIL) — the review is invalid" >&2
+    fi
+  fi
+
+  # Final invocation's streams → canonical log names; publish its verified output only on ok (E3).
+  if [ -n "$GL_LAST_SO" ]; then
+    cp "$GL_LAST_SO" "$GL_OUT.stdout.log" 2>/dev/null
+    cp "$GL_LAST_SE" "$GL_OUT.stderr.log" 2>/dev/null
+    if [ "$cls" = ok ] && [ -f "$GL_LAST_INV_DIR/out" ]; then
+      cp "$GL_LAST_INV_DIR/out" "$GL_OUT" 2>/dev/null && GL_PUBLISHED=1
+    fi
+  fi
+  GL_RM_ENABLE=1
+  code="$(_gl_class_exit "$cls")"
+  case "$cls" in
+    ok) kind=ok; reason="ok ($GL_MODE)" ;;
+    quota) kind=quota; reason="quota" ;;
+    auth) kind=absent; reason="auth: CLI reported an authentication failure" ;;
+    throttle)
+      if [ "$GL_MODE" = probe ]; then kind=ok; reason="probe: throttled (reachable, rate-limited)"; else kind=keep; reason="throttle (backoff retries exhausted within the deadline)"; fi ;;
+    timeout)
+      if [ "$GL_MODE" = probe ]; then kind=cooling-short; reason="probe: timeout"
+      elif [ "$GL_MODE" = review ]; then kind=keep; reason="timeout (after one effort step-down retry)"
+      else kind=keep; reason="timeout (impl: no effort step-down)"; fi ;;
+    *)
+      if [ "$GL_TAINTED" = 1 ]; then kind=none; reason="";
+      elif [ "$GL_MODE" = probe ]; then kind=cooling-short; reason="probe: error (${GL_CLASS_DETAIL:-exit ${GL_LAST_RC:-?}})";
+      else kind=keep; reason="error (${GL_CLASS_DETAIL:-exit ${GL_LAST_RC:-?}})"; fi ;;
+  esac
+  _gl_finalize "$cls" "$kind" "$reason" "$code" || exit "$EX_ERROR"
+  exit "$code"
+}
+
+cmd_run() {
+  GL_INTERNAL_PROBE=0
+  GL_TAINT_CHECKED=0; GL_TAINTED=0; GL_TAINT_DETAIL=""; GL_REVIEWED_SHA=""
+  _gl_parse_run_args "$@"
+  _gl_run_main
+}
+
+# Internal: one lane's probe (spawned in parallel by `probe`).
+cmd_probe_lane() {
+  local run_dir="" lane="" timeout="60" claude_dir="" id pcwd
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --run-dir) run_dir="$2"; shift 2 ;;
+      --lane) lane="$2"; shift 2 ;;
+      --timeout) timeout="$2"; shift 2 ;;
+      --claude-dir) claude_dir="$2"; shift 2 ;;
+      *) _gl_usage_err "_probe-lane: unknown option: $1" ;;
+    esac
+  done
+  umask 077
+  id="p-$lane-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+  pcwd="$run_dir/probe-cwd"
+  mkdir -p "$pcwd" "$run_dir/attempts/probe-$lane/$id"
+  printf 'reply OK\n' > "$run_dir/attempts/probe-$lane/$id/prompt.txt"
+  local args=(--run-dir "$run_dir" --lane "$lane" --mode probe --cwd "$pcwd"
+              --prompt-file "$run_dir/attempts/probe-$lane/$id/prompt.txt"
+              --out "$run_dir/attempts/probe-$lane/$id/out.txt" --timeout "$timeout")
+  case "$lane" in
+    l2) args=("${args[@]}" --model claude-haiku-5-5) ;;
+    l3) args=("${args[@]}" --model gpt-6-luna --effort low) ;;
+    l4) # D7/H11: a reachability check — the resolved default model is passed as an explicit
+        # -m by the run path; effort low; at least 120 s (grok's first token can be slow).
+        args=("${args[@]}" --effort low)
+        [ "$timeout" -ge 120 ] 2>/dev/null || args=("${args[@]}" --timeout 120) ;;
+  esac
+  [ -n "$claude_dir" ] && args=("${args[@]}" --claude-dir "$claude_dir")
+  GL_INTERNAL_PROBE=1
+  GL_TAINT_CHECKED=0; GL_TAINTED=0; GL_TAINT_DETAIL=""; GL_REVIEWED_SHA=""
+  _gl_parse_run_args "${args[@]}"
+  _gl_run_main
+}
+
+cmd_probe() {
+  local run_dir="" json=0 lanes="l2,l3,l4" timeout="60" claude_dir="" l line skipped="" pids=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --run-dir|--lanes|--timeout|--claude-dir)
+        [ "$#" -ge 2 ] || _gl_usage_err "$1 requires a value"
+        case "$1" in
+          --run-dir) run_dir="$2" ;; --lanes) lanes="$2" ;; --timeout) timeout="$2" ;; --claude-dir) claude_dir="$2" ;;
+        esac
+        shift 2 ;;
+      --json) json=1; shift ;;
+      -h|--help) _gl_help; exit 0 ;;
+      *) _gl_usage_err "probe: unknown option: $1" ;;
+    esac
+  done
+  [ -n "$run_dir" ] || _gl_usage_err "probe: --run-dir is required"
+  _gl_is_uint "$timeout" && [ "$timeout" -ge 1 ] || _gl_usage_err "probe: --timeout must be a positive integer"
+  for l in $(printf '%s' "$lanes" | tr ',' ' '); do
+    case "$l" in l2|l3|l4) ;; *) _gl_usage_err "probe: --lanes accepts l2,l3,l4" ;; esac
+  done
+  command -v bun >/dev/null 2>&1 || { echo "gstack-lane: bun is required (JSON handling)" >&2; exit "$EX_ERROR"; }
+  umask 077
+  mkdir -p "$run_dir" || exit "$EX_ERROR"
+  run_dir="$(_gl_realdir "$run_dir")"
+  GL_RUN_DIR="$run_dir"
+  for l in $(printf '%s' "$lanes" | tr ',' ' '); do
+    line="$(GL_LANES_FILE="$run_dir/lanes.json" GL_LANE="$l" _gl_js lane-get)"
+    if [ "$(printf '%s' "$line" | cut -f1)" = cooling ] && [ "$(printf '%s' "$line" | cut -f2)" = 1 ]; then
+      skipped="$skipped$l,"
+      continue
+    fi
+    if [ -n "$claude_dir" ]; then
+      "$GL_SELF" _probe-lane --run-dir "$run_dir" --lane "$l" --timeout "$timeout" --claude-dir "$claude_dir" >/dev/null 2>&1 &
+    else
+      "$GL_SELF" _probe-lane --run-dir "$run_dir" --lane "$l" --timeout "$timeout" >/dev/null 2>&1 &
+    fi
+    pids="$pids $!"
+  done
+  GL_PROBE_PIDS="$pids"
+  for l in $pids; do wait "$l" 2>/dev/null; done
+  GL_PROBE_PIDS=""
+  GL_LANES_FILE="$run_dir/lanes.json" GL_LANE_LIST="$lanes" GL_SKIPPED_LANES="$skipped" GL_JSON="$json" _gl_js summary
+  exit 0
+}
+
+# ── summary (D1) ──────────────────────────────────────────────────────────────
+cmd_summary() {
+  local out=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --out) [ "$#" -ge 2 ] || _gl_usage_err "--out requires a value"; out="$2"; shift 2 ;;
+      -h|--help) _gl_help; exit 0 ;;
+      *) _gl_usage_err "summary: unknown option: $1" ;;
+    esac
+  done
+  [ -n "$out" ] || _gl_usage_err "summary: --out is required"
+  command -v bun >/dev/null 2>&1 || { echo "gstack-lane: bun is required (JSON handling)" >&2; exit "$EX_ERROR"; }
+  GL_STATUS_FILE="$(_gl_abs "$out.status.json")" _gl_js status-line
+  exit $?
+}
+
+# ── adjudicate (D4/H9) ────────────────────────────────────────────────────────
+cmd_adjudicate() {
+  local out="" seat="" gate="" req="" sha="" real seg line rc
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --out|--seat|--gate-class|--requested-model|--reviewed-sha)
+        [ "$#" -ge 2 ] || _gl_usage_err "$1 requires a value"
+        case "$1" in
+          --out) out="$2" ;; --seat) seat="$2" ;; --gate-class) gate="$2" ;;
+          --requested-model) req="$2" ;; --reviewed-sha) sha="$2" ;;
+        esac
+        shift 2 ;;
+      -h|--help) _gl_help; exit 0 ;;
+      *) _gl_usage_err "adjudicate: unknown option: $1" ;;
+    esac
+  done
+  [ -n "$out" ] || _gl_usage_err "adjudicate: --out is required"
+  case "$out" in *$'\n'*|*$'\r'*) _gl_usage_err "adjudicate: --out must not contain control characters" ;; esac
+  case "$seat" in codex|grok) ;; *) _gl_usage_err "adjudicate: --seat must be codex or grok" ;; esac
+  case "$gate" in ordinary|critical) ;; *) _gl_usage_err "adjudicate: --gate-class must be ordinary or critical" ;; esac
+  [[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || _gl_usage_err "adjudicate: --reviewed-sha must be a full commit id"
+  if [ "$seat" = codex ] && [ -z "$req" ]; then _gl_usage_err "adjudicate: --requested-model is required for the codex seat"; fi
+  if [ -n "$req" ] && ! [[ "$req" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]]; then
+    _gl_usage_err "adjudicate: --requested-model contains unsupported characters"
+  fi
+  out="$(_gl_abs "$out")"
+  real="$(_gl_realfile "$out" 2>/dev/null)" || real="$out"
+  seg="$(basename "$(dirname "$out")")"
+  _gl_valid_id "$seg" || seg=""
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "VERDICT=INVALID reason=adjudicator_unavailable p1_count=0 runtime_model=null"; exit 11
+  fi
+  line="$(GL_STATUS_FILE="$real.status.json" GL_OUT_REAL="$real" GL_OUT_ATTEMPT="$seg" GL_SEAT="$seat" \
+          GL_GATE_CLASS="$gate" GL_REQ_MODEL="$req" GL_REVIEWED_SHA="$sha" _gl_js adjudicate 2>/dev/null)"
+  rc=$?
+  case "$rc:$line" in
+    0:VERDICT=PRESENT_CLEAN\ *|10:VERDICT=PRESENT_P1\ *|11:VERDICT=INVALID\ *|12:VERDICT=ABSENT\ *) printf '%s\n' "$line"; exit "$rc" ;;
+  esac
+  echo "VERDICT=INVALID reason=adjudicator_error p1_count=0 runtime_model=null"   # fail closed
+  exit 11
+}
+
+# ── worktree helpers shared by worktree/commit ────────────────────────────────
+_gl_wt_common() { # validates GL_WT_TASK/GL_WT_RUN → sets GL_WT_PATH etc.
+  _gl_valid_id "$GL_WT_TASK" || _gl_usage_err "--task must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+  mkdir -p "$GL_WT_RUN/wt" || exit "$EX_ERROR"
+  GL_WT_RUN="$(_gl_realdir "$GL_WT_RUN")"
+  GL_RUN_DIR="$GL_WT_RUN"
+  local wtroot
+  wtroot="$(_gl_realdir "$GL_WT_RUN/wt")"
+  [ "$wtroot" = "$GL_WT_RUN/wt" ] || { echo "gstack-lane: $GL_WT_RUN/wt resolves elsewhere (symlink?) — refusing" >&2; exit "$EX_ERROR"; }
+  GL_WT_PATH="$wtroot/$GL_WT_TASK"
+  GL_WT_BRANCH="ab/$(basename "$GL_WT_RUN")/$GL_WT_TASK"
+  GL_WT_META="$GL_WT_RUN/wt-meta/$GL_WT_TASK.base"
+  GL_WT_CTL="$GL_WT_RUN/wt-meta/$GL_WT_TASK.control"
+}
+
+# ── commit (D2 / E7) ──────────────────────────────────────────────────────────
+_gl_secret_path() { # <repo-relative path> → 0 secret · 1 not · 2 secret only if its CONTENT holds an auth key
+  local p="$1" base="${1##*/}"
+  case "/$p/" in */*codex-home*/*) return 0 ;; esac                    # the hermetic home: always
+  case "$base" in *.example|.env.sample|.env.template) return 1 ;; esac # templates (H7 allow-list)
+  case "$base" in
+    auth.json|.credentials.json|.claude.json|*.pem|*.key|*.ppk|id_rsa*|id_ed25519*|id_ecdsa*|id_dsa*) return 0 ;;
+    .env|.env.*|.envrc|.netrc|_netrc|.git-credentials|*.p12|*.pfx|*.keystore|*.jks|.pgpass) return 0 ;;
+    kubeconfig|*.kubeconfig) return 0 ;;
+    .npmrc|.pypirc|.yarnrc.yml) return 2 ;;
+  esac
+  case "/$p" in */.aws/credentials|*/.kube/config) return 0 ;; esac
+  # Under a .claude*/ dir only credential-shaped names (H7): settings.json, commands/* … commit fine.
+  case "/$p" in */.claude*/*) case "$base" in *[Tt][Oo][Kk][Ee][Nn]*) return 0 ;; esac ;; esac
+  return 1
+}
+# <blob sha> → 0 when the blob holds an auth/token/password key (fail closed: unreadable or
+# implausibly large → 0). Captured first, then matched — never `cat-file | grep -q` (pipefail).
+_gl_secret_blob() {
+  local sha="$1" size c
+  case "$sha" in ''|*[!0-9a-f]*) return 0 ;; esac
+  size="$("${GL_CG[@]}" cat-file -s "$sha" 2>/dev/null)" || return 0
+  _gl_is_uint "$size" && [ "$size" -le 1048576 ] || return 0
+  c="$("${GL_CG[@]}" cat-file blob "$sha" 2>/dev/null)" || return 0
+  LC_ALL=C grep -Eqi '(^|[^A-Za-z0-9])(_authtoken|_auth|_password|npmauthtoken|npmauthident|npmpassword|authtoken|password|passwd|token)[[:space:]]*[=:]' <<<"$c"
+}
+# _gl_scan_raw <label> <file of `--raw -z --no-abbrev --no-renames` records> — one stdout line
+# `secret_path=<p> commit=<label>` per secret-shaped path (pre- or post-image); appends to
+# GL_BAD. NUL-delimited (H4): a path is never C-quoted, so `dir<TAB>/auth.json` is seen as is.
+_gl_scan_raw() {
+  local label="$1" f="$2" meta p rc sha osha nsha
+  while IFS= read -r -d '' meta && IFS= read -r -d '' p; do
+    _gl_secret_path "$p"; rc=$?
+    if [ "$rc" = 2 ]; then
+      # meta = ":<old mode> <new mode> <old sha> <new sha> <status>"; all-zero = no blob
+      read -r _ _ osha nsha _ <<<"$meta"
+      rc=1
+      for sha in "$osha" "$nsha"; do
+        case "$sha" in *[!0]*) _gl_secret_blob "$sha" && rc=0 ;; esac
+      done
+    fi
+    if [ "$rc" = 0 ]; then
+      GL_BAD="$GL_BAD ${p//[[:cntrl:]]/?}@$label"
+      printf 'secret_path=%s commit=%s\n' "${p//[[:cntrl:]]/?}" "$label"
+    fi
+  done < "$f"
+}
+# The inert git prefix (F2/H1/H5/H8) → GL_IG (array). Both modes: GIT_CONFIG_NOSYSTEM=1,
+# GIT_NO_REPLACE_OBJECTS=1, no hooks (core.hooksPath=/dev/null), no fsmonitor, no signing or
+# signature verification, no auto-gc/maintenance, no pager/external diff, no submodule
+# recursion, every configured filter.<name> a pass-through. `commit` mode also drops the
+# global config (GIT_CONFIG_GLOBAL=/dev/null) and passes back what is safe from the normal
+# config: user.name/user.email and core.excludesFile (H8 — an ignore file executes nothing).
+# (git never expands an alias that shadows a builtin like `log`.)
+_gl_inert_init() { # <dir> <commit|checkout> [<more dirs whose config context also counts>...] → GL_IG
+  local d="$1" m="$2" un="" ue="" xf=""
+  shift 2
+  GL_IG=(env GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat)
+  if [ "$m" = commit ]; then
+    un="$(git -C "$d" config --get user.name 2>/dev/null || true)"
+    ue="$(git -C "$d" config --get user.email 2>/dev/null || true)"
+    xf="$(git -C "$d" config --path --get core.excludesFile 2>/dev/null || true)"
+    GL_IG+=(GIT_CONFIG_GLOBAL=/dev/null)
+  fi
+  _gl_filter_off "$d" "$@"
+  GL_IG+=(git -C "$d" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgSign=false -c tag.gpgSign=false
+          -c log.showSignature=false -c gpg.program=/usr/bin/false -c gpg.ssh.program=/usr/bin/false
+          -c gpg.x509.program=/usr/bin/false -c gc.auto=0 -c maintenance.auto=false -c core.pager=cat
+          -c diff.external= -c core.quotePath=false -c submodule.recurse=false)
+  [ -n "$un" ] && GL_IG+=(-c "user.name=$un")
+  [ -n "$ue" ] && GL_IG+=(-c "user.email=$ue")
+  [ -n "$xf" ] && GL_IG+=(-c "core.excludesFile=$xf")
+  GL_IG+=(${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"})
+}
+_gl_commit_git_init() { # <worktree> → GL_CG (array: the inert git command prefix for commit)
+  _gl_inert_init "$1" commit
+  GL_CG=("${GL_IG[@]}")
+}
+# The repo-controlled EXECUTION surface of a worktree, per component (F2): common-dir
+# config, the worktree's config.worktree, hooks/, info/, the core.hooksPath target —
+# names, type+mode bits (F5) and contents. Refs are deliberately excluded: they move
+# legitimately while integration merges other tasks.
+_gl_commit_control() { # <worktree> [all|common|wt] — common = config hooks info; wt = config.worktree hookspath
+  local wt="$1" part="${2:-all}" dirs common gitdir hp top
+  dirs="$(_gl_inert_git -C "$wt" rev-parse --path-format=absolute --git-dir --git-common-dir 2>/dev/null)" || return 1
+  gitdir="${dirs%%$'\n'*}"; common="${dirs#*$'\n'}"
+  [ -n "$gitdir" ] && [ -n "$common" ] && [ "$gitdir" != "$dirs" ] || return 1
+  _gl_ctl_file() { # <key> <file>
+    printf '%s %s\n' "$1" "$(if [ -e "$2" ]; then { _gl_modes "$2"; git hash-object --no-filters "$2" 2>/dev/null; } | git hash-object --stdin; else echo absent; fi)"
+  }
+  if [ "$part" != wt ]; then
+    _gl_ctl_file config "$common/config"
+    printf 'hooks %s\n' "$(_gl_tree_digest "$common/hooks" | git hash-object --stdin)"
+    printf 'info %s\n' "$(_gl_tree_digest "$common/info" | git hash-object --stdin)"
+  fi
+  [ "$part" = common ] && return 0
+  _gl_ctl_file config.worktree "$gitdir/config.worktree"
+  hp="$(git -C "$wt" config --get core.hooksPath 2>/dev/null || true)"
+  if [ -n "$hp" ]; then
+    top="$(_gl_inert_git -C "$wt" rev-parse --show-toplevel 2>/dev/null || echo "$wt")"
+    # shellcheck disable=SC2088  # matching a LITERAL leading ~ from git config on purpose
+    case "$hp" in /*) ;; "~/"*) hp="$HOME/${hp#\~/}" ;; *) hp="$top/$hp" ;; esac
+    printf 'hookspath %s\n' "$(_gl_tree_digest "$hp" | git hash-object --stdin)"
+  else
+    echo "hookspath unset"
+  fi
+}
+cmd_commit() {
+  local msg="" out="" base cur p commit head result cwd="" base_arg="" top tmpd rc meta k v
+  GL_WT_RUN=""; GL_WT_TASK=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --run-dir|--task|-m|--message|--out|--cwd|--base)
+        [ "$#" -ge 2 ] || _gl_usage_err "$1 requires a value"
+        case "$1" in
+          --run-dir) GL_WT_RUN="$2" ;; --task) GL_WT_TASK="$2" ;; -m|--message) msg="$2" ;; --out) out="$2" ;;
+          --cwd) cwd="$2" ;; --base) base_arg="$2" ;;
+        esac
+        shift 2 ;;
+      -h|--help) _gl_help; exit 0 ;;
+      *) _gl_usage_err "commit: unknown option: $1" ;;
+    esac
+  done
+  [ -n "$(printf '%s' "$msg" | tr -d '[:space:]')" ] || _gl_usage_err "commit: -m <message> is required"
+  [ -n "$base_arg" ] || _gl_usage_err "commit: --base <sha> is required (the base_sha recorded from worktree add, or the milestone base)"
+  if [ -n "$cwd" ]; then
+    # Milestone/primary worktree form: commit --cwd <worktree> --base <sha> -m <msg>.
+    [ -z "$GL_WT_TASK" ] || _gl_usage_err "commit: --cwd and --task are mutually exclusive"
+    GL_WT_PATH="$(_gl_realdir "$cwd")" || { echo "gstack-lane: --cwd is not a directory: $cwd" >&2; exit "$EX_ERROR"; }
+    top="$(git -C "$GL_WT_PATH" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -z "$top" ] || [ "$(_gl_realdir "$top" || true)" != "$GL_WT_PATH" ]; then
+      echo "gstack-lane: --cwd must be the top level of a git worktree" >&2; exit "$EX_ERROR"
+    fi
+    if [ -n "$GL_WT_RUN" ]; then
+      GL_RUN_DIR="$(_gl_realdir "$GL_WT_RUN" || printf '%s' "$GL_WT_RUN")"
+      case "$GL_WT_PATH/" in "$GL_RUN_DIR/wt/"*) echo "gstack-lane: --cwd is a task worktree of this run — use --task" >&2; exit "$EX_ERROR" ;; esac
+    fi
+  else
+    [ -n "$GL_WT_RUN" ] || _gl_usage_err "commit: --run-dir is required (or use --cwd <worktree> --base <sha>)"
+    [ -n "$GL_WT_TASK" ] || _gl_usage_err "commit: --task is required (or use --cwd <worktree> --base <sha>)"
+    _gl_wt_common
+    if ! { [ -d "$GL_WT_PATH" ] && _gl_registered_wt "$GL_WT_PATH"; }; then
+      echo "gstack-lane: $GL_WT_PATH is not a registered worktree of this run" >&2; exit "$EX_ERROR"
+    fi
+  fi
+  _gl_commit_git_init "$GL_WT_PATH"
+  base="$("${GL_CG[@]}" rev-parse --verify --quiet "$base_arg^{commit}" 2>/dev/null)" || { echo "gstack-lane: --base does not resolve to a commit: $base_arg" >&2; exit "$EX_ERROR"; }
+  "${GL_CG[@]}" merge-base --is-ancestor "$base" HEAD 2>/dev/null || { echo "gstack-lane: --base $base is not an ancestor of HEAD" >&2; exit "$EX_ERROR"; }
+  if [ -z "$cwd" ]; then
+    # F3: the orchestrator's base must match the one worktree add recorded.
+    meta="$(cat "$GL_WT_META" 2>/dev/null || true)"
+    [ -n "$meta" ] || { echo "gstack-lane: REFUSING — no recorded base for task $GL_WT_TASK (wt-meta missing)" >&2; exit "$EX_ERROR"; }
+    [ "$meta" = "$base" ] || { echo "gstack-lane: REFUSING — --base $base differs from the base recorded by worktree add ($meta)" >&2; exit "$EX_ERROR"; }
+    # F2: the repo-controlled execution surface must be what it was at worktree add.
+    [ -s "$GL_WT_CTL" ] || { echo "control_changed=fingerprint-missing"; echo "gstack-lane: REFUSING — no control fingerprint recorded for $GL_WT_TASK" >&2; exit "$EX_ERROR"; }
+    rc=0
+    while read -r k v; do
+      if [ "$(awk -v k="$k" '$1 == k { $1 = ""; sub(/^ /, ""); print; exit }' "$GL_WT_CTL" 2>/dev/null)" != "$v" ]; then echo "control_changed=$k"; rc=1; fi
+    done < <(_gl_commit_control "$GL_WT_PATH" 2>/dev/null || echo "fingerprint unreadable")
+    if [ "$rc" -ne 0 ]; then
+      echo "gstack-lane: REFUSING — git hooks/config/info changed since worktree add; nothing staged, nothing committed" >&2
+      exit "$EX_ERROR"
+    fi
+  fi
+  cur="$("${GL_CG[@]}" symbolic-ref -q --short HEAD 2>/dev/null || true)"
+  [ -n "$cur" ] || { echo "gstack-lane: $GL_WT_PATH is detached (review snapshot) — nothing to commit there" >&2; exit "$EX_ERROR"; }
+  if [ -n "$cwd" ]; then
+    # H12: the helper's own task-branch namespace never commits through --cwd — that would
+    # bypass the recorded base (F3) and the control fingerprint (F2).
+    case "$cur" in ab/*/*)
+      echo "gstack-lane: REFUSING — $GL_WT_PATH is on task branch '$cur'; task commits use: commit --run-dir <dir> --task <id> --base <recorded base_sha>" >&2
+      exit "$EX_ERROR" ;;
+    esac
+  fi
+  head="$("${GL_CG[@]}" rev-parse HEAD)"
+  tmpd="$(mktemp -d "${TMPDIR:-/tmp}/gstack-lane-commit.XXXXXX")" || exit "$EX_ERROR"
+  _gl_commit_refuse() { # <message> — fail closed: index reset, temp removed, exit 1
+    "${GL_CG[@]}" reset -q >/dev/null 2>&1
+    rm -rf "$tmpd"
+    echo "gstack-lane: REFUSING — $1" >&2
+    exit "$EX_ERROR"
+  }
+  GL_BAD=""
+  # F1/E7/H4/H5: every path touched by ANY commit in <base>..HEAD — each commit enumerated
+  # on its own (rev-list; ids never mixed with names), merges diffed against EACH parent
+  # (diff-tree -m), deletions too, renames as delete+add — PLUS the net <base>→HEAD diff,
+  # PLUS the staged delta. All NUL-delimited raw records (pre/post blob ids for the
+  # content-conditional names), replace refs ignored (GL_CG). Any failure fails closed.
+  "${GL_CG[@]}" rev-list "$base..HEAD" > "$tmpd/commits" 2>/dev/null || _gl_commit_refuse "could not enumerate the task's commits (fail closed)"
+  while IFS= read -r commit; do
+    case "$commit" in ''|*[!0-9a-f]*) _gl_commit_refuse "unexpected rev-list output (fail closed)" ;; esac
+    "${GL_CG[@]}" diff-tree -m -r --raw -z --no-abbrev --no-renames --no-commit-id --diff-filter=ACDMRT "$commit" > "$tmpd/c" 2>/dev/null \
+      || _gl_commit_refuse "could not enumerate commit $commit (fail closed)"
+    _gl_scan_raw "$commit" "$tmpd/c"
+  done < "$tmpd/commits"
+  "${GL_CG[@]}" diff --raw -z --no-abbrev --no-renames --diff-filter=ACDMRT "$base" HEAD > "$tmpd/net" 2>/dev/null \
+    || _gl_commit_refuse "could not enumerate the net <base>→HEAD diff (fail closed)"
+  _gl_scan_raw net "$tmpd/net"
+  if ! "${GL_CG[@]}" add -A >/dev/null 2>&1 \
+     || ! "${GL_CG[@]}" diff --cached --raw -z --no-abbrev --no-renames --diff-filter=ACDMRT > "$tmpd/staged" 2>/dev/null \
+     || ! "${GL_CG[@]}" diff --cached --name-only -z --no-renames --diff-filter=AMT > "$tmpd/am" 2>/dev/null; then
+    _gl_commit_refuse "git add / staged enumeration failed in $GL_WT_PATH (fail closed)"
+  fi
+  _gl_scan_raw staged "$tmpd/staged"
+  # Filters are pass-throughs here, so a staged path whose `filter` attribute names a driver
+  # would be stored RAW (an LFS binary instead of its pointer, a git-crypt PLAINTEXT) — refuse.
+  if [ -s "$tmpd/am" ]; then
+    "${GL_CG[@]}" check-attr --cached -z --stdin filter < "$tmpd/am" > "$tmpd/attr" 2>/dev/null \
+      || _gl_commit_refuse "could not read the filter attributes of the staged paths (fail closed)"
+    while IFS= read -r -d '' p && IFS= read -r -d '' k && IFS= read -r -d '' v; do
+      case "$v" in unspecified|unset) ;; *)
+        GL_BAD="$GL_BAD ${p//[[:cntrl:]]/?}@filter"
+        printf 'filter_path=%s filter=%s\n' "${p//[[:cntrl:]]/?}" "${v//[[:cntrl:]]/?}" ;;
+      esac
+    done < "$tmpd/attr"
+  fi
+  rm -rf "$tmpd"
+  if [ -n "$GL_BAD" ]; then
+    "${GL_CG[@]}" reset -q >/dev/null 2>&1
+    echo "gstack-lane: REFUSING — secret-shaped or filtered path(s) in the task's commits or staged changes:$GL_BAD — nothing committed, index reset, no result_sha" >&2
+    exit "$EX_ERROR"
+  fi
+  if "${GL_CG[@]}" diff --cached --quiet 2>/dev/null; then
+    echo "result_sha=$head"
+    echo "base_sha=$base"
+    echo "no_changes=true"
+    result="$head"
+  else
+    if ! "${GL_CG[@]}" commit -q --no-verify -m "$msg" >/dev/null 2>&1; then
+      "${GL_CG[@]}" reset -q >/dev/null 2>&1
+      echo "gstack-lane: git commit failed in $GL_WT_PATH (identity?) — index reset" >&2
+      exit "$EX_ERROR"
+    fi
+    result="$("${GL_CG[@]}" rev-parse HEAD)"
+    echo "result_sha=$result"
+    echo "base_sha=$base"
+  fi
+  if [ -n "$out" ]; then
+    if [ -f "$out.status.json" ] && command -v bun >/dev/null 2>&1; then
+      GL_STATUS_FILE="$(_gl_abs "$out.status.json")" GL_RESULT_SHA="$result" GL_BASE_SHA="$base" _gl_js stamp \
+        || echo "gstack-lane: could not stamp $out.status.json" >&2
+    else
+      echo "gstack-lane: no $out.status.json to stamp" >&2
+    fi
+  fi
+  exit 0
+}
+
+# ── worktree add|rm ───────────────────────────────────────────────────────────
+cmd_worktree() {
+  local action="${1:-}" base="HEAD" detach=0 force=0 repo="" sha cur real pre post
+  GL_WT_RUN=""; GL_WT_TASK=""
+  [ "$#" -gt 0 ] && shift
+  case "$action" in add|rm) ;; *) _gl_usage_err "worktree: expected 'add' or 'rm'" ;; esac
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --run-dir|--task|--base|--repo)
+        [ "$#" -ge 2 ] || _gl_usage_err "$1 requires a value"
+        case "$1" in --run-dir) GL_WT_RUN="$2" ;; --task) GL_WT_TASK="$2" ;; --base) base="$2" ;; --repo) repo="$2" ;; esac
+        shift 2 ;;
+      --detach) detach=1; shift ;;
+      --force) force=1; shift ;;
+      -h|--help) _gl_help; exit 0 ;;
+      *) _gl_usage_err "worktree $action: unknown option: $1" ;;
+    esac
+  done
+  [ -n "$GL_WT_RUN" ] || _gl_usage_err "worktree: --run-dir is required"
+  [ -n "$GL_WT_TASK" ] || _gl_usage_err "worktree: --task is required"
+  [ "$action" = rm ] && [ "$detach" = 1 ] && _gl_usage_err "worktree rm: --detach is an add-only flag"
+  [ "$action" = add ] && [ "$force" = 1 ] && _gl_usage_err "worktree add: --force is an rm-only flag"
+  _gl_wt_common
+  if [ -z "$repo" ]; then
+    repo="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "gstack-lane: not inside a git repository (pass --repo)" >&2; exit "$EX_ERROR"; }
+  fi
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { echo "gstack-lane: --repo is not a git repository: $repo" >&2; exit "$EX_ERROR"; }
+
+  # H1: every lifecycle git call (add/remove/prune and the checkout add implies) is inert —
+  # no post-checkout hook, no smudge/process filter, no fsmonitor, no replace refs.
+  # (filter names from the repo AND, when it exists, the worktree's own config context)
+  _gl_inert_init "$repo" checkout "$GL_WT_PATH"
+  GL_WG=("${GL_IG[@]}")
+  if [ "$action" = add ]; then
+    if [ -e "$GL_WT_PATH" ] && [ "$detach" = 1 ] && _gl_registered_wt "$GL_WT_PATH" \
+       && ! git -C "$GL_WT_PATH" symbolic-ref -q HEAD >/dev/null 2>&1; then
+      # A frozen review snapshot of this run is re-pointed at the new base: recreate it.
+      "${GL_WG[@]}" worktree remove --force "$GL_WT_PATH" >/dev/null 2>&1
+      "${GL_WG[@]}" worktree prune >/dev/null 2>&1
+    fi
+    [ -e "$GL_WT_PATH" ] && { echo "gstack-lane: worktree path already exists: $GL_WT_PATH" >&2; exit "$EX_ERROR"; }
+    sha="$("${GL_WG[@]}" rev-parse --verify --quiet "$base^{commit}")" || { echo "gstack-lane: --base does not resolve to a commit: $base" >&2; exit "$EX_ERROR"; }
+    if _gl_has_onbranch "$repo"; then
+      echo "control_changed=includeif-onbranch"
+      echo "gstack-lane: REFUSING — the repo's git config has an includeIf \"onbranch:…\" section: config that only activates on the new branch cannot be neutralized before the checkout" >&2
+      exit "$EX_ERROR"
+    fi
+    # H1: the shared (common-dir) part of the control fingerprint is recorded BEFORE the add
+    # (the add itself is inert, and `commit --task` compares against exactly this record, so
+    # any change made while the add ran is refused there as control_changed=<k>).
+    pre="$(_gl_commit_control "$repo" common 2>/dev/null)" || pre=""
+    [ -n "$pre" ] || { echo "gstack-lane: could not fingerprint the repo's git control state" >&2; exit "$EX_ERROR"; }
+    _gl_wt_undo() { # <message> — remove the half-made worktree (and its new branch), exit 1
+      "${GL_WG[@]}" worktree remove --force "$GL_WT_PATH" >/dev/null 2>&1
+      "${GL_WG[@]}" worktree prune >/dev/null 2>&1
+      [ "$detach" = 1 ] || "${GL_WG[@]}" branch -D "$GL_WT_BRANCH" >/dev/null 2>&1
+      echo "gstack-lane: $1 — worktree removed" >&2
+      exit "$EX_ERROR"
+    }
+    # V1: register the worktree WITHOUT a checkout, then read its config IN ITS OWN context
+    # (gitdir:/onbranch:/hasconfig: includes now resolve against the new gitdir and HEAD),
+    # neutralize every filter that context defines, and only then populate it.
+    if [ "$detach" = 1 ]; then
+      "${GL_WG[@]}" worktree add --no-checkout --detach "$GL_WT_PATH" "$sha" >/dev/null 2>&1 \
+        || { echo "gstack-lane: git worktree add --detach failed for $GL_WT_PATH" >&2; exit "$EX_ERROR"; }
+    else
+      git check-ref-format --branch "$GL_WT_BRANCH" >/dev/null 2>&1 || { echo "gstack-lane: invalid branch name: $GL_WT_BRANCH (rename the run dir)" >&2; exit "$EX_ERROR"; }
+      if "${GL_WG[@]}" show-ref --verify --quiet "refs/heads/$GL_WT_BRANCH"; then
+        echo "gstack-lane: branch already exists: $GL_WT_BRANCH" >&2; exit "$EX_ERROR"
+      fi
+      "${GL_WG[@]}" worktree add --no-checkout -b "$GL_WT_BRANCH" "$GL_WT_PATH" "$sha" >/dev/null 2>&1 \
+        || { echo "gstack-lane: git worktree add failed for $GL_WT_PATH ($GL_WT_BRANCH)" >&2; exit "$EX_ERROR"; }
+    fi
+    if _gl_has_onbranch "$GL_WT_PATH"; then
+      echo "control_changed=includeif-onbranch"
+      _gl_wt_undo "REFUSING — the new worktree's git config resolves an includeIf \"onbranch:…\" section"
+    fi
+    _gl_inert_init "$GL_WT_PATH" checkout "$repo"
+    "${GL_IG[@]}" reset -q --hard "$sha" >/dev/null 2>&1 || _gl_wt_undo "the inert checkout of $sha failed"
+    post="$(_gl_commit_control "$GL_WT_PATH" wt 2>/dev/null)" || post=""   # per-worktree part: after the add
+    [ -n "$post" ] || _gl_wt_undo "could not fingerprint the new worktree's git control state"
+    mkdir -p "$GL_WT_RUN/wt-meta" && printf '%s\n' "$sha" > "$GL_WT_META"
+    printf '%s\n%s\n' "$pre" "$post" > "$GL_WT_CTL"   # F2: verified again at commit
+    echo "$GL_WT_PATH"
+    echo "base_sha=$sha"   # F3: the orchestrator keeps this and passes it to `commit --base`
+    exit 0
+  fi
+
+  # rm — only a registered linked worktree that resolves to exactly <run-dir>/wt/<id>.
+  [ -d "$GL_WT_PATH" ] || { echo "gstack-lane: no such worktree: $GL_WT_PATH" >&2; exit "$EX_ERROR"; }
+  real="$(_gl_realdir "$GL_WT_PATH")"
+  if ! { [ "$real" = "$GL_WT_PATH" ] && _gl_registered_wt "$real"; }; then
+    echo "gstack-lane: $GL_WT_PATH is not a registered worktree of this run — refusing" >&2; exit "$EX_ERROR"
+  fi
+  cur="$(git -C "$GL_WT_PATH" symbolic-ref -q --short HEAD 2>/dev/null || true)"
+  if [ "$force" = 1 ]; then
+    "${GL_WG[@]}" worktree remove --force "$GL_WT_PATH" >/dev/null 2>&1
+  else
+    "${GL_WG[@]}" worktree remove "$GL_WT_PATH" >/dev/null 2>&1
+  fi
+  if [ -d "$GL_WT_PATH" ]; then
+    echo "gstack-lane: git refused to remove $GL_WT_PATH (uncommitted changes? use --force)" >&2
+    exit "$EX_ERROR"
+  fi
+  "${GL_WG[@]}" worktree prune >/dev/null 2>&1
+  rm -f "$GL_WT_META" "$GL_WT_CTL"
+  if [ -n "$cur" ]; then
+    if [ "$cur" != "$GL_WT_BRANCH" ]; then
+      echo "gstack-lane: worktree was on '$cur', not '$GL_WT_BRANCH' — branch left untouched" >&2
+    elif [ "$force" = 1 ]; then
+      "${GL_WG[@]}" branch -D "$GL_WT_BRANCH" >/dev/null 2>&1 || echo "gstack-lane: could not delete branch $GL_WT_BRANCH" >&2
+    elif ! "${GL_WG[@]}" branch -d "$GL_WT_BRANCH" >/dev/null 2>&1; then
+      echo "gstack-lane: branch $GL_WT_BRANCH is not fully merged — kept (use --force to delete)" >&2
+    fi
+  fi
+  exit 0
+}
+
+_gl_help() {
+  sed -n '2,/^# Hygiene:/p' "$GL_SELF" | sed 's/^# \{0,1\}//'
+}
+
+# H2: the private bun cwd is created here, in the MAIN shell, for every subcommand that
+# runs bun (a $(…) subshell could not hand it back, nor remove it on exit).
+case "${1:-}" in
+  probe|run|summary|commit|adjudicate|_probe-lane|_codex-auth-writeback) _gl_bun_init ;;
+esac
+case "${1:-}" in
+  probe) shift; cmd_probe "$@" ;;
+  run) shift; cmd_run "$@" ;;
+  summary) shift; cmd_summary "$@" ;;
+  adjudicate) shift; cmd_adjudicate "$@" ;;
+  commit) shift; cmd_commit "$@" ;;
+  worktree) shift; cmd_worktree "$@" ;;
+  _probe-lane) shift; cmd_probe_lane "$@" ;;
+  _snapshot) shift; cmd_snapshot "$@" ;;
+  _codex-auth-writeback) shift; cmd_codex_auth_writeback "$@" ;;
+  -h|--help|help) _gl_help; exit 0 ;;
+  *) _gl_usage_err "expected a subcommand: probe | run | summary | adjudicate | commit | worktree add|rm" ;;
+esac
