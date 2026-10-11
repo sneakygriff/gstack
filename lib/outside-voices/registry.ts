@@ -205,7 +205,22 @@ export interface VoiceResult {
   cost_usd: number | null;
   /** Human-readable explanation for an `absent` or `error` status. */
   reason?: string;
+  /**
+   * PANEL-stamped degraded-isolation marker — present ONLY when the voice ran
+   * WITHOUT its OS sandbox (the CLI refused to start sandboxed and the panel
+   * re-spawned it under its tool policy alone; see
+   * {@link CliInvokeSpec.sandboxRefusal}). Never voice-supplied:
+   * {@link parseVoiceResult} builds a fresh object and never copies these
+   * fields from a voice's output, so a voice can neither self-report nor
+   * suppress its own isolation level. Absent = the declared sandbox applied.
+   */
+  isolation?: DegradedIsolation;
+  /** Human-readable note explaining {@link isolation} (panel-stamped, from the registry). */
+  isolation_note?: string;
 }
+
+/** The one degraded isolation level a panel record can carry (see VoiceResult.isolation). */
+export type DegradedIsolation = 'tool-policy-only';
 
 // ─── Validation size caps (fields become agent-facing; caps bound blast radius)
 
@@ -268,10 +283,43 @@ export interface CliInvokeSpec {
   /** Prompt transport is file-based; stdin is redirected from here. */
   stdinFrom: string;
   /**
+   * OPTIONAL sandbox-refusal handling. Set when the CLI can REFUSE TO START
+   * because its OS sandbox cannot apply on this host (exit ≠0/≠124, EMPTY
+   * stdout, `marker` on stderr — before any model call). Mirrors bin/gstack-lane
+   * G1: by default the voice is then ABSENT (fail closed, no second send). Only
+   * when gstack-config `optInKey` is exactly `true` does the panel re-spawn ONCE
+   * without `sandboxFlag` (`extraFlags` unchanged, so the CLI's read-only tool
+   * policy still applies) — under the neutralized env, from the neutral
+   * empty dir bin/gstack-neutral-cwd makes (single source: no .git/project config
+   * in it or any ancestor; the review sees only the prompt), after a fresh egress receipt — and stamps
+   * `isolation`/`isolation_note` on every record for that voice's run. No other
+   * failure is retried. Adapters without it can never be built or run
+   * unsandboxed (`buildArgv(…, { withoutSandbox: true })` throws).
+   */
+  sandboxRefusal?: SandboxRefusalSpec;
+  /**
    * Build the argv AFTER `bin` — for the write-denial canary + EVALS so the test
    * and the adapter cannot drift. NOT the production path (bash re-implements).
+   * `withoutSandbox` omits `sandboxFlag` (the refusal fallback's argv) and
+   * THROWS for an adapter without {@link sandboxRefusal}.
    */
-  buildArgv(prompt: string, opts?: { repoRoot?: string }): string[];
+  buildArgv(prompt: string, opts?: { repoRoot?: string; withoutSandbox?: boolean }): string[];
+}
+
+/** See {@link CliInvokeSpec.sandboxRefusal}. */
+export interface SandboxRefusalSpec {
+  /** Case-insensitive fixed-string stderr marker of the refusal (pinned 3-way vs bin/gstack-panel + bin/gstack-lane). */
+  marker: string;
+  /**
+   * gstack-config key the operator must set to exactly `true` before the CLI may
+   * ever run outside its OS sandbox (default `false`; pinned 4-way vs
+   * bin/gstack-panel, bin/gstack-lane `_gl_grok_unsandboxed_ok`, bin/gstack-config).
+   */
+  optInKey: 'grok_allow_unsandboxed';
+  /** Isolation level the fallback run is stamped with. */
+  isolation: DegradedIsolation;
+  /** Human-readable degraded-isolation note stamped as `isolation_note`. */
+  note: string;
 }
 
 export interface CliPreflightSpec {
@@ -354,15 +402,21 @@ function makeBuildArgv(spec: {
   sandboxFlag: string;
   extraFlags: string[];
   needsRepoRoot: boolean;
+  sandboxRefusal?: SandboxRefusalSpec;
 }) {
-  return (prompt: string, opts?: { repoRoot?: string }): string[] => {
+  return (prompt: string, opts?: { repoRoot?: string; withoutSandbox?: boolean }): string[] => {
+    // Only an adapter that declares a sandbox-refusal fallback may EVER be built
+    // without its sandbox flag — codex/gemini fail loudly, never silently unsandboxed.
+    if (opts?.withoutSandbox && !spec.sandboxRefusal) {
+      throw new Error('buildArgv: withoutSandbox is only valid for an adapter that declares sandboxRefusal');
+    }
     const argv: string[] = [];
     if (spec.subcommand) argv.push(spec.subcommand);
     if (spec.promptFlag) argv.push(spec.promptFlag, prompt);
     else argv.push(prompt);
     if (spec.needsRepoRoot && opts?.repoRoot) argv.push('-C', opts.repoRoot);
     // sandboxFlag is the single source; split so it and buildArgv can't drift.
-    argv.push(...spec.sandboxFlag.split(' '));
+    if (!opts?.withoutSandbox) argv.push(...spec.sandboxFlag.split(' '));
     argv.push(...spec.extraFlags);
     return argv;
   };
@@ -415,6 +469,29 @@ const codexAdapter: CliVoiceAdapter = {
   parse: makeParse('codex'),
 };
 
+/**
+ * grok's OS-sandbox refusal (see {@link CliInvokeSpec.sandboxRefusal}). On some
+ * hosts grok cannot build its `read-only` sandbox profile and REFUSES TO START
+ * (exit 1, before any model call) — re-verified on grok 1.0.40 and 1.0.50
+ * (2026-10-11) on macOS + OrbStack, whose /var/run/docker.sock is a symlink:
+ *   warning: sandbox could not be applied: socket deny resolution failed: …
+ *   error: could not apply the 'read-only' sandbox profile; … Refusing to start …
+ * `marker` is BYTE-IDENTICAL to bin/gstack-lane's GL_SANDBOX_REFUSAL and
+ * bin/gstack-panel's PANEL_GROK_SANDBOX_REFUSAL (T10 three-way anti-drift pin).
+ * Mirrors bin/gstack-lane G1/G3: without `grok_allow_unsandboxed=true` a refusal
+ * makes grok ABSENT; with it, ONE plan-mode-only rerun under the neutralized env
+ * (`env -u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BASH
+ * GROK_ENVRC_TIMEOUT_SECS=0`) from bin/gstack-neutral-cwd's empty dir (the panel cannot strip the
+ * user's real checkout the way the lane strips its disposable worktree).
+ */
+const GROK_SANDBOX_REFUSAL: SandboxRefusalSpec = {
+  marker: "could not apply the 'read-only' sandbox profile",
+  optInKey: 'grok_allow_unsandboxed',
+  isolation: 'tool-policy-only',
+  note:
+    "no OS sandbox: grok refused to start under --sandbox read-only (e.g. a symlinked /var/run/docker.sock under OrbStack) and the operator opted in (gstack-config grok_allow_unsandboxed=true). Read-only by grok's --permission-mode plan tool policy alone; run from an empty temp dir with .envrc/folder-trust neutralized, so it reviewed the prompt only, not the checkout. Fix: `grok update`, or a docker.sock that is not a symlink.",
+};
+
 const grokAdapter: CliVoiceAdapter = {
   name: 'grok',
   vendor: 'xai',
@@ -434,8 +511,15 @@ const grokAdapter: CliVoiceAdapter = {
     // default-on until an OS-level isolation that actually denies writes lands
     // and this canary passes. The flag string is kept (declared contract + T10
     // anti-drift pin) but is advisory, not a proven guarantee.
+    //
+    // SANDBOX REFUSAL (2026-10-11): where grok cannot apply this profile at all
+    // it refuses to start (GROK_SANDBOX_REFUSAL above). The panel then records
+    // grok ABSENT — unless the operator opted in (grok_allow_unsandboxed=true):
+    // then ONE rerun without `--sandbox` (`--permission-mode plan`, grok's
+    // read-only tool policy in extraFlags, stays on both spawns), from an empty
+    // temp dir, stamped `isolation: 'tool-policy-only'` (mirrors bin/gstack-lane G1).
     description:
-      'xAI grok CLI `--sandbox read-only` — DECLARED read-only, but write-denial is UNVERIFIED (a live canary observed a write get through). grok stays default-off until real OS-level isolation lands.',
+      "xAI grok CLI `--sandbox read-only` + `--permission-mode plan` — DECLARED read-only, but write-denial is UNVERIFIED (a live canary observed a write get through). If grok refuses to start sandboxed it is ABSENT unless the operator opted in (grok_allow_unsandboxed=true); then the panel reruns once under plan mode alone from an empty temp dir and flags the result tool-policy-only (no OS sandbox). grok stays default-off until real OS-level isolation lands.",
   },
   boundary: OUTSIDE_VOICE_BOUNDARY,
   fences: SHARED_FENCES,
@@ -457,7 +541,14 @@ const grokAdapter: CliVoiceAdapter = {
     sandboxFlag: '--sandbox read-only',
     // `--always-approve` stays OMITTED — the live canary showed the write got
     // through WITHOUT it, so it was never the thing holding the line and MUST
-    // NOT be re-added (see the sandbox note above).
+    // NOT be re-added (see the sandbox note above). It is also not NEEDED with
+    // plan mode: `grok -p … --permission-mode plan` runs headless without it
+    // (verified 2026-10-10), and bin/gstack-lane's review lane never passes it.
+    //
+    // `--permission-mode plan` is grok's read-only TOOL POLICY. It rides on
+    // every spawn (sandboxed or not), so it is what holds the line when the OS
+    // sandbox cannot apply and the OPTED-IN refusal fallback (sandboxRefusal)
+    // reruns without `--sandbox`.
     //
     // LIVE-VERIFIED FIX (gate FAIL P1-3): the frozen `--output-format json`
     // wrapped grok's answer in a `{"text":"…","stopReason":…}` envelope, burying
@@ -467,16 +558,18 @@ const grokAdapter: CliVoiceAdapter = {
     // extractVerdictBlock finds it — confirmed live: a real grok run now reaches
     // status:ready. (extractVerdictBlock also unwraps a `.text` envelope
     // defensively, so parsing is correct either way.)
-    extraFlags: ['--output-format', 'plain'],
+    extraFlags: ['--permission-mode', 'plan', '--output-format', 'plain'],
     timeoutWrapper: '_gstack_codex_timeout_wrapper',
     ladderCapSeconds: 540,
     stdinFrom: '/dev/null',
+    sandboxRefusal: GROK_SANDBOX_REFUSAL,
     buildArgv: makeBuildArgv({
       subcommand: null,
       promptFlag: '-p',
       sandboxFlag: '--sandbox read-only',
-      extraFlags: ['--output-format', 'plain'],
+      extraFlags: ['--permission-mode', 'plan', '--output-format', 'plain'],
       needsRepoRoot: false,
+      sandboxRefusal: GROK_SANDBOX_REFUSAL,
     }),
   },
   parse: makeParse('grok'),
@@ -971,6 +1064,10 @@ export function parseVoiceResult(raw: string, opts?: ParseOptions): VoiceResult 
       ? capText(datamark(obj.reason), CLAIM_MAX_CHARS).text
       : undefined;
 
+  // A FRESH object built from validated fields only — anything else the voice
+  // emitted (e.g. `isolation` / `isolation_note`, which only the PANEL may
+  // stamp) is dropped here, so a voice can neither self-report nor suppress
+  // its own isolation level.
   return {
     schema: VOICE_SCHEMA_ID,
     voice,

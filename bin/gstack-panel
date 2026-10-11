@@ -30,7 +30,12 @@
 #                          no receipt → no send → ABSENT(receipt-failed)
 #   7. invoke            — CLI with the VERBATIM registry sandbox flag; the
 #                          auto-approve tool mode is FORBIDDEN on every reviewer
-#                          path; grok --always-approve OMITTED (see below)
+#                          path; grok --always-approve OMITTED (see below). grok
+#                          also carries --permission-mode plan (read-only tool
+#                          policy) and a neutralized env; if grok REFUSES TO
+#                          START because its OS sandbox cannot apply, it is
+#                          ABSENT unless the operator opted in
+#                          (grok_allow_unsandboxed=true) — see SANDBOX REFUSAL
 #   8. output validation — parse stdout via the registry's outside-voice/v2 fence
 #                          (parse-fail → status:error, never a silent guess)
 #   9. review-log        — one bin/gstack-review-log entry per voice
@@ -40,9 +45,11 @@
 # lines print on stdout; tabulation is bin/gstack-vote's job, not this script's.
 #
 # grok --always-approve DECISION: OMITTED. T1 froze the reviewer contract with
-# `--sandbox read-only` as the sole security guarantee and `--always-approve`
-# deliberately absent (integration-surprise #6). This script keeps it OMITTED;
-# T7's OS-level write-denial canary owns the empirical decision to ever add it.
+# `--sandbox read-only` as the security guarantee and `--always-approve`
+# deliberately absent (integration-surprise #6). This script keeps it OMITTED.
+# It is not needed either: with `--permission-mode plan` grok runs headless
+# without it (`grok -p … --permission-mode plan`, verified 2026-10-10), and
+# bin/gstack-lane's review lane never passes it. It must not be re-added.
 #
 # grok WRITE-DENIAL: UNVERIFIED (gate FAIL P1-1). The live canary showed grok
 # WROTE a sentinel despite `--sandbox read-only`, and it wrote WITHOUT
@@ -51,6 +58,30 @@
 # is DEFAULT-OFF (bin/gstack-config) and grok must not go default-on until an
 # OS-level isolation that actually denies writes lands and the canary passes.
 # gemini (P1-2) and grok are BOTH default-off pending a live write-denial canary.
+#
+# grok ENV (mirrors bin/gstack-lane G3): EVERY grok spawn runs under
+# `env -u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BASH
+# GROK_ENVRC_TIMEOUT_SECS=0` — .envrc evaluation off, no folder-trust override
+# (=0 would ungate project MCP/LSP/hooks/instructions), no sandbox overrides.
+#
+# grok SANDBOX REFUSAL (2026-10-11, grok 1.0.40/1.0.50): on macOS + OrbStack
+# /var/run/docker.sock is a symlink, so grok cannot build its read-only profile
+# and exits 1 before any model call ("could not apply the 'read-only' sandbox
+# profile … Refusing to start"). Detected ONLY as: exit ≠0 and ≠124, EMPTY stdout,
+# and PANEL_GROK_SANDBOX_REFUSAL on stderr (anything else is handled normally,
+# never retried). Mirroring bin/gstack-lane G1, running grok OUTSIDE its OS
+# sandbox is an explicit OPT-IN: unless `gstack-config get grok_allow_unsandboxed`
+# is exactly `true`, grok is ABSENT ("…opt in with gstack-config set
+# grok_allow_unsandboxed true") — no second send. Opted in, grok reruns ONCE
+# without `--sandbox`, under a NEW receipt, from a NEUTRAL empty dir made by
+# bin/gstack-neutral-cwd (no .git/project config in it or any ancestor; the
+# panel runs in the user's real checkout and cannot strip repo .grok/.envrc/
+# AGENTS.md/hooks/MCP the way the lane's disposable worktree does, so the
+# fallback review sees ONLY the prompt content, never the checkout).
+# `--permission-mode plan` is then the only read-only guard: every grok record
+# for the run is stamped isolation:"tool-policy-only" + isolation_note and the
+# status line says DEGRADED ISOLATION. Operator fix: `grok update`, or a
+# docker.sock that is not a symlink.
 #
 # Hygiene: no `set -e` (many intentional non-zero returns — gate misses, CLI
 # failures — are captured, not fatal), mirroring the autobuilder grok recipe.
@@ -123,6 +154,16 @@ REGISTRY="$BIN_DIR/../lib/outside-voices/registry.ts"
 REDACT_BIN="$BIN_DIR/gstack-redact"
 CONFIG_BIN="$BIN_DIR/gstack-config"
 REVIEW_LOG_BIN="$BIN_DIR/gstack-review-log"
+
+# grok's "OS sandbox cannot apply → refusing to start" stderr marker (see the
+# grok SANDBOX REFUSAL note above). BYTE-IDENTICAL to bin/gstack-lane's
+# GL_SANDBOX_REFUSAL and the registry's VOICES.grok.invoke.sandboxRefusal.marker
+# (three-way anti-drift pin: test/skill-recipe-invariants.test.ts T10).
+PANEL_GROK_SANDBOX_REFUSAL="could not apply the 'read-only' sandbox profile"
+# Degraded-isolation flag for the voice being recorded: set ONLY (as a function
+# local) by _panel_finish_run's 4th arg after the refusal fallback ran; read by
+# the record writers. Reset here so an inherited env value can never leak in.
+PANEL_ISOLATION=""
 
 # Timeout wrapper + codex auth probe (defines functions only; safe to source).
 [ -f "$BIN_DIR/gstack-codex-probe" ] && . "$BIN_DIR/gstack-codex-probe"
@@ -260,8 +301,18 @@ const absent = (status, reason) => ({
   status, verdict: null, findings: [], tokens: null, cost_usd: null,
   ...(reason ? { reason } : {}),
 });
+// Degraded isolation (the sandbox-refusal fallback ran this voice WITHOUT its OS
+// sandbox): PANEL-stamped on every record mode, never taken from voice output
+// (parseVoiceResult returns a fresh object that drops any voice-sent isolation).
+// The note is single-sourced from the registry sandboxRefusal spec.
+const stampIsolation = (rec) => {
+  if (process.env.PANEL_ISOLATION !== "tool-policy-only") return rec;
+  const refusal = reg.VOICES[voice] && reg.VOICES[voice].invoke && reg.VOICES[voice].invoke.sandboxRefusal;
+  const note = (refusal && refusal.note) || "no OS sandbox: read-only enforced by the CLI tool policy alone";
+  return { ...rec, isolation: "tool-policy-only", isolation_note: note };
+};
 if (mode === "absent") {
-  process.stdout.write(JSON.stringify(absent(process.env.PANEL_STATUS || "absent", process.env.PANEL_REASON || "")));
+  process.stdout.write(JSON.stringify(stampIsolation(absent(process.env.PANEL_STATUS || "absent", process.env.PANEL_REASON || ""))));
 } else if (mode === "parse") {
   const raw = await Bun.stdin.text();
   // Nonce authentication is MANDATORY for a CLI verdict — run_panel guarantees a
@@ -282,7 +333,7 @@ if (mode === "absent") {
   if (result.status === "ready" && process.env.PANEL_DATAMARK) {
     result.datamark = process.env.PANEL_DATAMARK;
   }
-  process.stdout.write(JSON.stringify(result));
+  process.stdout.write(JSON.stringify(stampIsolation(result)));
 } else {
   process.stderr.write("gstack-panel bun helper: unknown mode\n"); process.exit(2);
 }
@@ -297,16 +348,28 @@ _panel_vendor_fallback() {
 _panel_json() { # <mode> <voice> [status] [reason]   (raw via stdin for parse)
   PANEL_REGISTRY="$REGISTRY" PANEL_MODE="$1" PANEL_VOICE="$2" \
   PANEL_STATUS="${3:-}" PANEL_REASON="${4:-}" PANEL_DATAMARK="${DATAMARK:-}" \
+  PANEL_ISOLATION="${PANEL_ISOLATION:-}" \
     bun -e "$_PANEL_BUN_SCRIPT" 2>/dev/null
 }
 
 _panel_bash_absent_json() { # <voice> <status> <reason>  — bun-less fallback
-  local voice="$1" status="$2" reason="$3" vendor
+  local voice="$1" status="$2" reason="$3" vendor iso=""
   vendor="$(_panel_vendor_fallback "$voice")"
   # reason is our own text (never untrusted output), but escape the basics.
   reason="$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-  printf '{"schema":"outside-voice/v2","voice":"%s","vendor":"%s","status":"%s","verdict":null,"findings":[],"tokens":null,"cost_usd":null,"reason":"%s"}' \
-    "$voice" "$vendor" "$status" "$reason"
+  # Degraded isolation must survive the bun-less path too (literal note — the
+  # registry, its single source, is unreachable without bun).
+  [ "${PANEL_ISOLATION:-}" = "tool-policy-only" ] && \
+    iso=',"isolation":"tool-policy-only","isolation_note":"no OS sandbox: the CLI refused to start sandboxed and the operator opted in (grok_allow_unsandboxed=true); read-only by its --permission-mode plan tool policy alone, run from an empty temp dir (prompt only, no checkout)"'
+  printf '{"schema":"outside-voice/v2","voice":"%s","vendor":"%s","status":"%s","verdict":null,"findings":[],"tokens":null,"cost_usd":null,"reason":"%s"%s}' \
+    "$voice" "$vendor" "$status" "$reason" "$iso"
+}
+
+# Status-line suffix for a voice recorded under degraded isolation.
+_panel_isolation_suffix() {
+  [ "${PANEL_ISOLATION:-}" = "tool-policy-only" ] && \
+    printf '%s' " — DEGRADED ISOLATION: no OS sandbox (tool policy --permission-mode plan only)"
+  return 0
 }
 
 _panel_review_log() { # <voice> <status> <verdict-json>
@@ -323,7 +386,7 @@ _panel_write_absent() { # <voice> <status> <reason>
   [ -z "$json" ] && json="$(_panel_bash_absent_json "$voice" "$status" "$reason")"
   printf '%s\n' "$json" > "$OUT_DIR/$voice.result.json"
   _panel_review_log "$voice" "$status" "null"
-  echo "  $voice: ABSENT — $reason"
+  echo "  $voice: ABSENT — $reason$(_panel_isolation_suffix)"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -614,8 +677,12 @@ _panel_consent_ok() { # <voice>  → 0 when the send may proceed, 1 when consent
 # ─────────────────────────────────────────────────────────────────────────────
 # Output validation + result persistence for a voice that RAN.
 # ─────────────────────────────────────────────────────────────────────────────
-_panel_finish_run() { # <voice> <rc> <raw-file>
+_panel_finish_run() { # <voice> <rc> <raw-file> [isolation]
   local voice="$1" rc="$2" rawfile="$3" json status verdict
+  # 4th arg "tool-policy-only" = the voice ran WITHOUT its OS sandbox (refusal
+  # fallback). A dynamic-scope local: every record writer below (bun parse/absent
+  # AND the bun-less fallback) sees it and stamps isolation + isolation_note.
+  local PANEL_ISOLATION="${4:-}"
   if [ "$rc" = "124" ]; then
     _panel_write_absent "$voice" absent "CLI timed out after ${PANEL_VOICE_TIMEOUT_S:-$LADDER_S}s (exit 124)"
     return 0
@@ -632,9 +699,9 @@ _panel_finish_run() { # <voice> <rc> <raw-file>
   [ -z "$verdict" ] && verdict="null"
   _panel_review_log "$voice" "$status" "$verdict"
   case "$status" in
-    ready) echo "  $voice: READY — verdict $verdict (exit $rc)" ;;
-    error) echo "  $voice: ERROR — ran but output failed validation (exit $rc)" ;;
-    *)     echo "  $voice: $status (exit $rc)" ;;
+    ready) echo "  $voice: READY — verdict $verdict (exit $rc)$(_panel_isolation_suffix)" ;;
+    error) echo "  $voice: ERROR — ran but output failed validation (exit $rc)$(_panel_isolation_suffix)" ;;
+    *)     echo "  $voice: $status (exit $rc)$(_panel_isolation_suffix)" ;;
   esac
 }
 
@@ -645,7 +712,13 @@ _panel_finish_run() { # <voice> <rc> <raw-file>
 # for the T9 wiring spot-check. Each writes stdout to $OUT_DIR/<voice>.raw.
 # The receipt hashes $PAYLOAD_FILE — the EXACT bytes passed as "$(cat …)".
 # The auto-approve tool mode is FORBIDDEN on every path; grok --always-approve
-# is intentionally OMITTED (see header).
+# is intentionally OMITTED (see header). grok has TWO literal spawn lines, both
+# under the neutralized grok env (header: grok ENV): the sandboxed one, and the
+# sandbox-refusal fallback (no --sandbox, same --permission-mode plan). The
+# fallback runs at most ONCE, only on a genuine refusal, only when the operator
+# opted in (grok_allow_unsandboxed=true), from bin/gstack-neutral-cwd's empty dir
+# (no .git/project config in any ancestor), and only after its OWN fail-closed receipt — a second send gets a
+# second receipt. The first receipt's outcome records sandbox-refused:exit:<rc>.
 # ─────────────────────────────────────────────────────────────────────────────
 _panel_invoke_codex() {
   local payload="$PAYLOAD_FILE" rid rc
@@ -664,17 +737,73 @@ _panel_invoke_codex() {
 }
 
 _panel_invoke_grok() {
-  local payload="$PAYLOAD_FILE" rid rc
+  local payload="$PAYLOAD_FILE" out="$OUT_DIR" rid rc t0 now left fbdir
   rid="$("$BIN_DIR/gstack-egress-receipt" write --sink outside-voice:grok --host api.x.ai \
         --class review-prompt --payload-file "$payload" --consent "grok_reviews=enabled" 2>/dev/null)" || rid=""
   if [ -z "$rid" ]; then
     _panel_write_absent grok absent "egress receipt could not be written — refusing send (fail-closed): receipt-failed"
     return 0
   fi
-  _gstack_codex_timeout_wrapper "${PANEL_VOICE_TIMEOUT_S:-$LADDER_S}" grok -p "$(cat "$payload")" \
-    --sandbox read-only --output-format plain \
+  t0="$(date +%s 2>/dev/null || echo 0)"
+  _gstack_codex_timeout_wrapper "${PANEL_VOICE_TIMEOUT_S:-$LADDER_S}" env -u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BASH GROK_ENVRC_TIMEOUT_SECS=0 grok -p "$(cat "$payload")" \
+    --sandbox read-only --permission-mode plan --output-format plain \
     </dev/null >"$OUT_DIR/grok.raw" 2>"$OUT_DIR/grok.err"
   rc=$?
+  # Sandbox REFUSAL (see header) — ALL of: exit ≠0 and ≠124, EMPTY stdout (a real
+  # refusal precedes any model call), the marker on stderr. Anything else —
+  # incl. a timeout or output carrying the marker — is handled normally, never retried.
+  if [ "$rc" != "0" ] && [ "$rc" != "124" ] && [ ! -s "$OUT_DIR/grok.raw" ] \
+     && LC_ALL=C grep -qiF "$PANEL_GROK_SANDBOX_REFUSAL" "$OUT_DIR/grok.err" 2>/dev/null; then
+    "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "sandbox-refused:exit:$rc" 2>/dev/null || true
+    mv -f "$OUT_DIR/grok.err" "$OUT_DIR/grok.sandbox-refused.err" 2>/dev/null || true
+    # bin/gstack-lane G1: running grok outside its OS sandbox is an explicit
+    # operator opt-in — anything but exactly "true" (incl. a config-read failure)
+    # fails CLOSED to ABSENT: nothing ran unsandboxed, so no isolation stamp.
+    if [ "$("$CONFIG_BIN" get grok_allow_unsandboxed 2>/dev/null)" != "true" ]; then
+      _panel_write_absent grok absent "grok OS sandbox unavailable on this host (sandbox-refused); opt in with gstack-config set grok_allow_unsandboxed true"
+      return 0
+    fi
+    echo "  grok: WARNING — grok refused to start under --sandbox read-only (exit $rc; stderr kept in grok.sandbox-refused.err). grok_allow_unsandboxed=true: re-running ONCE with NO OS sandbox — read-only by tool policy (--permission-mode plan) only, from an empty temp dir (prompt only, no checkout). Fix: grok update, or a docker.sock that is not a symlink."
+    # The retry shares this voice's budget: min(what is left of the per-voice
+    # timeout, what is left of the surface wall-clock).
+    now="$(date +%s 2>/dev/null || echo 0)"
+    left=$(( ${PANEL_VOICE_TIMEOUT_S:-$LADDER_S} - (now - t0) ))
+    [ $(( WALL_CLOCK_S - (now - START_TS) )) -lt "$left" ] && left=$(( WALL_CLOCK_S - (now - START_TS) ))
+    if [ "$left" -lt 1 ]; then
+      _panel_write_absent grok absent "OS sandbox refused to start and no time is left for the plan-mode fallback: wall-clock"
+      return 0
+    fi
+    PANEL_VOICE_TIMEOUT_S="$left"
+    # The panel runs in the user's REAL checkout and cannot strip its .grok/.envrc/
+    # AGENTS.md/hooks/MCP config (the lane strips a disposable worktree), so the
+    # unsandboxed spawn runs from a NEUTRAL cwd: bin/gstack-neutral-cwd (the single
+    # source) makes a fresh EMPTY dir, resolved physically, with NO .git or project
+    # config in it or any ancestor — checked without git, so GIT_CEILING_DIRECTORIES
+    # etc. cannot blind it. The review sees only the prompt. Absolute paths for
+    # everything the spawn touches (it runs after the cd).
+    case "$payload" in /*) ;; *) payload="$PWD/$payload" ;; esac
+    case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+    fbdir="$("$BIN_DIR/gstack-neutral-cwd" gstack-panel-grok 2>"$out/grok.neutral-cwd.err")" || fbdir=""
+    if [ -z "$fbdir" ]; then
+      _panel_write_absent grok absent "no neutral working directory for the unsandboxed fallback ($(head -1 "$out/grok.neutral-cwd.err" 2>/dev/null | cut -c1-240)) — refusing send (fail-closed): sandbox-refused"
+      return 0
+    fi
+    rid="$("$BIN_DIR/gstack-egress-receipt" write --sink outside-voice:grok --host api.x.ai \
+          --class review-prompt --payload-file "$payload" --consent "grok_reviews=enabled;grok_allow_unsandboxed=true" 2>/dev/null)" || rid=""
+    if [ -z "$rid" ]; then
+      rm -rf "$fbdir"
+      _panel_write_absent grok absent "egress receipt for the sandbox-refusal fallback could not be written — refusing send (fail-closed): receipt-failed"
+      return 0
+    fi
+    (cd "$fbdir" && _gstack_codex_timeout_wrapper "$PANEL_VOICE_TIMEOUT_S" env -u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BASH GROK_ENVRC_TIMEOUT_SECS=0 grok -p "$(cat "$payload")" \
+      --permission-mode plan --output-format plain \
+      </dev/null >"$out/grok.raw" 2>"$out/grok.err")
+    rc=$?
+    rm -rf "$fbdir"
+    "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "exit:$rc" 2>/dev/null || true
+    _panel_finish_run grok "$rc" "$OUT_DIR/grok.raw" tool-policy-only
+    return 0
+  fi
   "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "exit:$rc" 2>/dev/null || true
   _panel_finish_run grok "$rc" "$OUT_DIR/grok.raw"
 }

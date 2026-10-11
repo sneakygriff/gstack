@@ -211,7 +211,7 @@ function sortByCanonicalVoiceOrder(results: VoiceResult[]): VoiceResult[] {
  * stuffing the quorum or diluting a real BLOCK. A non-canonical basename or a
  * duplicate voice is now skipped LOUDLY, never trusted.
  */
-function loadResults(files: string[], nonce?: string): VoiceResult[] {
+function loadResults(files: string[], nonce?: string, degradedOut?: Set<ResultVoice>): VoiceResult[] {
   const out: VoiceResult[] = [];
   const haveNonce = typeof nonce === 'string' && nonce !== '';
   const seenVoices = new Set<ResultVoice>();
@@ -240,6 +240,18 @@ function loadResults(files: string[], nonce?: string): VoiceResult[] {
       continue;
     }
     seenVoices.add(voice);
+    // DISPLAY ONLY: bin/gstack-panel stamps `isolation: "tool-policy-only"` on a
+    // voice that ran WITHOUT its OS sandbox (sandbox-refusal fallback). It is not
+    // part of a verdict, so parseVoiceResult drops it — read it off the record's
+    // top level here. It never feeds tally math, quorum, or nonce authentication.
+    if (degradedOut) {
+      try {
+        const top = JSON.parse(raw);
+        if (top !== null && typeof top === 'object' && top.isolation === 'tool-policy-only') degradedOut.add(voice);
+      } catch {
+        /* not a plain JSON record — no marker */
+      }
+    }
     // Natural parse (no nonce enforcement) — establishes the record's REAL status
     // under the FILENAME-bound voice hint. A body whose `voice` field disagrees
     // with the filename is caught by the parser's spoof check, never trusted.
@@ -416,8 +428,10 @@ function renderTable(opts: {
   tally: TallyResult;
   surface: string;
   budgetCapUsd: number | null;
+  /** Voices the panel ran WITHOUT their OS sandbox (row marker only). */
+  degraded?: Set<ResultVoice>;
 }): string {
-  const { results, tally, surface, budgetCapUsd } = opts;
+  const { results, tally, surface, budgetCapUsd, degraded } = opts;
   const resultsByVoice = new Map(results.map((r) => [r.voice, r]));
   const lines: string[] = [];
 
@@ -445,7 +459,8 @@ function renderTable(opts: {
   for (const pv of tally.perVoice) {
     const verdictStr = pv.verdict ?? '—';
     const top = topFindingCell(pv, resultsByVoice.get(pv.voice));
-    lines.push(`  ${pv.voice.padEnd(8)}${pv.vendor.padEnd(11)}${pv.status.padEnd(9)}${verdictStr.padEnd(11)}${top}`);
+    const iso = degraded?.has(pv.voice) ? ' [no OS sandbox]' : '';
+    lines.push(`  ${pv.voice.padEnd(8)}${pv.vendor.padEnd(11)}${pv.status.padEnd(9)}${verdictStr.padEnd(11)}${top}${iso}`);
   }
 
   lines.push(DIVIDER);
@@ -517,7 +532,8 @@ function main() {
   // demotes any unauthenticated ready verdict to error, and a missing/empty
   // --nonce fails CLOSED (every ready verdict demoted), never silently skipped.
   const nonce = values['--nonce'];
-  const results = loadResults(files, nonce);
+  const degraded = new Set<ResultVoice>();
+  const results = loadResults(files, nonce, degraded);
   const tally = tallyVoices(results);
 
   if (bools['--json']) {
@@ -536,7 +552,7 @@ function main() {
     }
   }
 
-  process.stdout.write(renderTable({ results, tally, surface, budgetCapUsd }));
+  process.stdout.write(renderTable({ results, tally, surface, budgetCapUsd, degraded }));
   process.exit(0);
 }
 

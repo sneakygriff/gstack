@@ -911,3 +911,41 @@ describe('bin/gstack-vote --nonce — tabulation-time verdict authentication (co
     }
   });
 });
+
+// grok sandbox-refusal fallback (2026-10-11): bin/gstack-panel stamps
+// `isolation: "tool-policy-only"` on a voice that ran WITHOUT its OS sandbox.
+// The table marks that voice's row; the marker is display-only — the tally,
+// quorum and nonce authentication are byte-identical with or without it.
+describe('bin/gstack-vote CLI — degraded-isolation row marker (display only)', () => {
+  test('a panel-stamped isolation:"tool-policy-only" record gets "[no OS sandbox]" on its row; tally/--json unchanged', () => {
+    const plain = mkFixtureDir();
+    const stamped = mkFixtureDir();
+    try {
+      const codex: VoiceResult = { schema: VOICE_SCHEMA_ID, voice: 'codex', vendor: 'openai', status: 'ready', verdict: 'PASS', findings: [], tokens: null, cost_usd: null };
+      const grok: VoiceResult = { schema: VOICE_SCHEMA_ID, voice: 'grok', vendor: 'xai', status: 'ready', verdict: 'CONCERNS', findings: [], tokens: null, cost_usd: null };
+      for (const dir of [plain, stamped]) writeResultFile(dir, 'codex', codex, TABLE_NONCE);
+      writeResultFile(plain, 'grok', grok, TABLE_NONCE);
+      fs.writeFileSync(
+        path.join(stamped, 'grok.result.json'),
+        JSON.stringify({ ...grok, datamark: TABLE_NONCE, isolation: 'tool-policy-only', isolation_note: 'no OS sandbox' }),
+      );
+
+      const marked = runVote(['--dir', stamped, '--nonce', TABLE_NONCE]);
+      expect(marked.code).toBe(0);
+      const grokRow = marked.stdout.split('\n').find((l) => l.trim().startsWith('grok')) ?? '';
+      const codexRow = marked.stdout.split('\n').find((l) => l.trim().startsWith('codex')) ?? '';
+      expect(grokRow).toContain('[no OS sandbox]');
+      expect(grokRow).toContain('ready'); // still authenticated + tallied as ready
+      expect(codexRow).not.toContain('[no OS sandbox]');
+      expect(runVote(['--dir', plain, '--nonce', TABLE_NONCE]).stdout).not.toContain('[no OS sandbox]');
+
+      // Tally math is untouched by the marker.
+      const a = runVote(['--dir', plain, '--nonce', TABLE_NONCE, '--json']).stdout;
+      const b = runVote(['--dir', stamped, '--nonce', TABLE_NONCE, '--json']).stdout;
+      expect(b).toBe(a);
+    } finally {
+      fs.rmSync(plain, { recursive: true, force: true });
+      fs.rmSync(stamped, { recursive: true, force: true });
+    }
+  });
+});

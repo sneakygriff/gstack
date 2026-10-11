@@ -81,6 +81,16 @@
  * write isolation. See this file's `grok: buildArgv omits --always-approve
  * (pinned)` test for the static half of that pin.
  *
+ * ── Sandbox REFUSAL (2026-10-11) ──
+ * Where grok cannot apply its OS sandbox at all (OrbStack's symlinked
+ * docker.sock) it refuses to start. The canary mirrors bin/gstack-panel: grok
+ * spawns run under the lane's neutralized env (G3); a refusal (exit ≠0/≠124,
+ * empty stdout, marker) is re-run ONLY if the operator opted in
+ * (gstack-config grok_allow_unsandboxed=true) — once, via
+ * `buildArgv(…, { withoutSandbox: true })`, from a fresh EMPTY non-git dir —
+ * and that voice's test is labelled `tool-policy-only`. Not opted in → the
+ * voice is skipped as "OS sandbox unavailable on this host".
+ *
  * Prerequisites (same shape as test/codex-e2e.test.ts / test/gemini-e2e.test.ts):
  * - EVALS=1 AND EVALS_TIER=periodic.
  * - The relevant CLI binary on PATH (checked per-voice — one missing CLI does
@@ -146,8 +156,19 @@ interface CanaryOutcome {
  * process's exit code is not a reliable hang signal on its own).
  */
 async function runCanary(bin: string, argv: string[], cwd: string): Promise<CanaryOutcome> {
+  // Production parity for grok: bin/gstack-panel (mirroring bin/gstack-lane G3)
+  // runs every grok spawn with .envrc evaluation off and no folder-trust /
+  // sandbox overrides inherited from the caller's environment.
+  const env: Record<string, string | undefined> = { ...process.env };
+  if (bin === 'grok') {
+    delete env.GROK_FOLDER_TRUST;
+    delete env.GROK_SANDBOX;
+    delete env.GROK_SANDBOX_AUTO_ALLOW_BASH;
+    env.GROK_ENVRC_TIMEOUT_SECS = '0';
+  }
   const proc = Bun.spawn([bin, ...argv], {
     cwd,
+    env,
     stdin: 'ignore', // production parity: CliInvokeSpec.stdinFrom === '/dev/null'
     stdout: 'pipe',
     stderr: 'pipe',
@@ -189,6 +210,40 @@ interface VoiceProbe {
   verdict: CanaryVerdict;
   outcome: CanaryOutcome;
   wrote: boolean;
+  /**
+   * 'tool-policy-only' when the CLI REFUSED to start under its OS sandbox and
+   * the operator had opted in, so the canary re-ran it exactly like
+   * bin/gstack-panel's fallback — `buildArgv(…, { withoutSandbox: true })`,
+   * plan-mode tool policy only, empty non-git cwd. Absent = the OS sandbox applied.
+   */
+  isolation?: 'tool-policy-only';
+  /** The CLI refused its OS sandbox and the opt-in was NOT set — nothing more ran (panel: ABSENT). */
+  sandboxUnavailable?: boolean;
+}
+
+/** True when `outcome` is the adapter's declared sandbox refusal (same test as the panel). */
+function isSandboxRefusal(voice: CliVoiceAdapter, outcome: CanaryOutcome): boolean {
+  const refusal = voice.invoke.sandboxRefusal;
+  return (
+    !!refusal &&
+    !outcome.timedOut &&
+    outcome.exitCode !== 0 &&
+    outcome.exitCode !== 124 &&
+    outcome.stdout.trim() === '' &&
+    outcome.stderr.toLowerCase().includes(refusal.marker.toLowerCase())
+  );
+}
+
+/** The panel's opt-in gate: gstack-config `<optInKey>` must be exactly "true". */
+function unsandboxedOptedIn(voice: CliVoiceAdapter): boolean {
+  const key = voice.invoke.sandboxRefusal?.optInKey;
+  if (!key) return false;
+  const r = Bun.spawnSync(['bash', path.join(import.meta.dir, '..', 'bin', 'gstack-config'), 'get', key], {
+    stdout: 'pipe',
+    stderr: 'ignore',
+    timeout: 30_000,
+  });
+  return r.exitCode === 0 && r.stdout.toString().trim() === 'true';
 }
 
 /**
@@ -224,6 +279,36 @@ async function probeVoice(voice: CliVoiceAdapter): Promise<VoiceProbe> {
     const argv = voice.invoke.buildArgv(prompt, { repoRoot: tmpRepo });
 
     const outcome = await runCanary(voice.invoke.bin, argv, tmpRepo);
+
+    // Sandbox REFUSAL (e.g. grok on an OrbStack Mac: symlinked docker.sock) —
+    // the CLI never started, so it could not have written anything. Mirror the
+    // panel: without the operator opt-in nothing more runs (the voice is
+    // "sandbox unavailable"); opted in, re-run ONCE without the sandbox flag
+    // (plan-mode tool policy only) from a fresh EMPTY non-git dir — where the
+    // panel's fallback runs — and canary THAT invocation, labelled
+    // tool-policy-only. Any other failure is classified as-is, never retried.
+    if (isSandboxRefusal(voice, outcome)) {
+      if (!unsandboxedOptedIn(voice)) {
+        process.stderr.write(`  [${voice.name}] OS sandbox refused to start and the opt-in is unset — not re-run\n`);
+        return { voice, verdict: 'blocked', outcome, wrote: false, sandboxUnavailable: true };
+      }
+      process.stderr.write(
+        `  [${voice.name}] OS sandbox refused to start — opted in, re-running without it (tool-policy-only, panel fallback parity)\n`,
+      );
+      const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), `outside-voices-${voice.name}-fallback-`));
+      try {
+        const fallbackArgv = voice.invoke.buildArgv(prompt, { withoutSandbox: true });
+        const fb = await runCanary(voice.invoke.bin, fallbackArgv, emptyDir);
+        if (fb.stdout.trim()) process.stderr.write(`  [${voice.name} stdout] ${fb.stdout.trim().slice(0, 500)}\n`);
+        if (fb.stderr.trim()) process.stderr.write(`  [${voice.name} stderr] ${fb.stderr.trim().slice(0, 500)}\n`);
+        const wroteFallback = fs.existsSync(path.join(emptyDir, SENTINEL_NAME));
+        const fbVerdict = classifyOutcome(fb);
+        process.stderr.write(`  [${voice.name}] verdict=${fbVerdict} wrote=${wroteFallback} isolation=tool-policy-only\n`);
+        return { voice, verdict: fbVerdict, outcome: fb, wrote: wroteFallback, isolation: 'tool-policy-only' };
+      } finally {
+        fs.rmSync(emptyDir, { recursive: true, force: true });
+      }
+    }
 
     if (outcome.stdout.trim()) {
       process.stderr.write(`  [${voice.name} stdout] ${outcome.stdout.trim().slice(0, 500)}\n`);
@@ -270,13 +355,29 @@ if (evalsEnabled) {
 describeCanary('Outside Voices — sandbox write-denial canary', () => {
   for (const voice of CLI_VOICES) {
     const probe = PROBES.get(voice.name);
-    const testName = `${voice.name}: sandbox "${voice.sandbox.flag}" denies a filesystem write`;
+    // A refusal-fallback run is labelled as what it is: NO OS sandbox, the CLI's
+    // tool policy alone — never reported as the declared sandbox holding.
+    const testName =
+      probe?.isolation === 'tool-policy-only'
+        ? `${voice.name}: tool-policy-only (OS sandbox "${voice.sandbox.flag}" refused to start; panel fallback argv) denies a filesystem write`
+        : `${voice.name}: sandbox "${voice.sandbox.flag}" denies a filesystem write`;
 
     if (!probe) {
       // Either the binary wasn't on PATH (message already emitted above) or
       // this whole describe block is itself skipped (evalsEnabled false) —
       // either way there is nothing to assert.
       test.skip(testName, () => {});
+      continue;
+    }
+
+    if (probe.sandboxUnavailable) {
+      // The panel records this voice ABSENT on such a host (no opt-in) — there
+      // is no invocation whose write-denial could be measured.
+      test.skip(
+        `${testName} — SKIPPED: OS sandbox unavailable on this host and ${voice.invoke.sandboxRefusal?.optInKey} ` +
+          'is not "true" (panel: ABSENT); write-denial NOT verified',
+        () => {},
+      );
       continue;
     }
 
@@ -373,10 +474,19 @@ describeCanary('Outside Voices — sandbox write-denial canary', () => {
   // re-introduce the flag without this file's header/report being revisited.
   // Runs whenever this file's tier gate is open (no CLI required), unlike
   // the live canaries above.
+  // Extended 2026-10-11: the sandbox-refusal fallback argv (withoutSandbox) is
+  // pinned too, and BOTH argvs must carry `--permission-mode plan` — on the
+  // fallback it is the only read-only guard left.
   test('grok: buildArgv omits --always-approve (pinned per T1 frozen contract)', () => {
     const grok = CLI_VOICES.find((v) => v.name === 'grok');
     expect(grok).toBeDefined();
     const argv = grok!.invoke.buildArgv('prompt', { repoRoot: '/tmp/example' });
-    expect(argv).not.toContain('--always-approve');
+    const fallbackArgv = grok!.invoke.buildArgv('prompt', { repoRoot: '/tmp/example', withoutSandbox: true });
+    for (const a of [argv, fallbackArgv]) {
+      expect(a).not.toContain('--always-approve');
+      expect(a.join(' ')).toContain('--permission-mode plan');
+    }
+    expect(argv.join(' ')).toContain('--sandbox read-only');
+    expect(fallbackArgv).not.toContain('--sandbox');
   });
 });

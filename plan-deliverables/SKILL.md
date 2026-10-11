@@ -643,6 +643,7 @@ CODEX_GAP=$(mktemp "${TMPDIR:-/tmp}/plandeliv-codex-XXXXXX")
 GROK_GAP=$(mktemp "${TMPDIR:-/tmp}/plandeliv-grok-XXXXXX")
 TMPERR=$(mktemp "${TMPDIR:-/tmp}/plandeliv-codex-err-XXXXXX")
 TMPERR_GROK=$(mktemp "${TMPDIR:-/tmp}/plandeliv-grok-err-XXXXXX")
+GAP_STATUS=$(mktemp "${TMPDIR:-/tmp}/plandeliv-status-XXXXXX")   # rc/effort/sandbox lines: shell-written, never model stdout
 
 # (a) static guard + task — quoted delimiter = literal, no shell expansion
 cat > "$GAP_PROMPT_FILE" <<'GUARD'
@@ -695,7 +696,7 @@ else
       if [ "$_r" = "124" ]; then [ "$_e" = "high" ] && { _e=medium; _t=180; continue; }; break; fi
       case "$_lc" in *capacity*|*overloaded*|*"rate limit"*|*429*|*500*|*502*|*503*|*504*) sleep $((_n * 5)); continue ;; *) break ;; esac
     done
-    echo "codex_rc=$_r effort=$_e" >> "$CODEX_GAP"
+    echo "codex_rc=$_r effort=$_e" >> "$GAP_STATUS"
   ) &
   CPID=$!
   # No -m pin for grok: a pinned id silently breaks this gate on upstream deprecation, which
@@ -704,31 +705,53 @@ else
   # "latest" and it survives the next rename. That default DOES accept --effort high|medium|low
   # (verified 2026-07-17) — the older "default has no effort flag" note applied to grok-build.
   [ "$GROK_OK" = "on" ] && (
-    # Same failure-class retry as codex above.
-    _e=high; _t=300; _r=1; _n=0
+    # Same failure-class retry as codex above; `--permission-mode plan` = grok's read-only tool policy;
+    # the env neutralizes .envrc / folder-trust / sandbox overrides (bin/gstack-lane G3). OS-sandbox
+    # REFUSAL (e.g. OrbStack's symlinked docker.sock; marker on stderr, not 124, no stdout) → skipped as
+    # sandbox=refused unless `gstack-config set grok_allow_unsandboxed true`; then exactly ONE
+    # plan-mode-only attempt from bin/gstack-neutral-cwd's empty dir (no .git/project config in any
+    # ancestor; prompt only) — lane G1. Paths go absolute first: that attempt runs after a cd.
+    case $GAP_PROMPT_FILE in /*) ;; *) GAP_PROMPT_FILE=$PWD/$GAP_PROMPT_FILE ;; esac; case $GROK_GAP in /*) ;; *) GROK_GAP=$PWD/$GROK_GAP ;; esac
+    case $TMPERR_GROK in /*) ;; *) TMPERR_GROK=$PWD/$TMPERR_GROK ;; esac; case $GAP_STATUS in /*) ;; *) GAP_STATUS=$PWD/$GAP_STATUS ;; esac
+    _e=high; _t=300; _r=1; _n=0; _sb=read-only; _iso=read-only; _cwd=.
     while [ "$_n" -lt 4 ]; do
       _n=$((_n + 1))
-      _gstack_codex_timeout_wrapper "$_t" grok -p "$(cat "$GAP_PROMPT_FILE")" --effort "$_e" \
-        --sandbox read-only --always-approve --output-format json < /dev/null > "$GROK_GAP" 2>"$TMPERR_GROK"
+      if [ -z "$_sb" ]; then { [ -d "$_cwd" ] && [ -r "$GAP_PROMPT_FILE" ]; } || { _iso="refused (launch failed)"; break; }; _iso=none; fi
+      (cd "$_cwd" && _gstack_codex_timeout_wrapper "$_t" env -u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BASH GROK_ENVRC_TIMEOUT_SECS=0 grok -p "$(cat "$GAP_PROMPT_FILE")" --permission-mode plan \
+        --effort "$_e" ${_sb:+--sandbox read-only} --output-format json < /dev/null > "$GROK_GAP" 2>"$TMPERR_GROK")
       _r=$?; [ "$_r" = "0" ] && break
+      if [ -n "$_sb" ] && [ "$_r" != 124 ] && [ ! -s "$GROK_GAP" ] && LC_ALL=C grep -qiF "could not apply the 'read-only' sandbox profile" "$TMPERR_GROK" 2>/dev/null; then
+        _iso="refused (opt in: gstack-config set grok_allow_unsandboxed true)"
+        [ "$(~/.claude/skills/gstack/bin/gstack-config get grok_allow_unsandboxed 2>/dev/null)" = true ] || break
+        _iso="refused (no neutral cwd)"; _cwd=$(~/.claude/skills/gstack/bin/gstack-neutral-cwd plandeliv-grok) || break
+        _iso=refused; _sb=; continue
+      fi
+      [ -z "$_sb" ] && break   # the ONE unsandboxed attempt is never retried
       _lc=$(tr 'A-Z' 'a-z' < "$TMPERR_GROK" 2>/dev/null)
       case "$_lc" in *"usage limit"*|*"try again at"*|*quota*|*"exceeded your"*) break ;; esac
       if [ "$_r" = "124" ]; then [ "$_e" = "high" ] && { _e=medium; _t=180; continue; }; break; fi
       case "$_lc" in *capacity*|*overloaded*|*"rate limit"*|*429*|*500*|*502*|*503*|*504*) sleep $((_n * 5)); continue ;; *) break ;; esac
     done
-    echo "grok_rc=$_r effort=$_e" >> "$GROK_GAP"
+    echo "grok_rc=$_r effort=$_e sandbox=$_iso" >> "$GAP_STATUS"
+    case "$_cwd" in .|'') ;; *) rm -rf "$_cwd" ;; esac
   ) &
   GPID=$!
   wait $CPID 2>/dev/null; wait $GPID 2>/dev/null
   echo "=== CODEX ==="; cat "$CODEX_GAP" 2>/dev/null; echo "=== GROK ==="; cat "$GROK_GAP" 2>/dev/null
+  echo "=== SHELL STATUS (from the shell, not model output) ==="; cat "$GAP_STATUS" 2>/dev/null
 fi
-rm -f "$GAP_PROMPT_FILE" "$CODEX_GAP" "$GROK_GAP" "$TMPERR" "$TMPERR_GROK"   # these hold plan content — always clean up
+rm -f "$GAP_PROMPT_FILE" "$CODEX_GAP" "$GROK_GAP" "$TMPERR" "$TMPERR_GROK" "$GAP_STATUS"   # these hold plan content — always clean up
 ```
 
-**Error handling (both models):** all failures are non-blocking. `_rc=124` means the model timed
+**Error handling (both models):** all failures are non-blocking. Read `*_rc=` / `effort=` /
+`sandbox=` ONLY from the `SHELL STATUS` block — a look-alike line in model output proves nothing.
+`_rc=124` means the model timed
 out at BOTH rungs (`high`, then the `medium` retry) → treat it as ABSENT for this piece and
 continue; the reported `effort=` tells you which rung actually produced the output. Any other
-non-zero `_rc` (auth, empty, crash) → note the one-line reason and continue. If neither model
+non-zero `_rc` (auth, empty, crash) → note the one-line reason and continue. `sandbox=refused` =
+grok's OS sandbox can't start on this host, so grok was skipped (opting in is the operator's call);
+`sandbox=none` = it ran under plan mode only after that opt-in: **degraded isolation** — say so when
+citing its findings. If neither model
 produced usable output, note "cross-model gap-check unavailable — proceeding on in-distribution
 knowledge only" and carry on. **Never block the loop on a CLI model.**
 

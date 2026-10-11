@@ -41,6 +41,7 @@ const PLAN_DELIVERABLES_TMPL = fs.readFileSync(path.join(ROOT, 'plan-deliverable
 const REGISTRY_SRC = fs.readFileSync(path.join(ROOT, 'lib', 'outside-voices', 'registry.ts'), 'utf-8');
 const GSTACK_PANEL = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-panel'), 'utf-8');
 const GSTACK_CONFIG = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-config'), 'utf-8');
+const GSTACK_LANE = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-lane'), 'utf-8');
 const OUTSIDE_VOICES_RESOLVER_SRC = fs.readFileSync(
   path.join(ROOT, 'scripts', 'resolvers', 'outside-voices.ts'),
   'utf-8',
@@ -290,8 +291,13 @@ describe('Outside Voices — security-field + gate-shape invariants (T10)', () =
 
   // (f) grok's verdict must be parsed from PLAIN output, not the `--output-format
   // json` envelope that buried the fence in escaped `.text` (gate FAIL P1-3).
-  test('grok uses plain output-format, not the json envelope', () => {
-    expect(VOICES.grok.invoke.extraFlags).toEqual(['--output-format', 'plain']);
+  // DELIBERATELY UPDATED 2026-10-11: extraFlags now also carries
+  // `--permission-mode plan`. grok's OS sandbox refuses to start on OrbStack Macs
+  // (symlinked /var/run/docker.sock), so plan mode — grok's read-only tool policy —
+  // is the guard BOTH the normal spawn and the sandbox-refusal fallback rely on
+  // (mirrors bin/gstack-lane's l4 review lane). (e) above is unchanged.
+  test('grok uses plain output-format, not the json envelope (+ plan-mode tool policy)', () => {
+    expect(VOICES.grok.invoke.extraFlags).toEqual(['--permission-mode', 'plan', '--output-format', 'plain']);
     expect(GSTACK_PANEL).toContain('--output-format plain');
     expect(GSTACK_PANEL).not.toContain('--output-format json');
   });
@@ -350,6 +356,126 @@ describe('Outside Voices — security-field + gate-shape invariants (T10)', () =
           `test/helpers/pricing.ts prices ${model} output at $${outRate}/MTok`,
       ).toContain(`${voice}) echo ${outRate}`);
     }
+  });
+
+  // ── grok sandbox-refusal fallback pins (2026-10-11; behavioral coverage in
+  // test/outside-voices-grok-sandbox-fallback.test.ts) ──
+
+  // (i) Three-way anti-drift: the refusal marker is byte-identical in the
+  // registry, bin/gstack-panel and bin/gstack-lane (the lane's l4 review lane
+  // owns the same fallback). A drift in any one silently disables a fallback.
+  test('(i) grok sandbox-refusal marker is byte-identical across registry / bin/gstack-panel / bin/gstack-lane', () => {
+    const literal = (src: string, name: string): string => {
+      const m = src.match(new RegExp(`^${name}="([^"\\n]*)"$`, 'm'));
+      expect(m, `${name}="…" literal not found`).not.toBeNull();
+      return (m as RegExpMatchArray)[1];
+    };
+    const marker = (VOICES.grok as any).invoke.sandboxRefusal?.marker;
+    expect(marker).toBe("could not apply the 'read-only' sandbox profile");
+    expect(literal(GSTACK_PANEL, 'PANEL_GROK_SANDBOX_REFUSAL')).toBe(marker);
+    expect(literal(GSTACK_LANE, 'GL_SANDBOX_REFUSAL')).toBe(marker);
+    // The panel matches it the way the lane does: fixed-string, case-insensitive, C locale.
+    expect(GSTACK_PANEL).toContain('LC_ALL=C grep -qiF "$PANEL_GROK_SANDBOX_REFUSAL"');
+  });
+
+  // (ii) Every EXECUTED grok spawn in bin/gstack-panel (incl. its backslash
+  // continuation lines) carries the plan-mode tool policy; exactly one carries
+  // the OS sandbox flag (the fallback is the other); none auto-approves.
+  test('(ii) every executed `grok -p` spawn in bin/gstack-panel carries --permission-mode plan; exactly one carries --sandbox read-only; none --always-approve', () => {
+    const lines = GSTACK_PANEL.split('\n');
+    const spawns: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\s*#/.test(lines[i]) || !/\bgrok\s+-p\b/.test(lines[i])) continue;
+      let cmd = lines[i];
+      for (let j = i; /\\\s*$/.test(lines[j]) && j + 1 < lines.length; j++) cmd += '\n' + lines[j + 1];
+      spawns.push(cmd);
+    }
+    expect(spawns.length).toBe(2); // sandboxed spawn + the one-shot (opted-in) refusal fallback
+    for (const s of spawns) {
+      expect(s).toContain('--permission-mode plan');
+      expect(s).toContain('--output-format plain');
+      expect(s).not.toContain('--always-approve');
+      // bin/gstack-lane G3 env neutralization, on the `grok -p` line itself.
+      const spawnLine = s.split('\n')[0];
+      expect(spawnLine).toContain('GROK_ENVRC_TIMEOUT_SECS=0');
+      expect(spawnLine).toContain('-u GROK_FOLDER_TRUST');
+      expect(spawnLine).toContain('-u GROK_SANDBOX ');
+      expect(spawnLine).toContain('-u GROK_SANDBOX_AUTO_ALLOW_BASH');
+    }
+    expect(spawns.filter((s) => s.includes('--sandbox read-only')).length).toBe(1);
+    expect(spawns.filter((s) => s.includes('--sandbox')).length).toBe(1);
+    // A refusal needs EMPTY stdout too (downgrade hardening — a run that produced
+    // output was not a start refusal), and the fallback runs from an empty dir.
+    expect(GSTACK_PANEL).toContain('[ "$rc" != "124" ] && [ ! -s "$OUT_DIR/grok.raw" ]');
+    expect(GSTACK_PANEL).toContain('(cd "$fbdir" && _gstack_codex_timeout_wrapper');
+  });
+
+  // (iii) Only grok declares the fallback; codex/gemini can never be built
+  // (and so never be run) without their sandbox flag.
+  test('(iii) codex/gemini declare no sandboxRefusal and buildArgv({withoutSandbox:true}) throws for them', () => {
+    for (const name of ['codex', 'gemini'] as const) {
+      const adapter = VOICES[name] as any;
+      expect(adapter.invoke.sandboxRefusal).toBeUndefined();
+      expect(() => adapter.invoke.buildArgv('p', { withoutSandbox: true })).toThrow();
+      expect(adapter.invoke.buildArgv('p').join(' ')).toContain(adapter.sandbox.flag);
+    }
+    expect((VOICES.grok as any).invoke.sandboxRefusal.isolation).toBe('tool-policy-only');
+    expect(() => (VOICES.grok as any).invoke.buildArgv('p', { withoutSandbox: true })).not.toThrow();
+  });
+
+  // (iv) plan-deliverables' grok gap-check (the other in-tree `grok -p` site)
+  // follows the same policy: plan mode on, no auto-approve, lane env, opt-in-gated
+  // refusal handling, and a shell-written status the model cannot forge.
+  // (behavioral coverage: test/outside-voices-grok-sandbox-fallback.test.ts)
+  test('(iv) plan-deliverables grok gap-check: no --always-approve, plan mode + lane env on the grok line, opt-in-gated refusal, shell-only status', () => {
+    expect(PLAN_DELIVERABLES_TMPL).not.toContain('--always-approve');
+    const grokLine = PLAN_DELIVERABLES_TMPL.split('\n').find((l) => /\bgrok\s+-p\b/.test(l) && !/^\s*#/.test(l));
+    expect(grokLine, 'plan-deliverables must keep an executed grok -p line').toBeDefined();
+    expect(grokLine).toContain('--permission-mode plan');
+    expect(grokLine).toContain('GROK_ENVRC_TIMEOUT_SECS=0');
+    expect(grokLine).toContain('-u GROK_FOLDER_TRUST');
+    expect(PLAN_DELIVERABLES_TMPL).toContain("could not apply the 'read-only' sandbox profile");
+    expect(PLAN_DELIVERABLES_TMPL).toContain('[ "$_r" != 124 ] && [ ! -s "$GROK_GAP" ]');
+    expect(PLAN_DELIVERABLES_TMPL).toContain('gstack-config get grok_allow_unsandboxed');
+    // Status trailers go to the shell-status file, never into model stdout files.
+    expect(PLAN_DELIVERABLES_TMPL).toContain('echo "grok_rc=$_r effort=$_e sandbox=$_iso" >> "$GAP_STATUS"');
+    expect(PLAN_DELIVERABLES_TMPL).not.toMatch(/_rc=[^\n]*>> "\$(GROK|CODEX)_GAP"/);
+  });
+
+  // (v) Opt-in key anti-drift (4-way + the recipe): the ONE key that lets grok
+  // run outside its OS sandbox is identical in the registry, the panel, the
+  // lane's `_gl_grok_unsandboxed_ok`, bin/gstack-config (default "false"), and
+  // the plan-deliverables recipe. A drift would silently make the gate unreachable
+  // (fail-closed) or read a key nobody can set.
+  test('(v) grok_allow_unsandboxed opt-in key is identical across registry / panel / lane / gstack-config / plan-deliverables', () => {
+    const key = (VOICES.grok as any).invoke.sandboxRefusal?.optInKey;
+    expect(key).toBe('grok_allow_unsandboxed');
+    expect(GSTACK_PANEL).toContain(`"$CONFIG_BIN" get ${key} 2>/dev/null)" != "true" ]`);
+    expect(extractBashFunction(GSTACK_LANE, '_gl_grok_unsandboxed_ok')).toContain(`gstack-config" get ${key} `);
+    expect(GSTACK_CONFIG).toContain(`${key}) echo "false"`);
+    expect(PLAN_DELIVERABLES_TMPL).toContain(`gstack-config get ${key} 2>/dev/null)" = true ]`);
+  });
+
+  // (vi) Neutral cwd single source: the panel fallback and the recipe both get
+  // their unsandboxed working dir from bin/gstack-neutral-cwd (git-independent
+  // ancestor walk) — never an ad-hoc mktemp, never a `git rev-parse` guard that
+  // GIT_CEILING_DIRECTORIES/GIT_DIR can blind. Its deny list covers every name
+  // bin/gstack-lane strips (GL_GROK_PROJECT_NAMES) plus `.git` and `.grokrc*`.
+  // (behavioral: test/gstack-neutral-cwd.test.ts)
+  test('(vi) panel + recipe take the unsandboxed cwd from bin/gstack-neutral-cwd, whose deny list covers the lane\'s', () => {
+    const NEUTRAL = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-neutral-cwd'), 'utf-8');
+    expect(GSTACK_PANEL).toContain('"$BIN_DIR/gstack-neutral-cwd" gstack-panel-grok');
+    expect(PLAN_DELIVERABLES_TMPL).toContain('~/.claude/skills/gstack/bin/gstack-neutral-cwd plandeliv-grok');
+    for (const src of [GSTACK_PANEL, PLAN_DELIVERABLES_TMPL]) {
+      expect(src).not.toContain('git rev-parse --is-inside-work-tree');
+      expect(src).not.toMatch(/mktemp -d[^\n]*grok/);
+    }
+    expect(NEUTRAL).not.toMatch(/^[^#\n]*\bgit\s+(rev-parse|-C|status)\b/m); // never consults git
+    const deny = (NEUTRAL.match(/^NEUTRAL_CWD_DENY_NAMES="([^"]*)"$/m) ?? [])[1]?.split(/\s+/) ?? [];
+    const laneNames = (GSTACK_LANE.match(/^GL_GROK_PROJECT_NAMES=\(([^)]*)\)$/m) ?? [])[1]?.split(/\s+/) ?? [];
+    expect(laneNames.length).toBeGreaterThan(5);
+    for (const n of [...laneNames, '.git']) expect(deny, `deny list misses ${n}`).toContain(n);
+    expect(NEUTRAL).toContain('/.grokrc*');
   });
 });
 
