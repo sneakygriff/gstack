@@ -34,7 +34,9 @@ n=$(( $(cat "$d/$name.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$d/$nam
 final="$d/calls/$name.$n.$$"; rec="$d/calls/.tmp.$name.$n.$$"; mkdir -p "$rec"
 printf '%s\\0' "$@" > "$rec/argv"
 { echo "CODEX_HOME=\${CODEX_HOME-<unset>}"
-  echo "CLAUDE_CONFIG_DIR=\${CLAUDE_CONFIG_DIR-<unset>}"; } > "$rec/env"
+  echo "CLAUDE_CONFIG_DIR=\${CLAUDE_CONFIG_DIR-<unset>}"
+  echo "GROK_ENVRC_TIMEOUT_SECS=\${GROK_ENVRC_TIMEOUT_SECS-<unset>}"
+  echo "GROK_FOLDER_TRUST=\${GROK_FOLDER_TRUST-<unset>}"; } > "$rec/env"
 compgen -e | grep -E '^(ANTHROPIC_|CLAUDE_CODE_)' > "$rec/envnames" || true
 if [ -n "\${CODEX_HOME:-}" ] && [ -d "$CODEX_HOME" ]; then
   cp "$CODEX_HOME/config.toml" "$rec/codex-config.toml" 2>/dev/null

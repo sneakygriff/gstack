@@ -397,7 +397,7 @@ describe('classification (E1: structured output only)', () => {
     step(sb, 'claude', 'echo "Error: Not logged in · Please run /login" >&2\necho "usage limit reached" >&2\nexit 1\n');
     expect(run(sb, { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low', 'claude-dir': sb.claudeDir }).status().class).toBe('error');
     step(sb, 'grok', 'echo "401 Unauthorized: usage limit" >&2\nexit 1\n');
-    expect(run(sb, { lane: 'l4', mode: 'impl', model: 'grok-4.7', effort: 'low', tier: 'T0' }).status().class).toBe('error');
+    expect(run(sb, { lane: 'l4', mode: 'review', model: 'grok-4.7', effort: 'low', cwd: wtAdd(sb, 'gate-neg', { detach: true }) }).status().class).toBe('error');
     // a successful Claude JSON whose BODY quotes a limit message stays ok
     step(sb, 'claude', `echo '{"type":"result","is_error":false,"result":"The UI shows: usage limit reached|1900000000, please login"}'\n`);
     expect(run(sb, { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low', 'claude-dir': sb.claudeDir }).code).toBe(0);

@@ -289,6 +289,28 @@ describe('autobuilder lane keys (bin/gstack-lane, /autobuilder-loop v1.7.0)', ()
     }
   });
 
+  test('grok_allow_unsandboxed defaults to false, accepts exactly true/false, and REJECTS anything else with the value preserved', () => {
+    const { dir, run } = fresh();
+    try {
+      expect(run(['get', 'grok_allow_unsandboxed'])).toMatchObject({ code: 0, out: 'false' });
+      for (const ok of ['true', 'false', 'true']) {
+        expect(run(['set', 'grok_allow_unsandboxed', ok]).code).toBe(0);
+        expect(run(['get', 'grok_allow_unsandboxed']).out).toBe(ok);
+      }
+      for (const bad of ['yes', '1', 'TRUE', 'on', ' true', 'true\nfalse', 'false\ntrue']) {
+        const r = run(['set', 'grok_allow_unsandboxed', bad]);
+        expect({ bad, code: r.code }).toEqual({ bad, code: 1 });
+        expect(r.err).toContain('not recognized');
+      }
+      expect(run(['get', 'grok_allow_unsandboxed']).out).toBe('true');
+      for (const verb of ['list', 'defaults']) expect(run([verb]).out).toMatch(/grok_allow_unsandboxed:\s+(false|true)/);
+      const yaml = fs.readFileSync(path.join(dir, 'config.yaml'), 'utf-8');
+      expect(yaml).toContain('# grok_allow_unsandboxed: false');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('both keys are enumerated by list/defaults and documented in the annotated header', () => {
     const { dir, run } = fresh();
     try {

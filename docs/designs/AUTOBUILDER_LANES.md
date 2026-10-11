@@ -22,7 +22,7 @@ account, by difficulty, in isolated worktrees — while reserving capacity for r
 | **L1** in-session | Claude sub #1 via Agent tool (shares L0 quota) | fable, opus, sonnet, haiku | Decomposition, synthesis, integration, launcher wrappers, Claude reviewer seat. Implementation only as last spillover. |
 | **L2** Claude #2 | Separate Claude account: `CLAUDE_CONFIG_DIR=<claude_overflow_dir> claude -p` (hooks/MCP disabled, explicit `--tools`, inherited tokens unset — D8) | claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5 (Fable only with operator credit opt-in) | Primary for T3; spillover for T0–T2; other-vendor reviewer for Codex-authored work (adds QUOTA, not vendor diversity). |
 | **L3** Codex | ChatGPT subscription, hermetic `CODEX_HOME` outside the run tree (D6) | gpt-6-astra, gpt-6.1-sol, gpt-6-luna (+ older) | Primary implementation pool T0–T2; gate forum member. |
-| **L4** Grok | grok.com subscription; every use gated by `grok_reviews=enabled` (D5) | grok-4.7 (CLI default = latest), grok-4.7-build-fast | Gate forum member at high effort; bounded-scope reviewer; T0/T1 spillover implementer only (not OS-contained). |
+| **L4** Grok | grok.com subscription; every use (probe, review) gated by `grok_reviews=enabled` (D5); reviews run ONLY inside grok's OS sandbox — sandbox unavailable ⇒ ABSENT unless `grok_allow_unsandboxed=true` (new key, default false) | grok-4.7 (CLI default = latest, helper-pinned) | **REVIEWER-ONLY**: gate forum member at high effort + bounded-scope reviewer; never implements — grok merges repo-checked-in `.grok/config.toml` permission grants, so it cannot be isolated for implementation (the helper rejects `--lane l4 --mode impl`). |
 
 Machine facts that shaped the design:
 - `grok --sandbox read-only` REFUSES TO START on this Mac (OrbStack symlinks `/var/run/docker.sock`
@@ -61,11 +61,11 @@ Machine facts that shaped the design:
 
 | Work type | Primary | Spillover (in order) | Effort |
 |---|---|---|---|
-| **R** rote / no-reasoning (deterministic, exact success check, no judgment) | L1 Haiku 5.5 (`model: haiku`, `effort: "low"`; read-only search may use `subagent_type: Explore`) | L2 `claude-haiku-5-5 --effort low` → L3 gpt-6-luna low → L4 grok-4.7-build-fast low (`-m` explicit); Sonnet-low only on a host with no Haiku; never Sonnet/Opus/Fable/Sol/Astra | low |
+| **R** rote / no-reasoning (deterministic, exact success check, no judgment) | L1 Haiku 5.5 (`model: haiku`, `effort: "low"`; read-only search may use `subagent_type: Explore`) | L2 `claude-haiku-5-5 --effort low` → L3 gpt-6-luna low; Sonnet-low only on a host with no Haiku; never Sonnet/Opus/Fable/Sol/Astra, never L4 | low |
 | Root orchestration | L0 | — | session |
 | Milestone decomposition, synthesis, forum consolidation | L1 Fable | L1 Opus 5.5 / 4.8 → L2 Fable/Opus | high/max |
-| **T0** mechanical (plan already contains the answer) | L3 gpt-6-luna | L2 Haiku → L1 Haiku (low) → L4 grok-4.7-build-fast | low |
-| **T1** standard (single module, clear spec) | L3 gpt-6.1-sol | L2 Sonnet → L4 grok-4.7 → L1 Sonnet | medium (Grok high) |
+| **T0** mechanical (plan already contains the answer) | L3 gpt-6-luna | L2 Haiku → L1 Haiku (low) | low |
+| **T1** standard (single module, clear spec) | L3 gpt-6.1-sol | L2 Sonnet → L1 Sonnet | medium |
 | **T2** complex (cross-module, concurrency, perf, refactor) | L3 gpt-6.1-sol | L2 Opus 5.5 → L1 Opus 5.5 | high |
 | **T3** critical (architecture, security boundary, migration, untrusted input) | L2 Opus 5.5 | L3 gpt-6-astra → L1 Opus 5.5 → L1 Fable (escalation only) | high/xhigh (Astra xhigh) |
 | Test writing | the task's implementer | that TASK's tier row (never Sonnet for T2/T3) | by tier |
@@ -80,10 +80,10 @@ Rules:
 0. **Fable is an escalation, not a default implementer** — in-session (L1) only, after Opus 5.5 at xhigh/max fell short, or for decomposition/synthesis.
 1. **Never downgrade tier to spill.** Cross-vendor tier equivalents are legal (T2: Opus 5.5 ≡ Sol high;
    T3: Opus/Fable ≡ Astra). Sonnet/Luna/Haiku are never a T2/T3 fallback without a user waiver.
-2. **L1 reserve.** The orchestrator's own subscription implements only when L2/L3/L4 are all cooling
+2. **L1 reserve.** The orchestrator's own subscription implements only when L2/L3 are all cooling
    or absent for that tier. Before admitting new implementation work, reserve the next gate's reviewers.
    **Exemption: R and T0 work on L1 Haiku** (see "Class R" below) — the operator wants small models used
-   (≈1/40 of Opus 5.5 per token); the T0 row therefore keeps `L2 Haiku → L1 Haiku → L4`.
+   (≈1/40 of Opus 5.5 per token); the T0 row therefore keeps `L2 Haiku → L1 Haiku`. L4 never implements.
 3. **Reviewer diversity.** Replace "author vendor ≠ reviewer vendor" with: fresh reviewer context
    + at least one OTHER-vendor assessment; T3 needs two other vendors — unless the operator waived the
    second seat at step 0 (then T3 = Codex + a fresh Claude seat, gates `DEGRADED`, verdict ≤
@@ -217,7 +217,8 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
   account). Prints ONE line per lane.
 - `gstack-lane run --run-dir <dir> --lane l2|l3|l4 --mode impl|review --model <id> --effort <e>
   --cwd <worktree> --prompt-file <f> --out <f> [--schema <f>] [--timeout <s>] [--retry-timeout <s>]
-  [--tier T0..T3] [--allow-cmd <prefix>]… [--allow-credit-billing]` — builds the command per lane, runs
+  [--tier T0..T3] [--allow-cmd <prefix>]… [--allow-credit-billing]` (l4: `review` only — `l4 impl` is
+  rejected) — builds the command per lane, runs
   it in its own process group under a hard deadline (on expiry kills the group AND walks the descendant
   tree, TERM then KILL after grace), classifies the outcome (`ok|throttle|quota|auth|timeout|error`),
   applies the one timeout step-down (reviews only — H14), updates `lanes.json` under an ownership-safe lock (steal only
@@ -250,24 +251,31 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
     (a coercion note in the gate record, not a failure).
   - **L4 review (D5):** `grok -p --prompt-file <f> -m <id> --reasoning-effort … --permission-mode plan
     --output-format json`, cwd MUST be a registered linked worktree under `$RUN_DIR/wt/` (verified via
-    `git worktree list --porcelain` + path prefix), one detached worktree PER forum member. Tries
-    `--sandbox read-only` first, falls back to plan-only on the "could not apply the 'read-only'
-    sandbox profile" refusal (`sandbox: none`), and fingerprints — before/after — the review worktree,
+    `git worktree list --porcelain` + path prefix), one detached worktree PER forum member. Runs with
+    `--sandbox read-only` — MANDATORY by default: on the "could not apply the 'read-only' sandbox
+    profile" refusal the lane is ABSENT (reason "sandbox unavailable"), NO plan-only fallback, unless the
+    operator opted in with `gstack-config set grok_allow_unsandboxed true` (default false), in which case
+    the fallback runs and status records `sandbox: none, unsandboxed_opt_in: true`. Before every L4
+    review the helper strips repo grok/agent config (`.grok/`, `.envrc`, case-insensitive) from the
+    review worktree and refuses a worktree with populated submodules. It fingerprints — before/after — the review worktree,
     the primary worktree AND the shared git control state (`git rev-parse --git-common-dir` → hooks/
     names+hashes, config, info/, packed-refs, `git for-each-ref`, the `core.hooksPath` target) (E5); any
     change → class `error`, `tainted: true`. Snapshots are bounded and inert (E6): `GIT_CONFIG_NOSYSTEM=1
     GIT_OPTIONAL_LOCKS=0`, `-c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c
     core.pager=cat`, `--no-ext-diff --no-textconv`, under the watchdog with a ~30 s deadline; a snapshot
     timeout ⇒ tainted (fail closed). The skill passes an immutable SHA as the review base.
-    **F8 — documented residual:** with `sandbox: none` grok runs as the same user; tamper detection (incl.
-    the lanes.json hash journal) is best-effort and a deliberately adversarial model can defeat it. Worst
-    case of a forged lanes.json is spill/cost, never a CLEAN/VERIFIED verdict (verdicts come from the
-    skill's adjudication of the member's own status + the integration worker's re-check). The helper always
-    prefers the sandbox; the operator fix is `grok update` or a non-symlinked docker.sock.
-    Never `--always-approve`. `grok_reviews=disabled` (bin default) → every L4 use (probe, review,
-    impl) refused as `absent`, reason "disabled by grok_reviews".
-  - L4 impl (T0/T1 spillover only, `--tier` required): `--permission-mode dontAsk` + explicit `--allow`
-    rules from `--allow-cmd`, cwd = task worktree.
+    **F8 — documented residual (opt-in only):** with `sandbox: none` (reachable ONLY via
+    `grok_allow_unsandboxed=true`) grok runs as the same user; tamper detection (incl. the lanes.json hash
+    journal) is best-effort and a deliberately adversarial model can defeat it. Worst case of a forged
+    lanes.json is spill/cost, never a CLEAN/VERIFIED verdict (verdicts come from the skill's adjudication
+    of the member's own status + the integration worker's re-check). The default is the sandbox or ABSENT;
+    the operator fix is `grok update` or a non-symlinked docker.sock.
+    Never `--always-approve`. `grok_reviews=disabled` (bin default) → every L4 use (probe, review)
+    refused as `absent`, reason "disabled by grok_reviews".
+  - **L4 impl: REJECTED** (`--lane l4 --mode impl` → class `error`). Grok merges the repo's checked-in
+    `.grok/config.toml` permission grants into its own, so an implementation run cannot be isolated from
+    repo-controlled policy. L4 is reviewer-only; before each L4 review the helper strips `.grok/` from the
+    disposable review worktree.
   - Model ids are arguments; the helper never hardcodes a default model except in `probe`.
 - `gstack-lane summary --out <f>` — prints ONE compact line from `<f>.status.json` (attempt_id lane
   model runtime_model class exit duration result_sha), never the CLI transcript.
@@ -320,8 +328,9 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
   high 900 s → medium 420 s (`--timeout`/`--retry-timeout`). Hermetic `CODEX_HOME`. Never `ultra`.
   The Codex seat is PRESENT only with a verified, policy-compatible `runtime_model` (rollout-sourced).
 - Grok member: latest model (helper-resolved, D4), `--reasoning-effort high` 600 s → medium 300 s,
-  `--permission-mode plan`, sandbox-then-fallback as above, in its OWN detached review worktree. L4 is
-  the ONLY seat with the `model_mismatch` concession.
+  `--permission-mode plan` + `--sandbox read-only` (mandatory; sandbox unavailable ⇒ ABSENT unless
+  `grok_allow_unsandboxed=true`), in its OWN detached review worktree. L4 is the ONLY seat with the
+  `model_mismatch` concession.
 - Both members launched by the orchestrator (D1), each into a fresh attempt dir (D3); `gstack-lane
   adjudicate` runs INVALID-before-ABSENT (see Evidence): `tainted`, any helper-written `class: error`
   (rejected / crash / non-zero exit even with `[P1]`s in the body), empty body, stale `reviewed_sha`, Codex
@@ -357,6 +366,20 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
   start on OrbStack Macs — same breakage, separate fix.
 - Adaptive cap ramp-up from measured accepted-throughput (v1.8).
 - Automatic L2 login — the operator must log in interactively once.
+
+### Documented residuals (post-merge security review)
+
+- **`--allow-cmd` vets the prefix only.** Claude's `Bash(prefix:*)` permission permits arbitrary trailing
+  arguments, so granting L2 impl a check command (`bun test`, `npm test`, …) means repo code runs as the
+  operator — inherent to "run the tests" with no OS boundary (the same exposure every L1 Agent-tool
+  implementer has). Only L3 (codex `workspace-write`) runs its checks inside an OS sandbox.
+- **Grok is reviewer-only, sandboxed by default.** grok merges repo-checked-in `.grok/config.toml`
+  permission grants, so it cannot be isolated for implementation; the helper rejects `--lane l4 --mode
+  impl`. Reviews run only inside grok's OS sandbox; when it cannot apply L4 is ABSENT — the unsandboxed
+  (plan-only) fallback is OPT-IN only (`grok_allow_unsandboxed=true`, status `sandbox: none,
+  unsandboxed_opt_in: true`) and remains not OS-contained (F8). Before each L4 review the helper strips
+  repo grok/agent config (`.grok/`, `.envrc`, matched case-insensitively) from the disposable review
+  worktree and refuses populated submodules.
 
 ### v1.7.1 follow-ups (from the pre-merge eng review)
 

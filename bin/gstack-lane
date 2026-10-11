@@ -11,7 +11,9 @@
 # Lanes
 #   l2  second Claude account  `claude -p` with CLAUDE_CONFIG_DIR=<claude dir>
 #   l3  Codex (ChatGPT sub)    `codex exec --json` with a hermetic CODEX_HOME outside the run tree
-#   l4  Grok                   `grok --prompt-file` (only when gstack-config grok_reviews=enabled)
+#   l4  Grok — REVIEWER-ONLY   `grok --prompt-file` (only when gstack-config grok_reviews=enabled);
+#                              grok cannot be isolated from repo-checked-in permission grants
+#                              (.grok/config.toml …), so it never implements (S4)
 #
 # SUBCOMMANDS
 #   gstack-lane probe --run-dir <dir> [--json] [--lanes l2,l3,l4] [--timeout <s>]
@@ -19,7 +21,9 @@
 #       Cheap "reply OK" round trip per lane, in parallel: l2 claude-haiku-5-5
 #       (plan mode, read-only tools), l3 gpt-6-luna effort low (read-only), l4 the
 #       grok default model resolved from `grok models`, passed as an explicit -m, at
-#       effort low with a deadline of at least 120 s (H11: a reachability check). These
+#       effort low with a deadline of at least 120 s (H11: a reachability check), inside
+#       grok's OS sandbox (`--sandbox read-only`; a refused sandbox marks l4 ABSENT exactly
+#       like a review does, G1). These
 #       are the ONLY built-in model defaults. A lane whose next_probe_at is still in the
 #       future is NOT probed ("still cooling"); l4 is ABSENT without any invocation
 #       when grok_reviews is not `enabled`. Merges into <dir>/lanes.json; prints one
@@ -32,7 +36,7 @@
 #       (a late ok, quota OR auth result keeps the newer state).
 #       Probe evidence: <dir>/attempts/probe-<lane>/<generated id>/out.txt.
 #
-#   gstack-lane run --run-dir <dir> --lane l2|l3|l4 --mode impl|review
+#   gstack-lane run --run-dir <dir> --lane l2|l3|l4 --mode impl|review   (l4: review only)
 #                   --effort <e> --cwd <dir> --prompt-file <f>
 #                   --out <dir>/attempts/<task>/<attempt_id>/<file>
 #                   [--model <id>] [--schema <f>] [--timeout <s>] [--retry-timeout <s>]
@@ -58,8 +62,11 @@
 #       420 when it is 900, otherwise half (min 1) — used only by the REVIEW step-down.
 #       --schema <f>: l3 --output-schema <f>; l2 and l4 --json-schema <schema json>
 #       (recorded as <schema-file> in cmd_redacted).
-#       --allow-cmd (repeatable, D9/E10): a vetted check-command prefix → Bash(<prefix>:*)
-#       on l2 --allowedTools / l4 --allow. Accepted only as a structured runner +
+#       --allow-cmd (repeatable, D9/E10): a vetted check-command prefix → l2 impl
+#       --allowedTools Bash(<prefix>:*) (Claude Code matches that word-bounded: <prefix>
+#       alone or followed by a space, every segment of a compound command checked). It
+#       has no effect on l3 (codex runs inside its own sandbox) or l4 (reviewer-only: grok
+#       never gets an allow rule). Accepted only as a structured runner +
 #       subcommand from a fixed table: bun test · bun run <s> · npm test · npm run <s> ·
 #       pnpm test · pnpm run <s> · yarn test · yarn run <s> · make <target> · cargo test ·
 #       cargo build · go test · pytest · python -m pytest · python3 -m pytest ·
@@ -68,7 +75,20 @@
 #       followed by plain arguments. Every token's basename is checked: shells,
 #       interpreters and downloaders (sh bash zsh dash ksh fish csh tcsh env eval exec
 #       python python3 node deno perl ruby php lua osascript curl wget nc ssh sudo xargs
-#       npx bunx …) are refused, as are absolute paths and any `..` path component.
+#       npx bunx …) are refused, as are absolute paths and any `..` path component, any
+#       NAME=value assignment (make SHELL=…), a <s> for `… run <s>` that is not a plain
+#       script name ([A-Za-z0-9][A-Za-z0-9:_-]*: no file paths, no dots), and EVERY option
+#       token (`-…`) except the runner's tiny safe list (S6): bun test --bail --only
+#       --coverage · go test -v -race -short -cover -count=1 -run -failfast · cargo
+#       --release --workspace --locked --offline -q · pytest -q -v -x -k · rspec
+#       --fail-fast · make -s -k -j<N> · npm/pnpm/yarn test|run --silent · swift test
+#       --parallel · xcodebuild test -scheme -quiet · gradle -q --offline · mvn -q ·
+#       dotnet test --no-build · mix test --trace. (make needs at least one target.)
+#       ONLY THE PREFIX IS VETTED: Claude's `Bash(<prefix>:*)` still lets the worker append
+#       ANY arguments at run time, and every runner executes repo/worker-written code (test
+#       files, conftest/plugins, package.json scripts, Makefile targets, build files) — so
+#       granting l2 impl any check command = arbitrary code as the operator. See RESIDUAL
+#       RISKS.
 #       Per-lane commands (process cwd = --cwd):
 #         l3 impl   env CODEX_HOME=<home> codex exec --json -C <cwd> -s workspace-write
 #                   -c approval_policy="never" -c service_tier="default" -c model="<m>"
@@ -92,10 +112,30 @@
 #                   (permissions, env such as ANTHROPIC_BASE_URL) is never loaded, and
 #                   --setting-sources is not needed (H20).
 #         l4 review grok --prompt-file <f> -m <m> --reasoning-effort <e> --sandbox read-only
-#                   --permission-mode plan [--json-schema <schema json>] --output-format json;
-#                   on "could not apply the
-#                   'read-only' sandbox profile" it reruns at once without --sandbox and
-#                   records "sandbox":"none". --cwd must be a registered, detached LINKED
+#                   --permission-mode plan [--json-schema <schema json>] --output-format json
+#                   (no --allow rule, ever; --allow-cmd is ignored). PROJECT CONFIG (S4): grok
+#                   loads repo-checked-in configuration that can grant permissions, start
+#                   MCP/LSP servers, run hooks/plugins and inject instructions, and it has no
+#                   flag to ignore it — so before the baseline snapshot every `.grok`,
+#                   `.claude`, `.cursor`, `.mcp.json`, `.cursorrules`, `.envrc`, `.grokrc*`,
+#                   AGENTS*.md and CLAUDE*.md is deleted from the DISPOSABLE review worktree at
+#                   ANY depth, matched CASE-INSENSITIVELY (G2: a macOS volume opens `.GROK`
+#                   as `.grok`) and then verified THROUGH THE FILESYSTEM (each canonical name
+#                   looked up in every directory, so a case/Unicode-folded variant the
+#                   volume resolves is caught too); anything left refuses the launch.
+#                   Status records "grok_project_config_stripped": true; the reviewed SHA
+#                   and `git diff <base>...HEAD` are unaffected. grok's environment (G3):
+#                   GROK_ENVRC_TIMEOUT_SECS=0 (disables .envrc evaluation — grok 1.0.40 has
+#                   no other per-run switch for session.load_envrc), no GROK_FOLDER_TRUST
+#                   (=0 would ungate project config), no GROK_SANDBOX[_AUTO_ALLOW_BASH].
+#                   OS SANDBOX (G1): on "could not apply the 'read-only' sandbox profile" L4
+#                   is ABSENT (class auth, exit 5, reason "grok OS sandbox unavailable on this
+#                   host; opt in with gstack-config set grok_allow_unsandboxed true") — NO
+#                   plan-only fallback — unless `gstack-config get grok_allow_unsandboxed`
+#                   is exactly `true`; then it reruns at once without --sandbox and records
+#                   "sandbox":"none", "unsandboxed_opt_in": true. SUBMODULES (G4): a review
+#                   whose review or primary worktree has an INITIALIZED submodule is refused
+#                   (its own filters/hooks are out of reach). --cwd must be a registered, detached LINKED
 #                   worktree directly under <run-dir>/wt/ (one per forum member). TAINT
 #                   (E5/E6): before and after, a deadline-bounded, inert snapshot
 #                   fingerprints the shared git control state (common dir config, HEAD,
@@ -111,16 +151,15 @@
 #                   type+mode bits (F5: chmod +x on a disabled hook shows). Any change,
 #                   or a snapshot that fails/times out → class error, "tainted": true
 #                   (the review is INVALID; a failed pre-snapshot refuses to launch).
-#         l4 impl   grok --prompt-file <f> -m <m> --reasoning-effort <e> --permission-mode
-#                   dontAsk --allow Read --allow Edit --allow Write [--allow Bash(<vetted>:*)…]
-#                   [--json-schema <schema json>] --output-format json (T0/T1 only)
+#         l4 impl   NONE — a usage error (exit 2, nothing invoked): L4 is reviewer-only (S4).
 #       `--always-approve` is NEVER passed. `--schema` reaches grok as --json-schema (H13;
 #       grok 1.0.40: "JSON Schema for structured output").
 #       Policy refusals (class "error", exit 1, status written with "rejected"):
 #         l3 effort ultra|max; efforts outside l2 low|medium|high|xhigh|max ·
 #         l3 none|minimal|low|medium|high|xhigh · l4 low|medium|high|xhigh; l2 Fable
-#         (claude-fable-* / fable) without --allow-credit-billing; l4 impl without
-#         --tier T0|T1; l4 review outside a registered detached <run-dir>/wt/<id>;
+#         (claude-fable-* / fable) without --allow-credit-billing; l4 review outside a
+#         registered detached <run-dir>/wt/<id>; grok project config that cannot be
+#         stripped from the review worktree;
 #         any --cwd that is, contains, or lies inside the hermetic CODEX_HOME.
 #       Lane refusals (nothing invoked): grok_reviews≠enabled → l4 absent (class auth,
 #       exit 5, reason "disabled by grok_reviews"); lane cooling with next_probe_at in
@@ -204,7 +243,8 @@
 #         class ok, but: lane ≠ seat (codex=l3, grok=l4) → seat_mismatch; mode ≠ review →
 #           not_a_review; exit_code or CLI exit ≠ 0 → nonzero_exit; status out/attempt_id ≠
 #           this --out → attempt_mismatch; reviewed_sha ≠ --reviewed-sha → stale_sha; grok
-#           without taint_checked → taint_unchecked; nothing published / whitespace-only
+#           without taint_checked → taint_unchecked; grok without grok_project_config_stripped
+#           → grok_config_not_stripped (S4); nothing published / whitespace-only
 #           review text → empty_body; no completion marker → no-completion-marker (V4: the
 #           review text's LAST non-empty line must be exactly `REVIEW_COMPLETE: findings=<n>`,
 #           n = its [P0]–[P3] finding count, optionally wrapped in ` ** or __ — an "I could
@@ -243,7 +283,9 @@
 #       refs/replace substitution can hide history), core.hooksPath=/dev/null + commit
 #       --no-verify, no fsmonitor, no signing or signature verification (gpg.program=
 #       /usr/bin/false, log.showSignature=false), no auto-gc, and every configured
-#       filter.<name> made a pass-through (clean/smudge=cat, process=, required=false) — no
+#       filter.<name> made a pass-through (clean/smudge=cat, process=, required=false — set
+#       through git's GIT_CONFIG_COUNT/KEY/VALUE environment interface, never `-c`, so a
+#       filter NAME containing `=` cannot escape it) — no
 #       repo-controlled command runs.
 #       Both: `git add -A`, then REFUSE (exit 1, index reset, nothing committed, offenders
 #       reported, no result_sha) when any path touched by ANY commit in <base>..HEAD —
@@ -335,7 +377,9 @@
 #                               `commit --out`), published (bool), lane_update
 #                               (applied|none|pending), cmd_redacted (stdin prompt →
 #                               <prompt-file>, schema → <schema-file>), attempts[] (each
-#                               with its inv-<n> dir), lane_status{}.
+#                               with its inv-<n> dir), lane_status{}; l4 reviews also
+#                               grok_project_config_stripped (true) and, when the
+#                               opted-in fallback ran, unsandboxed_opt_in (true).
 #   <out>.stdout.log / .stderr.log   final invocation's raw streams
 #   <out>.logs/inv-<n>/{stdout,stderr,out,rollout.jsonl}   every invocation; plus snapshot.* and grok-models.*
 #   ${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/<task>+<attempt_id>-inv<n>/   per-invocation
@@ -382,12 +426,54 @@
 # autoload, no bunfig.toml preload) and with every BUN_* variable (BUN_OPTIONS can
 # inject --preload), NODE_OPTIONS and NODE_PATH removed from its environment.
 #
+# ARGUMENT HYGIENE (security triage): every externally supplied value is validated before
+# use and passed as its own argv element — ids ([A-Za-z0-9][A-Za-z0-9._-]{0,63}), models
+# ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}: no quote/newline can reach codex's `-c key="value"`
+# TOML), efforts (the lane's fixed list), --allow-cmd (above; no comma/paren/quote can
+# reach claude's --allowedTools list), --base revisions ([A-Za-z0-9_][A-Za-z0-9._/@{}^~-]*,
+# never a leading `-`; the resolved id must be hex), --lanes (l2,l3,l4), and no
+# path-like argument (--run-dir --cwd --repo --out --prompt-file --schema --claude-dir)
+# may contain a control character (a newline in --run-dir would forge a stdout line) —
+# checked on the value AND again on the canonical path after symlink resolution (S5:
+# `_gl_realdir`/`_gl_realfile` treat a resolved path holding a control character as
+# unresolvable).
+#
+# GIT HYGIENE (S1–S3): every git process the helper starts on a repo runs with
+# GIT_CONFIG_NOSYSTEM, GIT_NO_REPLACE_OBJECTS, GIT_NO_LAZY_FETCH=1 (a partial clone's
+# missing object fails the operation instead of fetching it), GIT_TERMINAL_PROMPT=0, no
+# GIT_SSH*/GIT_PROXY_COMMAND/GIT_ASKPASS/GIT_EXTERNAL_DIFF from the caller,
+# protocol.allow=never and core.sshCommand=false (no transport, ever), no hooks, no
+# fsmonitor, and — through git's GIT_CONFIG_COUNT/KEY/VALUE environment interface — every
+# configured filter.<name> (including the EMPTY name `[filter ""]` and names with `=`) made
+# a pass-through and every diff.<driver> disarmed (command=false, textconv=cat,
+# trustExitCode=false). The neutralization is VERIFIED per name with `git config --get`;
+# a driver git cannot be made to report neutralized refuses the operation. Every diff it
+# runs passes --no-ext-diff --no-textconv --ignore-submodules=all, status passes
+# --ignore-submodules=all, and submodule.recurse=false / diff.ignoreSubmodules=all /
+# status.submoduleSummary=false are set (G4). An INITIALIZED submodule is a separate
+# repository whose own config the parent's neutralization cannot reach — and `git add`
+# runs `git status` inside it — so worktree add, commit, a non-forced worktree rm and L4
+# reviews refuse a worktree that has one (non-empty <common>/modules, or a gitlink whose
+# path holds a .git).
+#
 # RESIDUAL RISKS (documented, not solved)
+#   - --allow-cmd is a convenience gate, not containment (S6): only the PREFIX is vetted —
+#     Claude's `Bash(<prefix>:*)` permits arbitrary trailing arguments at run time — and
+#     every check command runs repo/worker-written code (a test file, conftest.py, a
+#     package.json script, a Makefile target; env prefixes such as BUN_OPTIONS are stripped
+#     by the rule matcher before matching). An l2 impl worker granted ANY check command can
+#     therefore run arbitrary code as the operator; this is inherent to "run the tests".
+#     Only l3 runs its checks inside an OS sandbox (codex -s workspace-write). Grant check
+#     commands to l2 only for repos whose test/build code you would run yourself.
+#   - L4 (grok) is reviewer-only and reads no project config from its review worktree, but
+#     the operator's OWN grok config (~/.grok/config.toml, ~/.grok/trusted_folders.toml,
+#     plugins, hooks) still applies — keep it free of broad allow rules.
 #   - A process that fully daemonizes (double fork + setsid, re-parented to init) AND
 #     detaches within the same one-second sampling window escapes both the group kill
 #     and the descendant sampling.
-#   - An UNSANDBOXED grok (sandbox refused → "sandbox":"none") runs as the SAME USER: it
-#     can write any file the user can write. Tamper detection (worktree/control snapshots,
+#   - An UNSANDBOXED grok — only with the explicit opt-in grok_allow_unsandboxed=true
+#     (sandbox refused → "sandbox":"none", "unsandboxed_opt_in": true) — runs as the SAME
+#     USER: it can write any file the user can write. Tamper detection (worktree/control snapshots,
 #     the lanes.json hash journal, the wt-meta base/control records) is BEST-EFFORT and a
 #     deliberately adversarial model can defeat it (e.g. by also appending to the journal,
 #     or by editing other attempts' status files). Worst case of a forged lanes.json is
@@ -395,6 +481,8 @@
 #     from `adjudicate` over each member's own status file plus the integration
 #     worker's independent re-check. The helper always tries the OS sandbox first; the
 #     operator fix is `grok update` or a docker.sock that is not a symlink.
+#   - Repositories with initialized submodules are not supported by lane worktrees,
+#     commit or L4 reviews (G4, fail closed).
 #   - Filters are pass-throughs everywhere the helper runs git, so a repo that relies on
 #     one (git-lfs, git-crypt) gets its worktrees checked out as STORED (pointers /
 #     ciphertext), and a task commit that stages such a path is refused (filter_path=)
@@ -821,6 +909,8 @@ function finalize() {
   if (E.GL_REJECTED) s.rejected = E.GL_REJECTED;
   if (E.GL_SKIPPED) s.skipped = E.GL_SKIPPED;
   if (E.GL_NOTE) s.note = E.GL_NOTE;
+  if (E.GL_GROK_STRIPPED === "1") s.grok_project_config_stripped = true;
+  if (E.GL_UNSANDBOXED_OPT_IN === "1") s.unsandboxed_opt_in = true;
   if (E.GL_STATUS_FILE) writeAtomic(E.GL_STATUS_FILE, s);
   console.log(lineFor(s));
 }
@@ -903,6 +993,7 @@ function adjudicate() {
   if (s.out !== E.GL_OUT_REAL || (E.GL_OUT_ATTEMPT && s.attempt_id !== E.GL_OUT_ATTEMPT)) return say("INVALID", "attempt_mismatch", 0, rm);
   if (s.reviewed_sha !== E.GL_REVIEWED_SHA) return say("INVALID", "stale_sha", 0, rm);
   if (lane === "l4" && s.taint_checked !== true) return say("INVALID", "taint_unchecked", 0, rm);
+  if (lane === "l4" && s.grok_project_config_stripped !== true) return say("INVALID", "grok_config_not_stripped", 0, rm);
   let body = null;
   try { body = s.published === true ? fs.readFileSync(E.GL_OUT_REAL, "utf8") : null; } catch { body = null; }
   const text = body === null ? null : reviewText(lane, body);
@@ -923,6 +1014,7 @@ function adjudicate() {
     // L4: a family mismatch is a coercion NOTE, never a failure.
     const req = E.GL_REQ_MODEL || s.requested_model || "";
     if (s.model_mismatch === true || (req && rm && family(req) !== family(rm))) notes.push("model_mismatch");
+    if (s.sandbox === "none") notes.push("unsandboxed");
   }
   const p1 = lines.filter((l) => P1_LINE.test(l)).length;
   if (Number(marker[1]) !== lines.filter((l) => FINDING_LINE.test(l)).length) notes.push("findings_count_mismatch");
@@ -1041,11 +1133,30 @@ _gl_iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _gl_now() { date +%s; }
 _gl_is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 _gl_valid_id() { [[ "${1:-}" =~ $GL_ID_RE ]]; }
-_gl_realdir() { (cd "$1" 2>/dev/null && pwd -P); }
+# Path-like arguments never carry control characters: a newline in --run-dir would surface in
+# the line-oriented stdout (`<path>` then `base_sha=`) and forge a line (security triage).
+_gl_no_ctl() { # <flag> <value> — usage error on any control character
+  case "$2" in *[[:cntrl:]]*) _gl_usage_err "$1 must not contain control characters" ;; esac
+}
+# A git revision as the orchestrator passes it (sha, branch, tag, HEAD~n, refs/…): never
+# leading `-` (no option injection), no whitespace/shell/`:` syntax, at most 255 chars.
+GL_REV_RE='^[A-Za-z0-9_][A-Za-z0-9._/@{}^~-]{0,254}$'
+_gl_valid_rev() { [[ "${1:-}" =~ $GL_REV_RE ]]; }
+# S5: a path is canonicalized THEN validated — a symlink can point at a target whose name
+# carries a newline (which would forge a stdout line), so a resolved path containing ANY
+# control character is treated as unresolvable (return 1, nothing printed).
+_gl_realdir() {
+  local r
+  r="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  case "$r" in ''|*[[:cntrl:]]*) return 1 ;; esac
+  printf '%s\n' "$r"
+}
 _gl_realfile() { # existing parent resolved; the leaf itself is kept as given
-  local d
+  local d b
   d="$(_gl_realdir "$(dirname "$1")")" || return 1
-  printf '%s/%s\n' "$d" "$(basename "$1")"
+  b="$(basename "$1")"
+  case "$b" in *[[:cntrl:]]*) return 1 ;; esac
+  printf '%s/%s\n' "$d" "$b"
 }
 _gl_ms_to_s() { printf '%d.%03d' $(( $1 / 1000 )) $(( $1 % 1000 )); }
 
@@ -1215,8 +1326,30 @@ _gl_denied_basename() { # <token> → 0 when its basename is a shell/interpreter
   esac
   return 1
 }
+# S6: an option token inside a vetted prefix is accepted only from the runner's tiny SAFE
+# list (verbosity, fail-fast, selection, release/offline switches). Everything else that
+# starts with `-` is refused — `make -f/-C`, `pytest -p/-o/-c`, `go test -exec/-vet/-ldflags`,
+# `bun test --watch/--preload`, `cargo -Z…`, `npm --prefix`, `xcodebuild -project` …
+_gl_safe_opt() { # <runner key> <token> → 0 when safe
+  case "$1:$2" in
+    bun-test:--bail|bun-test:--only|bun-test:--coverage) return 0 ;;
+    go-test:-v|go-test:-race|go-test:-short|go-test:-cover|go-test:-count=1|go-test:-run|go-test:-failfast) return 0 ;;
+    cargo:--release|cargo:--workspace|cargo:--locked|cargo:--offline|cargo:-q) return 0 ;;
+    pytest:-q|pytest:-v|pytest:-x|pytest:-k) return 0 ;;
+    rspec:--fail-fast) return 0 ;;
+    make:-s|make:-k) return 0 ;;
+    js-test:--silent|js-run:--silent) return 0 ;;
+    swift:--parallel) return 0 ;;
+    xcodebuild:-scheme|xcodebuild:-quiet) return 0 ;;
+    gradle:-q|gradle:--offline) return 0 ;;
+    mvn:-q) return 0 ;;
+    dotnet:--no-build) return 0 ;;
+    mix:--trace) return 0 ;;
+  esac
+  [ "$1" = make ] && [[ "$2" =~ ^-j[0-9]{1,3}$ ]]
+}
 _gl_vet_allow_cmd() { # <prefix> → 0 when it is a table-listed runner + subcommand
-  local c="$1" n i tok skip=0
+  local c="$1" n i tok skip=0 key="" plain=0
   local -a t
   [[ "$c" =~ ^[A-Za-z0-9./][A-Za-z0-9\ ._/:=@+-]*$ ]] || return 1
   case "$c" in *"  "*|*" ") return 1 ;; esac
@@ -1224,22 +1357,31 @@ _gl_vet_allow_cmd() { # <prefix> → 0 when it is a table-listed runner + subcom
   n=${#t[@]}
   local a0="${t[0]:-}" a1="${t[1]:-}" a2="${t[2]:-}"
   case "$a0 $a1 $a2" in
-    "python -m pytest"|"python3 -m pytest"|"uv run pytest"|"bundle exec rspec") skip=3 ;;
+    "python -m pytest"|"python3 -m pytest"|"uv run pytest") skip=3; key=pytest ;;
+    "bundle exec rspec") skip=3; key=rspec ;;
   esac
   if [ "$skip" = 0 ]; then
     case "$a0 $a1" in
-      "bun test"|"npm test"|"pnpm test"|"yarn test"|"cargo test"|"cargo build"|"go test"|"swift test"|"xcodebuild test"|"./gradlew test"|"gradle test"|"mvn test"|"dotnet test"|"mix test") skip=2 ;;
+      "bun test") skip=2; key=bun-test ;;
+      "npm test"|"pnpm test"|"yarn test") skip=2; key=js-test ;;
+      "cargo test"|"cargo build") skip=2; key=cargo ;;
+      "go test") skip=2; key=go-test ;;
+      "swift test") skip=2; key=swift ;;
+      "xcodebuild test") skip=2; key=xcodebuild ;;
+      "./gradlew test"|"gradle test") skip=2; key=gradle ;;
+      "mvn test") skip=2; key=mvn ;;
+      "dotnet test") skip=2; key=dotnet ;;
+      "mix test") skip=2; key=mix ;;
       "bun run"|"npm run"|"pnpm run"|"yarn run")
-        [[ "$a2" =~ ^[A-Za-z0-9][A-Za-z0-9:._-]*$ ]] || return 1
+        # a script NAME only — `bun run x.ts` / `./build` would run a file instead
+        [[ "$a2" =~ ^[A-Za-z0-9][A-Za-z0-9:_-]*$ ]] || return 1
         _gl_denied_basename "$a2" && return 1
-        skip=3 ;;
+        skip=3; key=js-run ;;
       *)
         case "$a0" in
-          pytest|rspec) skip=1 ;;
-          make)
-            [[ "$a1" =~ ^[A-Za-z0-9][A-Za-z0-9:._-]*$ ]] || return 1
-            _gl_denied_basename "$a1" && return 1
-            skip=2 ;;
+          pytest) skip=1; key=pytest ;;
+          rspec) skip=1; key=rspec ;;
+          make) skip=1; key="make" ;;   # targets (and safe options) follow
           *) return 1 ;;
         esac
         ;;
@@ -1250,15 +1392,30 @@ _gl_vet_allow_cmd() { # <prefix> → 0 when it is a table-listed runner + subcom
   i="$skip"
   while [ "$i" -lt "$n" ]; do
     tok="${t[$i]}"
+    case "$tok" in
+      -*) _gl_safe_opt "$key" "$tok" || return 1 ;;          # S6: options only from the safe list
+      *) plain=$(( plain + 1 )) ;;
+    esac
     case "$tok" in /*) return 1 ;; esac          # absolute paths point outside the worktree
     case "/$tok/" in */../*) return 1 ;; esac     # so does any `..` path component (./... is fine)
     _gl_denied_basename "$tok" && return 1
+    [[ "$tok" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && return 1   # NAME=value (make SHELL=…, CC=…)
     i=$(( i + 1 ))
   done
-  return 0
+  [ "$key" != make ] || [ "$plain" -ge 1 ]       # make needs at least one target
 }
 
 # ── lane-specific setup ───────────────────────────────────────────────────────
+# G3: the environment of EVERY grok process. GROK_ENVRC_TIMEOUT_SECS=0 disables `.envrc`
+# evaluation (grok 1.0.40 envrc.rs: ".envrc evaluation disabled by zero"; session.load_envrc
+# has no CLI/env override); GROK_FOLDER_TRUST is removed (=0 UNGATES project MCP/LSP/hooks/
+# instructions/skills), as are GROK_SANDBOX / GROK_SANDBOX_AUTO_ALLOW_BASH (the helper picks
+# the sandbox profile itself).
+GL_GROK_ENV=(-u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BASH GROK_ENVRC_TIMEOUT_SECS=0)
+# G1: running grok OUTSIDE its OS sandbox is an explicit operator opt-in (fail closed).
+_gl_grok_unsandboxed_ok() { # gstack-config grok_allow_unsandboxed must be exactly "true"
+  [ "$("$GL_BIN_DIR/gstack-config" get grok_allow_unsandboxed 2>/dev/null || true)" = true ]
+}
 _gl_grok_enabled() { # gstack-config grok_reviews must be exactly "enabled" (fail closed)
   local v
   v="$("$GL_BIN_DIR/gstack-config" get grok_reviews 2>/dev/null || true)"
@@ -1426,28 +1583,85 @@ _gl_primary_wt() { # <dir> → realpath of the repo's primary (main) worktree
 }
 
 # ── inert, bounded taint snapshots (E5/E6) ────────────────────────────────────
-_gl_inert_git() { # git with every configured external program disabled
-  GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat \
+# The environment of EVERY inert git process (S3: no transport, ever): lazy fetching of
+# missing objects is off (GIT_NO_LAZY_FETCH), the caller's ssh/proxy/askpass/external-diff
+# programs are removed, no system config, no replace refs, no optional locks, no prompts.
+GL_GIT_ENV=(-u GIT_SSH -u GIT_SSH_COMMAND -u GIT_SSH_VARIANT -u GIT_PROXY_COMMAND -u GIT_ASKPASS -u SSH_ASKPASS
+            -u GIT_EXTERNAL_DIFF GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat)
+_gl_inert_git() { # git with every configured external program disabled (+ GL_FILTER_ENV, when set)
+  env "${GL_GIT_ENV[@]}" ${GL_FILTER_ENV[@]+"${GL_FILTER_ENV[@]}"} \
     git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat \
-        -c core.untrackedCache=false "$@"
+        -c core.untrackedCache=false -c protocol.allow=never -c core.sshCommand=false \
+        -c submodule.recurse=false -c diff.ignoreSubmodules=all "$@"
 }
-# _gl_filter_off <dir> → GL_FILTER_OFF: `-c filter.<n>.{clean,smudge}=cat -c filter.<n>.process=
-# -c filter.<n>.required=false` for EVERY filter name git config reports for <dir> (global,
-# local, config.worktree, include.path files — no system config). An empty `process` makes
-# git skip the driver entirely, so the content passes through untouched.
-GL_FILTER_OFF=()
-_gl_filter_off() { # <dir>... — the UNION over every dir's config context (conditional includes
-  local d k n seen=" "                         # such as gitdir:/onbranch: resolve per worktree)
-  GL_FILTER_OFF=()
+# _gl_filter_off <dir>... → GL_FILTER_ENV: git ENVIRONMENT config entries
+# (`GIT_CONFIG_COUNT=<n> GIT_CONFIG_KEY_<i>=… GIT_CONFIG_VALUE_<i>=…`) that, for the UNION of
+# the dirs' config contexts (global, local, config.worktree, include.path/includeIf files —
+# no system config; conditional includes resolve per worktree):
+#   - make EVERY filter.<name> a pass-through: clean/smudge=cat, process= (empty: git skips
+#     the driver), required=false — including the EMPTY name (`[filter ""]`, selected by
+#     `a.txt filter=`, S1) and names containing `=` (never passed through `-c`, which splits
+#     at the first `=`);
+#   - disarm EVERY diff.<driver>: command=false, textconv=cat, trustExitCode=false,
+#     cachetextconv=false (S2; every diff the helper runs also passes --no-ext-diff
+#     --no-textconv);
+#   - forbid every transport: protocol.allow=never, core.sshCommand=false (S3).
+# The count is always set (it clears inherited GIT_CONFIG_COUNT entries). Then it VERIFIES,
+# per name, that git now resolves exactly those values; any name git cannot represent or
+# any mismatch returns 1 — callers refuse (fail closed).
+GL_FILTER_ENV=()
+_gl_filter_off() {
+  local d k rest sec sub i=0 seen=$'\n' fnames=$'\n' dnames=$'\n' kv
+  GL_FILTER_ENV=()
+  _gl_fenv() { GL_FILTER_ENV+=("GIT_CONFIG_KEY_$i=$1" "GIT_CONFIG_VALUE_$i=$2"); i=$(( i + 1 )); }
+  _gl_fenv protocol.allow never
+  _gl_fenv core.sshCommand false
+  _gl_fenv submodule.recurse false          # G4: never descend into a submodule repository
+  _gl_fenv diff.ignoreSubmodules all
+  _gl_fenv status.submoduleSummary false
   for d in "$@"; do
     while IFS= read -r k; do
-      n="${k#filter.}"; n="${n%.*}"            # filter.<name>.<key> → <name> (a name may contain dots)
-      [ -n "$n" ] && [ "$n" != "$k" ] || continue
-      case "$seen" in *" $n "*) continue ;; esac
-      seen="$seen$n "
-      GL_FILTER_OFF+=(-c "filter.$n.clean=cat" -c "filter.$n.smudge=cat" -c "filter.$n.process=" -c "filter.$n.required=false")
-    done < <(GIT_CONFIG_NOSYSTEM=1 git -C "$d" config --name-only --get-regexp '^filter\.' 2>/dev/null)
+      sec="${k%%.*}"; rest="${k#*.}"
+      case "$rest" in *.*) ;; *) continue ;; esac   # no subsection (diff.renames …): not a driver
+      sub="${rest%.*}"                              # filter.<sub>.<key>: may be empty, may hold dots or =
+      case "$seen" in *$'\n'"$sec:$sub"$'\n'*) continue ;; esac
+      seen="$seen$sec:$sub"$'\n'
+      if [ "$sec" = filter ]; then
+        fnames="$fnames$sub"$'\n'
+        for kv in clean=cat smudge=cat process= required=false; do _gl_fenv "filter.$sub.${kv%%=*}" "${kv#*=}"; done
+      else
+        dnames="$dnames$sub"$'\n'
+        for kv in command=false textconv=cat trustExitCode=false cachetextconv=false; do _gl_fenv "diff.$sub.${kv%%=*}" "${kv#*=}"; done
+      fi
+    done < <(GIT_CONFIG_NOSYSTEM=1 git -C "$d" config --name-only --get-regexp '^(filter|diff)\.' 2>/dev/null)
   done
+  GL_FILTER_ENV=("GIT_CONFIG_COUNT=$i" ${GL_FILTER_ENV[@]+"${GL_FILTER_ENV[@]}"})
+  # Verify against the first dir's context (a name from another context was added above).
+  _gl_fget() { env "${GL_GIT_ENV[@]}" "${GL_FILTER_ENV[@]}" git -C "$1" config --get "$2" 2>/dev/null; }
+  d="${1:-.}"
+  while IFS= read -r sub; do
+    [ "$(_gl_fget "$d" "filter.$sub.smudge")" = cat ] && [ "$(_gl_fget "$d" "filter.$sub.clean")" = cat ] \
+      && [ -z "$(_gl_fget "$d" "filter.$sub.process")" ] || return 1
+  done < <(printf '%s' "${fnames#$'\n'}")
+  while IFS= read -r sub; do
+    [ "$(_gl_fget "$d" "diff.$sub.command")" = false ] || return 1
+  done < <(printf '%s' "${dnames#$'\n'}")
+  return 0
+}
+# G4: an INITIALIZED submodule is a separate repository with its own config (filters,
+# hooks, fsmonitor …) that the helper's neutralization of the parent cannot reach, and git
+# descends into it for status/diff. Lane worktree operations and L4 reviews refuse a
+# worktree that has one (fail closed): a non-empty <common>/modules/, or a gitlink whose
+# path holds a .git.
+_gl_has_submodules() { # <worktree> → 0 when it has an initialized submodule
+  local d="$1" common e p
+  common="$(_gl_inert_git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$(ls -A "$common/modules" 2>/dev/null)" ] && return 0
+  while IFS= read -r -d '' e; do
+    case "$e" in 160000\ *) p="${e#*$'\t'}"; { [ -e "$d/$p/.git" ] || [ -L "$d/$p/.git" ]; } && return 0 ;; esac
+  done < <(_gl_inert_git -C "$d" ls-files -s -z 2>/dev/null)
+  return 1
 }
 # V1: an `includeIf "onbranch:…"` in the repo's OWN config (local/worktree, following include
 # files) activates only once a branch is checked out — config that cannot be enumerated
@@ -1538,10 +1752,11 @@ cmd_snapshot() {
   fi
   for d in "$@"; do
     echo "== tree $d"
-    _gl_filter_off "$d"   # H3: no clean/smudge/process filter runs inside a snapshot
-    _gl_inert_git ${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"} -C "$d" status --porcelain=v2 --branch -uall 2>/dev/null || exit 1
-    _gl_inert_git ${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"} -C "$d" diff HEAD --binary --no-ext-diff --no-textconv 2>/dev/null | git hash-object --no-filters --stdin 2>/dev/null
-    ( cd "$d" && _gl_inert_git ${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"} ls-files -o --exclude-standard 2>/dev/null | git hash-object --no-filters --stdin-paths 2>/dev/null )
+    _gl_filter_off "$d" || exit 1   # H3/S1/S2: no filter or diff driver runs inside a snapshot (GL_FILTER_ENV)
+    _gl_inert_git -C "$d" status --porcelain=v2 --branch -uall --ignore-submodules=all 2>/dev/null || exit 1
+    # S3: a missing object (partial clone; lazy fetch is off) fails the pipeline → the snapshot fails closed
+    _gl_inert_git -C "$d" diff HEAD --binary --no-ext-diff --no-textconv --ignore-submodules=all 2>/dev/null | git hash-object --no-filters --stdin 2>/dev/null || exit 1
+    ( cd "$d" && _gl_inert_git ls-files -o --exclude-standard 2>/dev/null | git hash-object --no-filters --stdin-paths 2>/dev/null ) || exit 1
   done
   exit 0
 }
@@ -1552,10 +1767,48 @@ _gl_snap() { # <before-file|-> <outfile> <dir>... → 0 when the bounded snapsho
   [ "$GL_RC" -eq 0 ]
 }
 
+# S4: grok loads repo-checked-in PROJECT configuration that can grant permissions, start
+# MCP/LSP servers, run hooks or plugins, and inject instructions — `.grok/` (config.toml
+# permission rules + MCP servers, hooks/, plugins/, skills/, commands/, agents/, rules/,
+# lsp.json) and its Claude/Cursor-compatibility sources (`.claude/` settings, hooks,
+# skills, rules, CLAUDE*.md; `.cursor/` hooks, mcp.json, rules; `.mcp.json`;
+# `.cursorrules`) plus AGENTS.md / CLAUDE.md instruction files, at every directory level
+# (grok 1.0.40 docs). Folder trust gates most of it, but there is no flag that turns
+# project config off, so the helper deletes all of it from the disposable review worktree.
+# G2: every name is matched CASE-INSENSITIVELY (macOS volumes resolve `.GROK` as `.grok`),
+# including `.envrc` (G3), and the result is then verified THROUGH THE FILESYSTEM: in every
+# directory, each canonical name is looked up with `[ -e ]`, so a case- or Unicode-folded
+# variant (`.groK` with KELVIN SIGN) that the volume resolves as `.grok` is caught and removed
+# too. Anything left → the launch is refused.
+GL_GROK_PROJECT_FIND=( \( -iname .grok -o -iname .claude -o -iname .cursor -o -iname .mcp.json -o -iname .cursorrules
+  -o -iname .envrc -o -iname '.grokrc*' -o -iname 'agents*.md' -o -iname 'claude*.md' \) )
+GL_GROK_PROJECT_NAMES=(.grok .claude .cursor .mcp.json .cursorrules .envrc .grokrc AGENTS.md AGENTS.local.md CLAUDE.md CLAUDE.local.md)
+_gl_grok_fs_leftover() { # <review worktree> [rm] → 0 when a canonical name resolves anywhere (removed with "rm")
+  local wt="$1" mode="${2:-}" d n hit=1
+  while IFS= read -r -d '' d; do
+    for n in "${GL_GROK_PROJECT_NAMES[@]}"; do
+      if [ -e "$d/$n" ] || [ -L "$d/$n" ]; then
+        hit=0
+        [ "$mode" = rm ] && rm -rf -- "${d:?}/$n" 2>/dev/null
+      fi
+    done
+  done < <(find "$wt" -path "$wt/.git" -prune -o -type d -print0 2>/dev/null)
+  return "$hit"
+}
+_gl_strip_grok_project_config() { # <review worktree> → 0 when none of it remains
+  local wt="$1" p
+  while IFS= read -r -d '' p; do
+    case "$p" in "$wt"/*) rm -rf -- "$p" 2>/dev/null ;; esac
+  done < <(find "$wt" -path "$wt/.git" -prune -o "${GL_GROK_PROJECT_FIND[@]}" -prune -print0 2>/dev/null)
+  _gl_grok_fs_leftover "$wt" rm
+  [ -z "$(find "$wt" -path "$wt/.git" -prune -o "${GL_GROK_PROJECT_FIND[@]}" -print 2>/dev/null | head -n 1)" ] \
+    && ! _gl_grok_fs_leftover "$wt"
+}
+
 # grok default model (D4): the `Default model:` line of `grok models`, deadline-bounded.
 _gl_grok_resolve_model() {
   local so="$GL_LOG_DIR/grok-models.stdout" se="$GL_LOG_DIR/grok-models.stderr" m
-  _gl_bounded "$GL_GROK_MODELS_TIMEOUT_S" /dev/null "$so" "$se" "$GL_RUN_DIR" grok models
+  _gl_bounded "$GL_GROK_MODELS_TIMEOUT_S" /dev/null "$so" "$se" "$GL_RUN_DIR" env "${GL_GROK_ENV[@]}" grok models
   m="$(cat "$so" 2>/dev/null | sed -n 's/^[[:space:]]*Default model:[[:space:]]*\([A-Za-z0-9][A-Za-z0-9._:/-]*\).*$/\1/p' | head -1)"
   [ -n "$m" ] || return 1
   GL_MODEL="$m"
@@ -1602,17 +1855,15 @@ _gl_build_cmd() {
       ;;
     l4)
       GL_STDIN=/dev/null; GL_STDIN_REDACT=""
-      _gl_add grok --prompt-file "$GL_PROMPT_FILE" -m "$GL_MODEL" --reasoning-effort "$effort"
+      _gl_add env "${GL_GROK_ENV[@]}" grok --prompt-file "$GL_PROMPT_FILE" -m "$GL_MODEL" --reasoning-effort "$effort"
       case "$GL_MODE" in
         review)
           [ "$sandbox" = read-only ] && _gl_add --sandbox read-only
           _gl_add --permission-mode plan
           ;;
-        impl)
-          _gl_add --permission-mode dontAsk --allow Read --allow Edit --allow Write
-          for c in ${GL_ALLOW_CMDS[@]+"${GL_ALLOW_CMDS[@]}"}; do _gl_add --allow "Bash($c:*)"; done
-          ;;
-        probe) _gl_add --permission-mode plan ;;
+        probe)
+          [ "$sandbox" = read-only ] && _gl_add --sandbox read-only
+          _gl_add --permission-mode plan ;;
       esac
       # H13: grok 1.0.40 `--json-schema <SCHEMA>` (structured output; implies json output).
       [ -n "$GL_SCHEMA" ] && { _gl_add --json-schema; _gl_add_redacted "$(cat "$GL_SCHEMA")" "<schema-file>"; }
@@ -1625,7 +1876,7 @@ _gl_initial_sandbox() {
   case "$GL_LANE:$GL_MODE" in
     l3:impl) echo workspace-write ;;
     l3:*) echo read-only ;;
-    l4:review) echo read-only ;;
+    l4:review|l4:probe) echo read-only ;;   # G1: grok runs inside its OS sandbox
     l4:*) echo none ;;
     *) echo "" ;;
   esac
@@ -1637,6 +1888,8 @@ GL_CUR_INV=""
 GL_LAST_SO=""; GL_LAST_SE=""; GL_LAST_RC=""; GL_LAST_DETAIL=""; GL_LAST_INV_DIR=""
 GL_SANDBOX=""
 GL_SANDBOX_REFUSED=0
+GL_SANDBOX_UNAVAILABLE=0
+GL_UNSANDBOXED_OPT_IN=0
 GL_THROTTLE_INV=0
 _gl_record_cmd() { : > "$GL_CMD_FILE"; local a; for a in "${GL_RED[@]}"; do printf '%s\n' "$a" >> "$GL_CMD_FILE"; done; }
 
@@ -1682,8 +1935,16 @@ _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
     if [ "$GL_LANE" = l4 ] && [ "$GL_SANDBOX" = read-only ] && [ "$GL_RC" -ne 0 ] \
        && LC_ALL=C grep -qiF "$GL_SANDBOX_REFUSAL" "$se" 2>/dev/null; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" sandbox-refused "$dur" read-only "$inv" "sandbox refused to start" >> "$GL_ATTEMPTS_FILE"
-      GL_SANDBOX=none
+      if ! _gl_grok_unsandboxed_ok; then
+        # G1: no plan-only fallback by default — L4 is ABSENT on a host without its sandbox.
+        GL_TRY_CLASS=auth
+        GL_LAST_DETAIL="grok OS sandbox unavailable on this host"
+        GL_SANDBOX_UNAVAILABLE=1
+        break
+      fi
+      GL_SANDBOX=none                 # opted in (grok_allow_unsandboxed=true): plan-only fallback, recorded
       GL_SANDBOX_REFUSED=1
+      GL_UNSANDBOXED_OPT_IN=1
       GL_TRY_CLASS=error
       GL_LAST_DETAIL="sandbox refused to start"
       continue
@@ -1731,7 +1992,7 @@ _gl_finalize() {
     GL_TAINT_CHECKED="${GL_TAINT_CHECKED:-0}" GL_TAINTED="${GL_TAINTED:-0}" GL_TAINT_DETAIL="${GL_TAINT_DETAIL:-}" \
     GL_LANE_UPDATE="$2" GL_LANE_UPDATE_KIND="${GL_LANE_UPDATE_KIND:-}" \
     GL_REJECTED="${GL_REJECTED:-}" GL_SKIPPED="${GL_SKIPPED:-}" GL_NOTE="${GL_NOTE:-}" \
-    GL_FN=finalize \
+    GL_GROK_STRIPPED="${GL_GROK_STRIPPED:-0}" GL_UNSANDBOXED_OPT_IN="$GL_UNSANDBOXED_OPT_IN" GL_FN=finalize \
     _gl_finalize_exec "$3"
   }
   _gl_finalize_exec() { # [lock wait] — the JS runs under the kernel lock when a wait is given
@@ -1799,12 +2060,19 @@ _gl_parse_run_args() {
 _gl_validate_run_args() {
   local c
   [ -n "$GL_RUN_DIR" ] || _gl_usage_err "run: --run-dir is required"
+  _gl_no_ctl --run-dir "$GL_RUN_DIR"; _gl_no_ctl --cwd "$GL_CWD"; _gl_no_ctl --prompt-file "$GL_PROMPT_FILE"
+  _gl_no_ctl --schema "$GL_SCHEMA"; _gl_no_ctl --claude-dir "$GL_CLAUDE_DIR_ARG"
   case "$GL_LANE" in l2|l3|l4) ;; *) _gl_usage_err "run: --lane must be l2, l3 or l4" ;; esac
   case "$GL_MODE" in
     impl|review) ;;
     probe) [ "${GL_INTERNAL_PROBE:-0}" = 1 ] || _gl_usage_err "run: --mode must be impl or review" ;;
     *) _gl_usage_err "run: --mode must be impl or review" ;;
   esac
+  # S4: grok cannot be isolated from repo-checked-in permission grants (.grok/config.toml …)
+  # the way claude --restricted can — L4 never implements.
+  if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = impl ]; then
+    _gl_usage_err "run: L4 (grok) is reviewer-only — --mode impl is not supported (use l2/l3 for implementation)"
+  fi
   if [ "$GL_LANE" != l4 ] && [ -z "$GL_MODEL" ]; then _gl_usage_err "run: --model is required for $GL_LANE"; fi
   if [ -n "$GL_MODEL" ] && ! [[ "$GL_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]]; then
     _gl_usage_err "run: --model contains unsupported characters"
@@ -1881,11 +2149,11 @@ _gl_run_main() {
   command -v bun >/dev/null 2>&1 || { echo "gstack-lane: bun is required (JSON handling)" >&2; exit "$EX_ERROR"; }
 
   mkdir -p "$GL_RUN_DIR" || { echo "gstack-lane: cannot create run dir $GL_RUN_DIR" >&2; exit "$EX_ERROR"; }
-  GL_RUN_DIR="$(_gl_realdir "$GL_RUN_DIR")"
+  GL_RUN_DIR="$(_gl_realdir "$GL_RUN_DIR")" || _gl_usage_err "run: --run-dir does not resolve to a plain directory path (control characters after symlinks?)"
   _gl_claim_out
-  GL_CWD="$(_gl_realdir "$GL_CWD")"
-  GL_PROMPT_FILE="$(_gl_realfile "$GL_PROMPT_FILE")"
-  [ -n "$GL_SCHEMA" ] && GL_SCHEMA="$(_gl_realfile "$GL_SCHEMA")"
+  GL_CWD="$(_gl_realdir "$GL_CWD")" || _gl_usage_err "run: --cwd does not resolve to a plain directory path"
+  GL_PROMPT_FILE="$(_gl_realfile "$GL_PROMPT_FILE")" || _gl_usage_err "run: --prompt-file does not resolve to a plain path"
+  if [ -n "$GL_SCHEMA" ]; then GL_SCHEMA="$(_gl_realfile "$GL_SCHEMA")" || _gl_usage_err "run: --schema does not resolve to a plain path"; fi
   for p in "$GL_PROMPT_FILE" "$GL_SCHEMA"; do
     [ -n "$p" ] || continue
     case "$p" in "$GL_OUT"|"$GL_OUT".*) _gl_usage_err "run: an input file aliases an output path ($p)" ;; esac
@@ -1922,9 +2190,6 @@ _gl_run_main() {
   fi
   if _gl_cwd_conflicts_codex_home "$GL_CWD"; then
     _gl_reject "--cwd must not be, contain, or lie inside the hermetic CODEX_HOME ($(_gl_codex_home_path))"
-  fi
-  if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = impl ]; then
-    case "$GL_TIER" in T0|T1) ;; *) _gl_reject "l4 impl is T0/T1 spillover only (got tier '${GL_TIER:-none}'); grok is not OS-contained" ;; esac
   fi
   if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = review ]; then
     if ! _gl_registered_wt "$GL_CWD" || git -C "$GL_CWD" symbolic-ref -q HEAD >/dev/null 2>&1; then
@@ -1968,6 +2233,7 @@ _gl_run_main() {
   fi
   if [ "$GL_LANE" = l2 ]; then
     GL_CLAUDE_DIR="$(_gl_claude_dir)"
+    _gl_no_ctl --claude-dir "$GL_CLAUDE_DIR"
     # L2 must be a DIFFERENT account from the root session, or it adds no quota while
     # pretending to be overflow: refuse the root's own config dirs, and refuse when the
     # overflow login's oauthAccount.accountUuid equals the root's (env
@@ -2015,6 +2281,18 @@ _gl_run_main() {
   fi
   if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = review ]; then
     GL_TAINT_CHECKED=1
+    for p in "$GL_CWD" "$(_gl_primary_wt "$GL_CWD" || true)"; do
+      [ -n "$p" ] || continue
+      if _gl_has_submodules "$p"; then
+        _gl_reject "$p has an initialized git submodule — its own filters/hooks cannot be neutralized; L4 review refused (fail closed)"
+      fi
+    done
+    # S4: the review worktree is a DISPOSABLE detached snapshot — delete every grok project
+    # config source from it BEFORE the baseline snapshot (fail closed if any remains).
+    if ! _gl_strip_grok_project_config "$GL_CWD"; then
+      _gl_reject "could not strip grok project configuration (.grok/ …) from the review worktree"
+    fi
+    GL_GROK_STRIPPED=1
     primary="$(_gl_primary_wt "$GL_CWD" || true)"
     snap_dirs=("$GL_CWD")
     [ -n "$primary" ] && [ "$primary" != "$GL_CWD" ] && snap_dirs+=("$primary")
@@ -2085,7 +2363,10 @@ _gl_run_main() {
   case "$cls" in
     ok) kind=ok; reason="ok ($GL_MODE)" ;;
     quota) kind=quota; reason="quota" ;;
-    auth) kind=absent; reason="auth: CLI reported an authentication failure" ;;
+    auth)
+      kind=absent; reason="auth: CLI reported an authentication failure"
+      [ "$GL_SANDBOX_UNAVAILABLE" = 1 ] \
+        && reason="grok OS sandbox unavailable on this host; opt in with gstack-config set grok_allow_unsandboxed true" ;;
     throttle)
       if [ "$GL_MODE" = probe ]; then kind=ok; reason="probe: throttled (reachable, rate-limited)"; else kind=keep; reason="throttle (backoff retries exhausted within the deadline)"; fi ;;
     timeout)
@@ -2102,7 +2383,7 @@ _gl_run_main() {
 }
 
 cmd_run() {
-  GL_INTERNAL_PROBE=0
+  GL_INTERNAL_PROBE=0; GL_GROK_STRIPPED=0
   GL_TAINT_CHECKED=0; GL_TAINTED=0; GL_TAINT_DETAIL=""; GL_REVIEWED_SHA=""
   _gl_parse_run_args "$@"
   _gl_run_main
@@ -2159,14 +2440,13 @@ cmd_probe() {
     esac
   done
   [ -n "$run_dir" ] || _gl_usage_err "probe: --run-dir is required"
+  _gl_no_ctl --run-dir "$run_dir"; _gl_no_ctl --claude-dir "$claude_dir"
   _gl_is_uint "$timeout" && [ "$timeout" -ge 1 ] || _gl_usage_err "probe: --timeout must be a positive integer"
-  for l in $(printf '%s' "$lanes" | tr ',' ' '); do
-    case "$l" in l2|l3|l4) ;; *) _gl_usage_err "probe: --lanes accepts l2,l3,l4" ;; esac
-  done
+  [[ "$lanes" =~ ^l[234](,l[234]){0,2}$ ]] || _gl_usage_err "probe: --lanes accepts l2,l3,l4"   # before any unquoted split
   command -v bun >/dev/null 2>&1 || { echo "gstack-lane: bun is required (JSON handling)" >&2; exit "$EX_ERROR"; }
   umask 077
   mkdir -p "$run_dir" || exit "$EX_ERROR"
-  run_dir="$(_gl_realdir "$run_dir")"
+  run_dir="$(_gl_realdir "$run_dir")" || _gl_usage_err "probe: --run-dir does not resolve to a plain directory path (control characters after symlinks?)"
   GL_RUN_DIR="$run_dir"
   for l in $(printf '%s' "$lanes" | tr ',' ' '); do
     line="$(GL_LANES_FILE="$run_dir/lanes.json" GL_LANE="$l" _gl_js lane-get)"
@@ -2199,6 +2479,7 @@ cmd_summary() {
     esac
   done
   [ -n "$out" ] || _gl_usage_err "summary: --out is required"
+  _gl_no_ctl --out "$out"
   command -v bun >/dev/null 2>&1 || { echo "gstack-lane: bun is required (JSON handling)" >&2; exit "$EX_ERROR"; }
   GL_STATUS_FILE="$(_gl_abs "$out.status.json")" _gl_js status-line
   exit $?
@@ -2221,7 +2502,7 @@ cmd_adjudicate() {
     esac
   done
   [ -n "$out" ] || _gl_usage_err "adjudicate: --out is required"
-  case "$out" in *$'\n'*|*$'\r'*) _gl_usage_err "adjudicate: --out must not contain control characters" ;; esac
+  _gl_no_ctl --out "$out"
   case "$seat" in codex|grok) ;; *) _gl_usage_err "adjudicate: --seat must be codex or grok" ;; esac
   case "$gate" in ordinary|critical) ;; *) _gl_usage_err "adjudicate: --gate-class must be ordinary or critical" ;; esac
   [[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || _gl_usage_err "adjudicate: --reviewed-sha must be a full commit id"
@@ -2231,6 +2512,7 @@ cmd_adjudicate() {
   fi
   out="$(_gl_abs "$out")"
   real="$(_gl_realfile "$out" 2>/dev/null)" || real="$out"
+  _gl_no_ctl --out "$real"
   seg="$(basename "$(dirname "$out")")"
   _gl_valid_id "$seg" || seg=""
   if ! command -v bun >/dev/null 2>&1; then
@@ -2250,10 +2532,10 @@ cmd_adjudicate() {
 _gl_wt_common() { # validates GL_WT_TASK/GL_WT_RUN → sets GL_WT_PATH etc.
   _gl_valid_id "$GL_WT_TASK" || _gl_usage_err "--task must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}"
   mkdir -p "$GL_WT_RUN/wt" || exit "$EX_ERROR"
-  GL_WT_RUN="$(_gl_realdir "$GL_WT_RUN")"
+  GL_WT_RUN="$(_gl_realdir "$GL_WT_RUN")" || _gl_usage_err "--run-dir does not resolve to a plain directory path (control characters after symlinks?)"
   GL_RUN_DIR="$GL_WT_RUN"
   local wtroot
-  wtroot="$(_gl_realdir "$GL_WT_RUN/wt")"
+  wtroot="$(_gl_realdir "$GL_WT_RUN/wt")" || _gl_usage_err "--run-dir/wt does not resolve to a plain directory path"
   [ "$wtroot" = "$GL_WT_RUN/wt" ] || { echo "gstack-lane: $GL_WT_RUN/wt resolves elsewhere (symlink?) — refusing" >&2; exit "$EX_ERROR"; }
   GL_WT_PATH="$wtroot/$GL_WT_TASK"
   GL_WT_BRANCH="ab/$(basename "$GL_WT_RUN")/$GL_WT_TASK"
@@ -2318,25 +2600,26 @@ _gl_scan_raw() {
 _gl_inert_init() { # <dir> <commit|checkout> [<more dirs whose config context also counts>...] → GL_IG
   local d="$1" m="$2" un="" ue="" xf=""
   shift 2
-  GL_IG=(env GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat)
+  _gl_filter_off "$d" "$@" || return 1   # a filter/diff driver git cannot be made to neutralize: refuse
+  GL_IG=(env "${GL_GIT_ENV[@]}" "${GL_FILTER_ENV[@]}")
   if [ "$m" = commit ]; then
     un="$(git -C "$d" config --get user.name 2>/dev/null || true)"
     ue="$(git -C "$d" config --get user.email 2>/dev/null || true)"
     xf="$(git -C "$d" config --path --get core.excludesFile 2>/dev/null || true)"
     GL_IG+=(GIT_CONFIG_GLOBAL=/dev/null)
   fi
-  _gl_filter_off "$d" "$@"
   GL_IG+=(git -C "$d" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgSign=false -c tag.gpgSign=false
           -c log.showSignature=false -c gpg.program=/usr/bin/false -c gpg.ssh.program=/usr/bin/false
           -c gpg.x509.program=/usr/bin/false -c gc.auto=0 -c maintenance.auto=false -c core.pager=cat
-          -c diff.external= -c core.quotePath=false -c submodule.recurse=false)
+          -c diff.external= -c core.quotePath=false -c submodule.recurse=false -c protocol.allow=never
+          -c core.sshCommand=false)
   [ -n "$un" ] && GL_IG+=(-c "user.name=$un")
   [ -n "$ue" ] && GL_IG+=(-c "user.email=$ue")
   [ -n "$xf" ] && GL_IG+=(-c "core.excludesFile=$xf")
-  GL_IG+=(${GL_FILTER_OFF[@]+"${GL_FILTER_OFF[@]}"})
+  return 0
 }
 _gl_commit_git_init() { # <worktree> → GL_CG (array: the inert git command prefix for commit)
-  _gl_inert_init "$1" commit
+  _gl_inert_init "$1" commit || return 1
   GL_CG=("${GL_IG[@]}")
 }
 # The repo-controlled EXECUTION surface of a worktree, per component (F2): common-dir
@@ -2386,6 +2669,8 @@ cmd_commit() {
   done
   [ -n "$(printf '%s' "$msg" | tr -d '[:space:]')" ] || _gl_usage_err "commit: -m <message> is required"
   [ -n "$base_arg" ] || _gl_usage_err "commit: --base <sha> is required (the base_sha recorded from worktree add, or the milestone base)"
+  _gl_valid_rev "$base_arg" || _gl_usage_err "commit: --base is not a plain revision (no leading -, whitespace or shell syntax)"
+  _gl_no_ctl --cwd "$cwd"; _gl_no_ctl --run-dir "$GL_WT_RUN"; _gl_no_ctl --out "$out"
   if [ -n "$cwd" ]; then
     # Milestone/primary worktree form: commit --cwd <worktree> --base <sha> -m <msg>.
     [ -z "$GL_WT_TASK" ] || _gl_usage_err "commit: --cwd and --task are mutually exclusive"
@@ -2406,8 +2691,16 @@ cmd_commit() {
       echo "gstack-lane: $GL_WT_PATH is not a registered worktree of this run" >&2; exit "$EX_ERROR"
     fi
   fi
-  _gl_commit_git_init "$GL_WT_PATH"
+  _gl_commit_git_init "$GL_WT_PATH" \
+    || { echo "gstack-lane: REFUSING — a configured filter/diff driver in $GL_WT_PATH cannot be neutralized (fail closed)" >&2; exit "$EX_ERROR"; }
+  # G4: `git add -A` runs `git status` INSIDE an initialized submodule (its own repo: own
+  # filters/hooks the parent's neutralization never reaches) — refuse before staging.
+  if _gl_has_submodules "$GL_WT_PATH"; then
+    echo "gstack-lane: REFUSING — $GL_WT_PATH has an initialized git submodule (git add would run its own filters); commit it by hand" >&2
+    exit "$EX_ERROR"
+  fi
   base="$("${GL_CG[@]}" rev-parse --verify --quiet "$base_arg^{commit}" 2>/dev/null)" || { echo "gstack-lane: --base does not resolve to a commit: $base_arg" >&2; exit "$EX_ERROR"; }
+  [[ "$base" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "gstack-lane: --base did not resolve to a commit id" >&2; exit "$EX_ERROR"; }
   "${GL_CG[@]}" merge-base --is-ancestor "$base" HEAD 2>/dev/null || { echo "gstack-lane: --base $base is not an ancestor of HEAD" >&2; exit "$EX_ERROR"; }
   if [ -z "$cwd" ]; then
     # F3: the orchestrator's base must match the one worktree add recorded.
@@ -2452,16 +2745,16 @@ cmd_commit() {
   "${GL_CG[@]}" rev-list "$base..HEAD" > "$tmpd/commits" 2>/dev/null || _gl_commit_refuse "could not enumerate the task's commits (fail closed)"
   while IFS= read -r commit; do
     case "$commit" in ''|*[!0-9a-f]*) _gl_commit_refuse "unexpected rev-list output (fail closed)" ;; esac
-    "${GL_CG[@]}" diff-tree -m -r --raw -z --no-abbrev --no-renames --no-commit-id --diff-filter=ACDMRT "$commit" > "$tmpd/c" 2>/dev/null \
+    "${GL_CG[@]}" diff-tree -m -r --raw -z --no-abbrev --no-renames --no-commit-id --no-ext-diff --no-textconv --ignore-submodules=all --diff-filter=ACDMRT "$commit" > "$tmpd/c" 2>/dev/null \
       || _gl_commit_refuse "could not enumerate commit $commit (fail closed)"
     _gl_scan_raw "$commit" "$tmpd/c"
   done < "$tmpd/commits"
-  "${GL_CG[@]}" diff --raw -z --no-abbrev --no-renames --diff-filter=ACDMRT "$base" HEAD > "$tmpd/net" 2>/dev/null \
+  "${GL_CG[@]}" diff --raw -z --no-abbrev --no-renames --no-ext-diff --no-textconv --ignore-submodules=all --diff-filter=ACDMRT "$base" HEAD > "$tmpd/net" 2>/dev/null \
     || _gl_commit_refuse "could not enumerate the net <base>→HEAD diff (fail closed)"
   _gl_scan_raw net "$tmpd/net"
   if ! "${GL_CG[@]}" add -A >/dev/null 2>&1 \
-     || ! "${GL_CG[@]}" diff --cached --raw -z --no-abbrev --no-renames --diff-filter=ACDMRT > "$tmpd/staged" 2>/dev/null \
-     || ! "${GL_CG[@]}" diff --cached --name-only -z --no-renames --diff-filter=AMT > "$tmpd/am" 2>/dev/null; then
+     || ! "${GL_CG[@]}" diff --cached --raw -z --no-abbrev --no-renames --no-ext-diff --no-textconv --ignore-submodules=all --diff-filter=ACDMRT > "$tmpd/staged" 2>/dev/null \
+     || ! "${GL_CG[@]}" diff --cached --name-only -z --no-renames --no-ext-diff --no-textconv --ignore-submodules=all --diff-filter=AMT > "$tmpd/am" 2>/dev/null; then
     _gl_commit_refuse "git add / staged enumeration failed in $GL_WT_PATH (fail closed)"
   fi
   _gl_scan_raw staged "$tmpd/staged"
@@ -2483,7 +2776,7 @@ cmd_commit() {
     echo "gstack-lane: REFUSING — secret-shaped or filtered path(s) in the task's commits or staged changes:$GL_BAD — nothing committed, index reset, no result_sha" >&2
     exit "$EX_ERROR"
   fi
-  if "${GL_CG[@]}" diff --cached --quiet 2>/dev/null; then
+  if "${GL_CG[@]}" diff --cached --quiet --no-ext-diff --no-textconv --ignore-submodules=all 2>/dev/null; then
     echo "result_sha=$head"
     echo "base_sha=$base"
     echo "no_changes=true"
@@ -2529,18 +2822,22 @@ cmd_worktree() {
   done
   [ -n "$GL_WT_RUN" ] || _gl_usage_err "worktree: --run-dir is required"
   [ -n "$GL_WT_TASK" ] || _gl_usage_err "worktree: --task is required"
+  _gl_no_ctl --run-dir "$GL_WT_RUN"; _gl_no_ctl --repo "$repo"
+  _gl_valid_rev "$base" || _gl_usage_err "worktree: --base is not a plain revision (no leading -, whitespace or shell syntax)"
   [ "$action" = rm ] && [ "$detach" = 1 ] && _gl_usage_err "worktree rm: --detach is an add-only flag"
   [ "$action" = add ] && [ "$force" = 1 ] && _gl_usage_err "worktree add: --force is an rm-only flag"
   _gl_wt_common
   if [ -z "$repo" ]; then
     repo="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "gstack-lane: not inside a git repository (pass --repo)" >&2; exit "$EX_ERROR"; }
+    _gl_no_ctl --repo "$repo"
   fi
   git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { echo "gstack-lane: --repo is not a git repository: $repo" >&2; exit "$EX_ERROR"; }
 
   # H1: every lifecycle git call (add/remove/prune and the checkout add implies) is inert —
   # no post-checkout hook, no smudge/process filter, no fsmonitor, no replace refs.
   # (filter names from the repo AND, when it exists, the worktree's own config context)
-  _gl_inert_init "$repo" checkout "$GL_WT_PATH"
+  _gl_inert_init "$repo" checkout "$GL_WT_PATH" \
+    || { echo "gstack-lane: REFUSING — a configured filter/diff driver in $repo cannot be neutralized (fail closed)" >&2; exit "$EX_ERROR"; }
   GL_WG=("${GL_IG[@]}")
   if [ "$action" = add ]; then
     if [ -e "$GL_WT_PATH" ] && [ "$detach" = 1 ] && _gl_registered_wt "$GL_WT_PATH" \
@@ -2551,6 +2848,11 @@ cmd_worktree() {
     fi
     [ -e "$GL_WT_PATH" ] && { echo "gstack-lane: worktree path already exists: $GL_WT_PATH" >&2; exit "$EX_ERROR"; }
     sha="$("${GL_WG[@]}" rev-parse --verify --quiet "$base^{commit}")" || { echo "gstack-lane: --base does not resolve to a commit: $base" >&2; exit "$EX_ERROR"; }
+    [[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "gstack-lane: --base did not resolve to a commit id" >&2; exit "$EX_ERROR"; }
+    if _gl_has_submodules "$repo"; then
+      echo "gstack-lane: REFUSING — $repo has an initialized git submodule (its own filters/hooks cannot be neutralized); lane worktrees need a submodule-free checkout" >&2
+      exit "$EX_ERROR"
+    fi
     if _gl_has_onbranch "$repo"; then
       echo "control_changed=includeif-onbranch"
       echo "gstack-lane: REFUSING — the repo's git config has an includeIf \"onbranch:…\" section: config that only activates on the new branch cannot be neutralized before the checkout" >&2
@@ -2586,8 +2888,9 @@ cmd_worktree() {
       echo "control_changed=includeif-onbranch"
       _gl_wt_undo "REFUSING — the new worktree's git config resolves an includeIf \"onbranch:…\" section"
     fi
-    _gl_inert_init "$GL_WT_PATH" checkout "$repo"
-    "${GL_IG[@]}" reset -q --hard "$sha" >/dev/null 2>&1 || _gl_wt_undo "the inert checkout of $sha failed"
+    _gl_inert_init "$GL_WT_PATH" checkout "$repo" || _gl_wt_undo "REFUSING — a configured filter/diff driver cannot be neutralized (fail closed)"
+    "${GL_IG[@]}" reset -q --hard "$sha" >/dev/null 2>&1 \
+      || _gl_wt_undo "the inert checkout of $sha failed (missing objects? lazy fetch and every git transport are disabled — fail closed)"
     post="$(_gl_commit_control "$GL_WT_PATH" wt 2>/dev/null)" || post=""   # per-worktree part: after the add
     [ -n "$post" ] || _gl_wt_undo "could not fingerprint the new worktree's git control state"
     mkdir -p "$GL_WT_RUN/wt-meta" && printf '%s\n' "$sha" > "$GL_WT_META"
@@ -2604,6 +2907,12 @@ cmd_worktree() {
     echo "gstack-lane: $GL_WT_PATH is not a registered worktree of this run — refusing" >&2; exit "$EX_ERROR"
   fi
   cur="$(git -C "$GL_WT_PATH" symbolic-ref -q --short HEAD 2>/dev/null || true)"
+  # G4: a non-forced remove makes git run `status --ignore-submodules=none` (it descends into
+  # submodules); --force skips that check.
+  if [ "$force" != 1 ] && _gl_has_submodules "$GL_WT_PATH"; then
+    echo "gstack-lane: REFUSING — $GL_WT_PATH has an initialized git submodule; remove it with --force" >&2
+    exit "$EX_ERROR"
+  fi
   if [ "$force" = 1 ]; then
     "${GL_WG[@]}" worktree remove --force "$GL_WT_PATH" >/dev/null 2>&1
   else

@@ -35,7 +35,8 @@ function mk(sb: ReturnType<typeof mkSandbox>, seat: Seat, over: Record<string, u
     attempt_id: aid, task, lane: seat === 'codex' ? 'l3' : 'l4', mode: 'review',
     requested_model: seat === 'codex' ? 'gpt-6.1-sol' : 'grok-4.7-build', runtime_model: seat === 'codex' ? 'gpt-6.1-sol' : 'grok-4.7-build',
     model_mismatch: false, exit: 0, class: 'ok', class_detail: null, exit_code: 0, out, published: body !== null,
-    reviewed_sha: SHA, tainted: false, taint_checked: seat === 'grok', attempts: [{ n: 1, class: 'ok' }], ...over,
+    reviewed_sha: SHA, tainted: false, taint_checked: seat === 'grok', ...(seat === 'grok' ? { grok_project_config_stripped: true } : {}),
+    attempts: [{ n: 1, class: 'ok' }], ...over,
   };
   if (o.raw !== undefined) fs.writeFileSync(`${out}.status.json`, o.raw);
   else if (!o.noStatus) fs.writeFileSync(`${out}.status.json`, JSON.stringify(status, null, 2));
@@ -93,6 +94,7 @@ describe('bin/gstack-lane adjudicate: the 17-case matrix (INVALID before ABSENT)
     expect(at('codex', {}, { raw: '{"class": "ok", "tainted": fals' }).line).toBe(V('INVALID', 'status_unreadable', 0, null));
     expect(at('codex', {}, { raw: '[]' }).line).toBe(V('INVALID', 'status_unreadable', 0, null));
     expect(at('grok', { taint_checked: false }).line).toBe(V('INVALID', 'taint_unchecked', 0, 'grok-4.7-build'));
+    expect(at('grok', { grok_project_config_stripped: false }).line).toBe(V('INVALID', 'grok_config_not_stripped', 0, 'grok-4.7-build')); // S4
     expect(at('codex', { published: false }).line).toBe(V('INVALID', 'empty_body', 0, 'gpt-6.1-sol'));
     // tainted outranks an availability class (INVALID before ABSENT)
     expect(at('codex', { class: 'quota', tainted: true }).line).toBe(V('INVALID', 'tainted', 0, 'gpt-6.1-sol'));

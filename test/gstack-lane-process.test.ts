@@ -104,11 +104,12 @@ describe('lanes.json kernel lock (E8)', () => {
     step(sb, 'grok', `${gate}echo '{"is_error":true,"error":"401 Unauthorized"}'\nexit 1\n`);
     const jobs: Promise<number>[] = [];
     const outs: [string, string][] = [];
+    const reviewWt = H.wtAdd(sb, 'gate-lock', { detach: true }); // L4 is reviewer-only: its 4 jobs are reviews
     for (let i = 0; i < 4; i++) {
       for (const [l, o] of [
         ['l2', { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'medium', 'claude-dir': sb.claudeDir }],
         ['l3', { lane: 'l3', mode: 'impl', model: 'gpt-6.1-sol', effort: 'medium' }],
-        ['l4', { lane: 'l4', mode: 'impl', model: 'grok-4.7', effort: 'low', tier: 'T1' }],
+        ['l4', { lane: 'l4', mode: 'review', model: 'grok-4.7', effort: 'low', cwd: reviewWt }],
       ] as const) {
         const { args, out } = runArgs(sb, { ...o, timeout: '20' } as RunOpts);
         outs.push([l, out]);

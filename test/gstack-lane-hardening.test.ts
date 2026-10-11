@@ -276,7 +276,7 @@ describe('lanes (H10, H13–H17, P3)', () => {
     step(sb, 'grok', OK_GROK);
     const schema = path.join(sb.dir, 'envelope.schema.json');
     fs.writeFileSync(schema, '{"type":"object","required":["status"]}');
-    const r = run(sb, { lane: 'l4', mode: 'impl', model: 'grok-4.7-build-fast', effort: 'low', tier: 'T0', schema });
+    const r = run(sb, { lane: 'l4', mode: 'review', model: 'grok-4.7-build-fast', effort: 'low', schema, cwd: wtAdd(sb, 'gate-h13', { detach: true }) });
     expect(r.code).toBe(0);
     const [c] = calls(sb, 'grok');
     expect(flagValue(c.argv, '--json-schema')).toBe('{"type":"object","required":["status"]}');
@@ -458,62 +458,24 @@ describe('fix round 3 (F1–F3, F5, F7)', () => {
     expect(missing.err).toContain('wt-meta missing');
   }, 30_000);
 
-  test('F5: chmod +x on an existing disabled hook during a review taints it; so does deleting lanes.json', () => {
-    const sb = mkSandbox();
-    const repo = mkRepo(`perm-${path.basename(sb.dir)}`);
-    const common = sh('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], repo);
-    fs.writeFileSync(path.join(common, 'hooks', 'pre-push'), '#!/bin/sh\nexit 0\n', { mode: 0o644 }); // present but disabled
-    step(sb, 'grok', `chmod +x ${sq(path.join(common, 'hooks', 'pre-push'))}\n${OK_GROK}`, 1);
-    const a = run(sb, { lane: 'l4', mode: 'review', effort: 'high', cwd: wtAdd(sb, 'gate-p1', { detach: true, repo }) });
-    expect(a.code).toBe(1);
-    expect(a.status()).toMatchObject({ class: 'error', tainted: true });
-    expect(a.status().taint_detail).toContain('control state changed');
-    writeLanes(sb, { l2: { status: 'cooling', reason: 'quota', next_probe_at: '2099-01-01T00:00:00Z' } });
-    step(sb, 'grok', `rm -f ${sq(path.join(sb.run, 'lanes.json'))}\n${OK_GROK}`, 2);
-    const b = run(sb, { lane: 'l4', mode: 'review', effort: 'high', cwd: wtAdd(sb, 'gate-p2', { detach: true, repo }) });
-    expect(b.code).toBe(1);
-    expect(b.status()).toMatchObject({ class: 'error', tainted: true });
-    expect(b.status().taint_detail).toContain('lanes.json disappeared');
-  }, 30_000);
-
   test('F7: the REAL grok not-signed-in output ⇒ auth (lane absent); structured rate/usage errors map via the classifier', () => {
     const sb = mkSandbox();
     step(sb, 'grok', FIX_GROK_NOAUTH, 1);
     step(sb, 'grok', `echo '{"type":"error","message":"Rate limit exceeded. Please try again later."}'\nexit 1\n`, 2);
     step(sb, 'grok', `echo '{"type":"error","message":"You have reached your usage limit for this period."}'\nexit 1\n`, 3);
-    const a = run(sb, { lane: 'l4', mode: 'impl', model: 'grok-4.7', effort: 'low', tier: 'T0' });
+    const wt = wtAdd(sb, 'gate-f7', { detach: true });
+    const a = run(sb, { lane: 'l4', mode: 'review', model: 'grok-4.7', effort: 'low', cwd: wt });
     expect(a.code).toBe(5);
     expect(a.status().class).toBe('auth');
     expect(a.status().class_detail).toContain('Not signed in');
     expect(lanesOf(sb).l4.status).toBe('absent');
     writeLanes(sb, {});
-    expect(run(sb, { lane: 'l4', mode: 'impl', model: 'grok-4.7', effort: 'low', tier: 'T0' }).status().class).toBe('throttle');
-    expect(run(sb, { lane: 'l4', mode: 'impl', model: 'grok-4.7', effort: 'low', tier: 'T0' }).status().class).toBe('quota');
+    expect(run(sb, { lane: 'l4', mode: 'review', model: 'grok-4.7', effort: 'low', cwd: wt }).status().class).toBe('throttle');
+    expect(run(sb, { lane: 'l4', mode: 'review', model: 'grok-4.7', effort: 'low', cwd: wt }).status().class).toBe('quota');
   }, 30_000);
 });
 
 describe('symlinked hooks (Astra F2/F5 follow-up)', () => {
-  test('L4 taint: chmod +x on a hook inside a SYMLINKED .git/hooks target, or retargeting that link, taints the review', () => {
-    const sb = mkSandbox();
-    const repo = mkRepo(`symhooks-${path.basename(sb.dir)}`);
-    const common = sh('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], repo);
-    const target = path.join(sb.dir, 'ext-hooks');
-    const other = path.join(sb.dir, 'other-hooks');
-    fs.mkdirSync(target); fs.mkdirSync(other);
-    fs.writeFileSync(path.join(target, 'pre-push'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
-    fs.writeFileSync(path.join(other, 'pre-push'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    fs.rmSync(path.join(common, 'hooks'), { recursive: true, force: true });
-    fs.symlinkSync(target, path.join(common, 'hooks'));
-    step(sb, 'grok', `chmod +x ${sq(path.join(target, 'pre-push'))}\n${OK_GROK}`, 1);
-    step(sb, 'grok', `ln -sfn ${sq(other)} ${sq(path.join(common, 'hooks'))}\n${OK_GROK}`, 2);
-    const a = run(sb, { lane: 'l4', mode: 'review', effort: 'high', cwd: wtAdd(sb, 'gate-s1', { detach: true, repo }) });
-    expect(a.status()).toMatchObject({ class: 'error', tainted: true });
-    expect(a.status().taint_detail).toContain('control state changed');
-    const b = run(sb, { lane: 'l4', mode: 'review', effort: 'high', cwd: wtAdd(sb, 'gate-s2', { detach: true, repo }) });
-    expect(b.status()).toMatchObject({ class: 'error', tainted: true });
-    expect(b.status().taint_detail).toContain('control state changed');
-  }, 30_000);
-
   test('commit: an edit/chmod inside a symlinked hooks dir or a symlinked core.hooksPath target — or retargeting it — is refused', () => {
     const sb = mkSandbox();
     const repo = mkRepo(`symcommit-${path.basename(sb.dir)}`);

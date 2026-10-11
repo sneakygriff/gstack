@@ -525,7 +525,7 @@ launch, outcome classification, worktrees, commits) live in `~/.claude/skills/gs
 | **L1** in-session | Agent tool (shares L0's quota) | `fable`, `claude-opus-5-5`, `claude-opus-4-8`, `sonnet`, `haiku` | Decomposition, synthesis, integration, Claude reviewer seat. Implements only as LAST spillover. |
 | **L2** Claude #2 | second Claude account: `CLAUDE_CONFIG_DIR=<claude_overflow_dir> claude -p`, hooks/MCP off, explicit `--tools` (review: Read/Grep/Glob, no Bash), inherited tokens unset | `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` — NEVER Fable (`claude -p` bills Fable to usage credits; the helper rejects it without `--allow-credit-billing`) | Primary for T3; spillover T0–T2; reviewer for Codex-authored work (adds QUOTA, not vendor diversity — L2 is still Claude). |
 | **L3** Codex | ChatGPT subscription, hermetic `CODEX_HOME` kept OUTSIDE the run tree (`${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/`, no MCP servers, config rewritten per use) | `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra` (quota-scarce: ~5–45 msgs/5h on Plus vs 15–160 for Sol — reserve for T3, debugging escalation, the T3/final gate) | Primary implementation pool T0–T2; gate-forum member. |
-| **L4** Grok | grok.com subscription — EVERY use (probe, review, impl) only when `grok_reviews=enabled` (bin default `disabled`; the helper refuses otherwise) | latest (helper resolves the CLI default and pins it), `grok-4.7-build-fast` | Gate-forum member (high); bounded-scope reviewer; T0/T1 spillover implementer only (NOT OS-contained; never on a secrets-bearing repo). |
+| **L4** Grok | grok.com subscription — EVERY use (probe, review) only when `grok_reviews=enabled` (bin default `disabled`; the helper refuses otherwise); reviews run ONLY inside grok's OS sandbox (`--sandbox read-only`) — if it cannot apply, L4 is ABSENT unless the operator opted in with `gstack-config set grok_allow_unsandboxed true` (default false) | latest (helper resolves the CLI default and pins it) | **REVIEWER-ONLY**: gate-forum member (high) + bounded-scope reviewer; NEVER implements — grok merges repo-checked-in `.grok/config.toml` permission grants, so it cannot be isolated for implementation (the helper rejects `--lane l4 --mode impl`); never on a secrets-bearing repo. |
 
 **Class R — rote / no-reasoning** (below T0): deterministic work with an exact success check and no
 judgment. Run a known command and report (test suites → pass/fail counts + failing test names,
@@ -545,11 +545,11 @@ boundary, migration, untrusted input). Unsure between two tiers → the higher o
 
 | Work type | Primary | Spillover (in order) | Effort |
 |---|---|---|---|
-| **R** rote / no-reasoning | L1 Haiku 5.5 — `model: haiku` (read-only search: `subagent_type: Explore`) | L2 `claude-haiku-5-5 --effort low` → L3 `gpt-6-luna` → L4 `grok-4.7-build-fast` (low; pass `-m`); Sonnet-low ONLY on a host with no Haiku; never Sonnet/Opus/Fable/Sol/Astra | low |
+| **R** rote / no-reasoning | L1 Haiku 5.5 — `model: haiku` (read-only search: `subagent_type: Explore`) | L2 `claude-haiku-5-5 --effort low` → L3 `gpt-6-luna`; Sonnet-low ONLY on a host with no Haiku; never Sonnet/Opus/Fable/Sol/Astra, never L4 | low |
 | Root orchestration | L0 | — | session |
 | Decomposition, synthesis, forum consolidation | L1 Fable | L1 Opus 5.5 / 4.8 → L2 Opus 5.5 | high/max |
-| **T0** | L3 `gpt-6-luna` | L2 Haiku → L1 Haiku (low) → L4 `grok-4.7-build-fast` (if `grok_reviews=enabled`) | low |
-| **T1** | L3 `gpt-6.1-sol` | L2 Sonnet → L4 latest grok (if enabled) → L1 Sonnet | medium (Grok high) |
+| **T0** | L3 `gpt-6-luna` | L2 Haiku → L1 Haiku (low) | low |
+| **T1** | L3 `gpt-6.1-sol` | L2 Sonnet → L1 Sonnet | medium |
 | **T2** | L3 `gpt-6.1-sol` | L2 Opus 5.5 → L1 Opus 5.5 | high |
 | **T3** | L2 Opus 5.5 | L3 `gpt-6-astra` → L1 Opus 5.5 → L1 Fable (escalation only) | high/xhigh (Astra xhigh) |
 | Test writing | the task's implementer | that TASK's tier row (never Sonnet for T2/T3) | by tier |
@@ -566,10 +566,10 @@ boundary, migration, untrusted input). Unsure between two tiers → the higher o
 1. **Never downgrade tier to spill.** Cross-vendor tier equivalents are legal (T2: Opus 5.5 ≡ Sol
    high; T3: Opus 5.5/Fable ≡ Astra). Sonnet / Luna / Haiku are NEVER a T2/T3 fallback without an
    explicit user waiver.
-2. **L1 reserve.** The orchestrator's own subscription implements only when L2/L3/L4 are all
-   cooling or absent for that tier. Before admitting new implementation work, reserve the next
-   gate's reviewer seats. **Exemption: R and T0 work on L1 Haiku** (≈1/40 of Opus 5.5 per token —
-   the operator wants small models used; the T0 row therefore keeps `L2 Haiku → L1 Haiku → L4`). R
+2. **L1 reserve.** The orchestrator's own subscription implements only when L2/L3 are all
+   cooling or absent for that tier (L4 never implements). Before admitting new implementation work,
+   reserve the next gate's reviewer seats. **Exemption: R and T0 work on L1 Haiku** (≈1/40 of Opus 5.5
+   per token — the operator wants small models used; the T0 row therefore keeps `L2 Haiku → L1 Haiku`). R
    workers have their own cap (default 4 concurrent), do NOT consume `autobuilder_max_parallel`
    slots, and the heavy-check limits (≤2 focused + 1 full-suite) still bind R runs that execute test suites.
 3. **Reviewer diversity.** Fresh reviewer context + at least one OTHER-vendor assessment per T1+
@@ -668,15 +668,21 @@ recipe.
 **Probe the lanes.** Run `~/.claude/skills/gstack/bin/gstack-lane probe --run-dir "$RUN_DIR"`
 (top-level Bash; it prints ONE line per lane and writes `$RUN_DIR/lanes.json` — `status:
 ok|cooling|absent`, `reason`, `next_probe_at`, `runtime_model`). L2: haiku "reply OK"; L3:
-`gpt-6-luna` low under the hermetic home; L4: grok plan-mode at `high`, recording the runtime model
-id (ABSENT "disabled by grok_reviews" unless `grok_reviews=enabled`). Print the roster. A
+`gpt-6-luna` low under the hermetic home; L4: grok inside its OS sandbox, recording the runtime model
+id (ABSENT "disabled by grok_reviews" unless `grok_reviews=enabled`; ABSENT "sandbox unavailable" when
+`--sandbox read-only` cannot apply and `grok_allow_unsandboxed` is not `true`). Print the roster. A
 cooling/absent lane's rows spill to the next lane in the routing table — the run proceeds, and
 absent/cooling lanes are re-probed at every milestone and gate start. Operator notes, printed once, never
 blocking: **L2 needs a one-time interactive login** (`CLAUDE_CONFIG_DIR=~/.claude-overflow claude` →
 `/login` with the second account; until then L2 is ABSENT and T3 spills to L3 Astra → L1 Opus 5.5);
-pooling two subscriptions is the operator's call (plan terms assume individual use); when the grok
-sandbox cannot apply (status `sandbox: none`) L4 is NOT OS-contained — run `grok update` or fix the
-`/var/run/docker.sock` symlink to restore containment.
+pooling two subscriptions is the operator's call (plan terms assume individual use); Grok reviews run
+ONLY inside grok's OS sandbox — when it cannot apply (this Mac: OrbStack symlinks
+`/var/run/docker.sock`) L4 is ABSENT, no plan-only fallback: run `grok update` or fix the symlink to
+restore containment, or opt in with `gstack-config set grok_allow_unsandboxed true` (default false),
+after which the unsandboxed fallback runs and status records `sandbox: none, unsandboxed_opt_in: true`;
+L4 is reviewer-only, and before each Grok review the helper strips the repo's checked-in grok/agent
+config (`.grok/`, `.envrc`, matched case-insensitively) from the disposable review worktree and
+refuses a worktree with populated submodules.
 
 **Permissions (auto mode).** `gstack-lane` is an external writable CLI the auto-mode classifier
 blocks by default — the operator needs ONE allow rule for `~/.claude/skills/gstack/bin/gstack-lane`.
@@ -785,7 +791,8 @@ SET including shared surfaces — interfaces, lockfiles, schemas, generated outp
 milestone branch AND its `owns` set is disjoint from every in-flight task's `owns` (file-level
 disjointness — overlapping write sets are sequenced even when logically unrelated). Keep admitting
 ready tasks while caps allow; there are no wave barriers.
-- **Caps:** per lane L1 = 2, L2 = 2, L3 = 2, L4 = 1; global = `autobuilder_max_parallel` worker
+- **Caps:** per lane L1 = 2, L2 = 2, L3 = 2, L4 = 1 (reviews only — L4 never takes an impl slot);
+  global = `autobuilder_max_parallel` worker
   payloads (read in step 0; default 6). Reviewers count; background `gstack-lane run` launches
   count against THEIR lane, not L1. Reserve the next gate's reviewer seats before admitting new
   implementation work (rule 2). Class-R workers sit outside these caps (rule 2). Heavy checks: ≤ 2
@@ -801,17 +808,20 @@ ready tasks while caps allow; there are no wave barriers.
   Dependents start from the INTEGRATED milestone branch, never a sibling's.
 - **In-session (L1) task:** the scribe writes the brief; dispatch per the Claude recipe (Quick
   reference), `model:` + effort from its tier row.
-- **External-lane (L2/L3/L4) task:** YOU launch it — one top-level Bash call with
+- **External-lane (L2/L3) task:** YOU launch it — one top-level Bash call with
   `run_in_background: true`, into a FRESH attempt dir (`run` refuses an existing `--out`):
   `A="$RUN_DIR/attempts/<id>/<attempt_id>"; mkdir -p "$A" && ~/.claude/skills/gstack/bin/gstack-lane run
-  --run-dir "$RUN_DIR" --lane <l2|l3|l4> --mode impl --tier T<n> --model <id> --effort <e>
+  --run-dir "$RUN_DIR" --lane <l2|l3> --mode impl --tier T<n> --model <id> --effort <e>
   --cwd "$RUN_DIR/wt/<id>" --prompt-file <brief> --out "$A/impl.json" --schema <envelope schema>
   --timeout <s> --allow-cmd "<vetted check prefix>"… >/dev/null 2>&1; ~/.claude/skills/gstack/bin/gstack-lane summary --out "$A/impl.json"`
-  (lane/model/effort from the routing table; `--tier` is REQUIRED for L4 impl — T0/T1 only).
-  `--allow-cmd` carries the milestone's check commands for L2/L4 impl — only
+  (lane/model/effort from the routing table; L4 is reviewer-only — the helper rejects `--lane l4
+  --mode impl`). `--allow-cmd` carries the milestone's check commands for L2 impl — only
   test/build-runner prefixes (`bun test`, `npm test`, `make`, `cargo`, `pytest`, `gradle`, …); the
   helper rejects shells and inline interpreters (`bash -c`, `eval`, `python -c`, `curl`, …) — never
-  try to smuggle one through. The helper owns the hard deadline (kills the whole process tree),
+  try to smuggle one through. Know what that grant means: only the PREFIX is vetted, and Claude's
+  `Bash(prefix:*)` permits arbitrary trailing args, so a check command on L2 impl = repo code
+  running as the operator (inherent to "run the tests"); only L3 runs its checks inside an OS
+  sandbox. The helper owns the hard deadline (kills the whole process tree),
   the `ok|throttle|quota|auth|timeout|error` classification, the REVIEW-only timeout step-down (an
   impl timeout is class `timeout` — never a silent effort drop below the tier's floor) and
   `lanes.json`; never retry around it by hand.
@@ -1309,12 +1319,14 @@ esac
 
 *Grok member — latest model (no `-m` in the recipe; the helper resolves and pins the CLI default; a
 family mismatch is `model_mismatch: true`, a coercion NOTE — the only seat with that concession),
-ladder `high`@600s → `medium`@300s, `--permission-mode plan` in its OWN detached worktree. `--sandbox
-read-only` is tried first and falls back to plan-only on the "could not apply the 'read-only' sandbox
-profile" refusal (`sandbox: none`) — NOT an OS boundary, so the helper fingerprints both worktrees AND
-the shared git control state before/after (bounded); any change or snapshot timeout → `tainted: true`
-→ INVALID. NEVER `--always-approve`. `grok_reviews=disabled` (bin default) makes L4 ABSENT for EVERY
-use. No `review` subcommand — the diff scope lives in the prompt:*
+ladder `high`@600s → `medium`@300s, `--permission-mode plan` + `--sandbox read-only` in its OWN detached
+worktree. The OS sandbox is mandatory: on the "could not apply the 'read-only' sandbox profile" refusal
+the member is ABSENT (reason "sandbox unavailable") — the plan-only fallback runs ONLY when the operator
+set `grok_allow_unsandboxed true` (status `sandbox: none, unsandboxed_opt_in: true`), and plan mode is
+NOT an OS boundary, so the helper then fingerprints both worktrees AND the shared git control state
+before/after (bounded); any change or snapshot timeout → `tainted: true` → INVALID. NEVER
+`--always-approve`. `grok_reviews=disabled` (bin default) makes L4 ABSENT for EVERY use. No `review`
+subcommand — the diff scope lives in the prompt:*
 
 ```bash
 # grok_reviews defaults to `disabled` (paid, opt-in): ONLY an explicit `enabled` turns this member on — an
@@ -1393,8 +1405,9 @@ complete, the station FAILs. Never read a silent no-op as clean.
 
 **Filesystem-boundary note:** the codex boundary text above is host-neutral (matching autoplan's
 codex recipes) — keep its intent in sync with codex/SKILL.md.tmpl's canonical boundary. Codex
-reviews run `-s read-only`; Grok's plan mode is NOT an OS boundary, so each member gets its own
-disposable worktree and the helper's before/after snapshot turns any write into `tainted` → INVALID.
+reviews run `-s read-only`; Grok reviews run inside grok's OS sandbox (unsandboxed only by operator
+opt-in, where plan mode is NOT an OS boundary) — so each member gets its own disposable worktree and
+the helper's before/after snapshot turns any write into `tainted` → INVALID.
 
 **Per-gate dashboard log — one entry PER review PER gate** (four reviews → four entries, all
 `via: "autobuilder-loop"`, same commit):
