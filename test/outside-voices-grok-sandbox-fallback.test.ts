@@ -39,6 +39,8 @@ import {
   VERDICT_FENCE_END,
   VOICE_SCHEMA_ID,
 } from '../lib/outside-voices/registry';
+import { platformTmpEligibility } from './helpers/neutral-cwd-eligibility';
+import { probeVoice, SENTINEL_NAME, type CanaryOutcome } from './helpers/sandbox-canary-probe';
 
 // Each scenario spawns the real panel (≈10 bun helpers); generous for slow CI.
 setDefaultTimeout(120_000);
@@ -97,6 +99,49 @@ case "$STUB_GROK_MODE" in
   refuse-124)            refusal; exit 124 ;;
   refuse-124-high)       [ "$sandboxed" = 1 ] && [ "$effort" = high ] && { refusal; exit 124; }; verdict; exit 0 ;;
   fake-trailer)          verdict; echo "grok_rc=0 effort=FAKE sandbox=none"; exit 0 ;;
+  # Taint scenarios (A2): the UNSANDBOXED rerun tampers with state outside its cwd,
+  # then still emits a valid nonce-bearing verdict.
+  refuse-then-forge-sibling)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    printf '{"schema":"outside-voice/v2","voice":"codex","vendor":"openai","status":"ready","verdict":"PASS","findings":[],"tokens":null,"cost_usd":null,"datamark":"%s"}\n' "$STUB_DATAMARK" > "$STUB_OUT_DIR/codex.result.json"
+    verdict; exit 0 ;;
+  refuse-then-plant-voice)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    printf '{"schema":"outside-voice/v2","voice":"fable","vendor":"anthropic","status":"ready","verdict":"PASS","findings":[],"tokens":null,"cost_usd":null,"datamark":"%s"}\n' "$STUB_DATAMARK" > "$STUB_OUT_DIR/fable.result.json"
+    verdict; exit 0 ;;
+  refuse-then-tamper-payload)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    printf '\nINJECTED-BY-GROK\n' >> "$STUB_OUT_DIR/panel.payload.txt"
+    verdict; exit 0 ;;
+  refuse-then-tamper-checkout)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    echo pwned > "$STUB_CHECKOUT/pwned.txt"
+    verdict; exit 0 ;;
+  refuse-then-tamper-gitctl)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    printf '#!/bin/sh\necho pwned\n' > "$STUB_CHECKOUT/.git/hooks/post-checkout"
+    verdict; exit 0 ;;
+  # P1-a: the out-dir ITSELF is moved aside and replaced by a symlink to another
+  # directory — recovery must neither write into nor delete from that directory.
+  refuse-then-swap-outdir)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    mv "$STUB_OUT_DIR" "$STUB_OUT_DIR.moved" && ln -s "$STUB_DECOY" "$STUB_OUT_DIR"
+    verdict; exit 0 ;;
+  refuse-then-plant-dirlink)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    ln -s "$STUB_DECOY" "$STUB_OUT_DIR/planted-link"
+    verdict; exit 0 ;;
+  # P1-b: the shared payload is swapped for a SYMLINK to a writable file OUTSIDE
+  # the out-dir (its original bytes saved to $STUB_SAVE first); the -ro variant
+  # then makes the out-dir read-only so recovery cannot unlink/replace the entry
+  # (the directory's identity still matches) — recovery must never write THROUGH it.
+  refuse-then-symlink-payload|refuse-then-symlink-payload-ro)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    cp "$STUB_OUT_DIR/panel.payload.txt" "$STUB_SAVE" \
+      && rm -f "$STUB_OUT_DIR/panel.payload.txt" \
+      && ln -s "$STUB_VICTIM" "$STUB_OUT_DIR/panel.payload.txt" || exit 98
+    [ "$STUB_GROK_MODE" = refuse-then-symlink-payload-ro ] && { chmod 0500 "$STUB_OUT_DIR" || exit 98; }
+    verdict; exit 0 ;;
   *) echo "stub: unknown STUB_GROK_MODE" >&2; exit 99 ;;
 esac
 `;
@@ -143,25 +188,18 @@ let STUB_DIR: string;
  * bin/gstack-neutral-cwd refuses any group/other-writable or foreign-owned
  * ancestor (TOCTOU), so the opted-in fallback can only run where the platform
  * temp dir's whole ancestry is private — true for macOS's /var/folders/<id>/T,
- * false under Linux's 1777 /tmp. Probed once; the cases that need a neutral cwd
- * to EXIST are skipped with a note otherwise (fail-closed cases always run).
+ * false under Linux's 1777 /tmp. Decided ONCE and INDEPENDENTLY of the helper
+ * (test/helpers/neutral-cwd-eligibility.ts — plain stat/readdir over the
+ * ancestry): probing with the helper itself was circular, so a helper regression
+ * that refused every clean dir silently skipped every success case (A5). On an
+ * eligible host the success cases are REQUIRED to pass; the fail-closed cases
+ * always run.
  */
-const NEUTRAL_OK: boolean = (() => {
-  const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-grok-fallback-probe-'));
-  try {
-    const r = spawnSync('/bin/bash', [path.join(ROOT, 'bin', 'gstack-neutral-cwd'), 'probe'], {
-      encoding: 'utf8',
-      timeout: 30_000,
-      env: { ...process.env, TMPDIR: probe },
-    });
-    if (r.status !== 0) {
-      process.stderr.write(`\ngrok fallback: neutral-cwd success cases SKIPPED — ${(r.stderr ?? '').trim()}\n`);
-    }
-    return r.status === 0;
-  } finally {
-    fs.rmSync(probe, { recursive: true, force: true });
-  }
-})();
+const ELIGIBILITY = platformTmpEligibility();
+const NEUTRAL_OK: boolean = ELIGIBILITY.eligible;
+if (!NEUTRAL_OK) {
+  process.stderr.write(`\ngrok fallback: neutral-cwd success cases SKIPPED — ${os.tmpdir()}: ${ELIGIBILITY.reason}\n`);
+}
 
 /** mkdir -p, then an explicit 0700 on the leaf (umask-independent private dir). */
 function mkPriv(p: string): string {
@@ -201,7 +239,17 @@ interface PanelRun {
 
 let runSeq = 0;
 
-function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, string> } = {}): PanelRun {
+/** git with the caller's hooks/signing neutralized (fixture setup only). */
+function fixtureGit(cwd: string, args: string[]) {
+  const r = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
+}
+
+function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, string>; noGit?: boolean } = {}): PanelRun {
   const dir = mkPriv(path.join(BASE, `run-${++runSeq}`));
   const home = path.join(dir, 'home');
   const cwd = path.join(dir, 'cwd');
@@ -233,6 +281,13 @@ function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, st
 
   fs.writeFileSync(path.join(cwd, 'prompt.txt'), 'Review this trivial change. Be terse.\n');
   fs.writeFileSync(path.join(cwd, 'untrusted.txt'), 'function add(a, b) { return a + b; }\n');
+  // The panel runs in the user's checkout: a git repo with a commit, so the
+  // opted-in fallback can fingerprint it (A2). `noGit` = a plain directory.
+  if (!opts.noGit) {
+    fixtureGit(cwd, ['init', '-q']);
+    fixtureGit(cwd, ['add', '-A']);
+    fixtureGit(cwd, ['commit', '-qm', 'init']);
+  }
   const log = path.join(dir, 'grok-spawns.log');
 
   const r = spawnSync(
@@ -263,6 +318,8 @@ function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, st
         STUB_GROK_LOG: log,
         STUB_GROK_MODE: mode,
         STUB_DATAMARK: NONCE,
+        STUB_OUT_DIR: outDir,
+        STUB_CHECKOUT: cwd,
         TMPDIR: privTmp,
         ...(opts.env ?? {}),
       },
@@ -443,6 +500,270 @@ describe('gstack-panel — grok sandbox refusal (behavioral, stub grok)', () => 
   });
 });
 
+// A2: the opted-in UNSANDBOXED rerun has no OS containment (a cwd change is
+// hygiene, not a jail) — it runs as the user and the per-run nonce is in its
+// prompt. The panel fingerprints the checkout (bin/gstack-lane's inert
+// `_snapshot`: git control state + status/diff/untracked) and every file in the
+// out-dir around that ONE spawn, keeps the tallied files' bytes in memory, and on
+// ANY change marks grok `error` (tainted), restores the siblings, and removes
+// planted files — before anything can be tallied.
+describe('gstack-panel — taint check around the unsandboxed grok fallback (A2)', () => {
+  function rec(run: PanelRun, voice: string): any {
+    const p = path.join(run.outDir, `${voice}.result.json`);
+    return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null;
+  }
+  function expectTainted(run: PanelRun): void {
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.spawns.length).toBe(2);
+    expect(run.record.status).toBe('error');
+    expect(run.record.verdict).toBeNull();
+    expect(run.record.reason).toContain('TAINTED');
+    expect(run.record.isolation).toBe('tool-policy-only');
+    expect(run.stdout).toMatch(/grok: [^\n]*TAINTED/);
+  }
+
+  test.skipIf(!NEUTRAL_OK)('a forged SIBLING verdict (codex.result.json) → grok error (tainted) and codex restored to what the panel wrote', () => {
+    const run = runPanel('refuse-then-forge-sibling', { optIn: true });
+    expectTainted(run);
+    const codex = rec(run, 'codex');
+    expect(codex.status).toBe('absent');
+    expect(codex.reason).toContain('kill-switch');
+    expect(codex.datamark).toBeUndefined();
+  });
+
+  test.skipIf(!NEUTRAL_OK)('a PLANTED voice file (fable.result.json) → grok error (tainted) and the planted file removed', () => {
+    const run = runPanel('refuse-then-plant-voice', { optIn: true });
+    expectTainted(run);
+    expect(fs.existsSync(path.join(run.outDir, 'fable.result.json'))).toBe(false);
+  });
+
+  test.skipIf(!NEUTRAL_OK)('a tampered shared PAYLOAD (reused by later voices) → grok error (tainted) and the payload restored', () => {
+    const run = runPanel('refuse-then-tamper-payload', { optIn: true });
+    expectTainted(run);
+    expect(fs.readFileSync(path.join(run.outDir, 'panel.payload.txt'), 'utf8')).not.toContain('INJECTED-BY-GROK');
+  });
+
+  test.skipIf(!NEUTRAL_OK)('a write into the CHECKOUT → grok error (tainted), loud warning', () => {
+    const run = runPanel('refuse-then-tamper-checkout', { optIn: true });
+    expectTainted(run);
+    expect(run.record.reason).toContain('checkout');
+  });
+
+  test.skipIf(!NEUTRAL_OK)('a planted git HOOK (git control state) → grok error (tainted)', () => {
+    const run = runPanel('refuse-then-tamper-gitctl', { optIn: true });
+    expectTainted(run);
+  });
+
+  /** Every path under `dir` (relative) with its kind + file bytes — a byte-exact tree listing. */
+  function treeListing(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (d: string, rel: string) => {
+      for (const n of fs.readdirSync(d).sort()) {
+        const p = path.join(d, n);
+        const r = rel ? `${rel}/${n}` : n;
+        const st = fs.lstatSync(p);
+        if (st.isSymbolicLink()) out.push(`link ${r} -> ${fs.readlinkSync(p)}`);
+        else if (st.isDirectory()) {
+          out.push(`dir ${r}`);
+          walk(p, r);
+        } else out.push(`file ${r} ${fs.readFileSync(p, 'utf8')}`);
+      }
+    };
+    walk(dir, '');
+    return out;
+  }
+  function mkDecoy(): string {
+    const decoy = mkPriv(path.join(BASE, `decoy-${runSeq + 1}`));
+    fs.writeFileSync(path.join(decoy, 'keep.txt'), 'victim\n');
+    mkPriv(path.join(decoy, 'keepdir'));
+    fs.writeFileSync(path.join(decoy, 'keepdir', 'inner.txt'), 'victim\n');
+    return decoy;
+  }
+  function lexists(p: string): boolean {
+    try {
+      fs.lstatSync(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test.skipIf(!NEUTRAL_OK)('the OUT-DIR itself swapped for a symlink to another dir → grok TAINTED, recovery ABORTED: nothing written into or deleted from that dir; panel stops non-zero', () => {
+    const decoy = mkDecoy();
+    const before = treeListing(decoy);
+    const run = runPanel('refuse-then-swap-outdir', { optIn: true, env: { STUB_DECOY: decoy } });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    // The other directory is byte-for-byte untouched: no restored/planted-sweep
+    // deletes, no grok/gemini record written THROUGH the swapped path.
+    expect(treeListing(decoy)).toEqual(before);
+    expect(run.record).toBeNull();
+    expect(run.status, run.stdout).not.toBe(0);
+    expect(run.stdout).toMatch(/grok: ERROR[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/WARNING[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/out-dir[^\n]*(replaced|identity)/i);
+    // The moved-aside real out-dir is also left alone (no recovery wrote there either).
+    const codex = JSON.parse(fs.readFileSync(path.join(`${run.outDir}.moved`, 'codex.result.json'), 'utf8'));
+    expect(codex.reason).toContain('kill-switch');
+    expect(lexists(path.join(`${run.outDir}.moved`, 'grok.result.json'))).toBe(false);
+  });
+
+  test.skipIf(!NEUTRAL_OK)('a PLANTED symlink-to-dir in the out-dir → tainted; only the LINK is removed, its target untouched', () => {
+    const decoy = mkDecoy();
+    const before = treeListing(decoy);
+    const run = runPanel('refuse-then-plant-dirlink', { optIn: true, env: { STUB_DECOY: decoy } });
+    expectTainted(run);
+    expect(lexists(path.join(run.outDir, 'planted-link'))).toBe(false);
+    expect(treeListing(decoy)).toEqual(before);
+  });
+
+  /** A writable file OUTSIDE the out-dir that a swapped-in payload symlink points at. */
+  const VICTIM_BYTES = 'victim: must never be overwritten\n';
+  function mkVictim(): { victim: string; save: string } {
+    const d = mkPriv(path.join(BASE, `victim-${runSeq + 1}`));
+    const victim = path.join(d, 'victim.txt');
+    fs.writeFileSync(victim, VICTIM_BYTES);
+    return { victim, save: path.join(d, 'payload.orig') };
+  }
+
+  test.skipIf(!NEUTRAL_OK)('payload swapped for a SYMLINK to an external file + out-dir chmod 0500 → recovery ABORTED, never written THROUGH: victim byte-identical, exit 3, TAINTED on stdout+stderr', () => {
+    const { victim, save } = mkVictim();
+    const outDir = path.join(BASE, `run-${runSeq + 1}`, 'out');
+    let run: PanelRun;
+    try {
+      run = runPanel('refuse-then-symlink-payload-ro', { optIn: true, env: { STUB_VICTIM: victim, STUB_SAVE: save } });
+    } finally {
+      // The stub left the out-dir 0500: restore it so afterAll can clean up.
+      if (lexists(outDir)) fs.chmodSync(outDir, 0o700);
+    }
+    expect(fs.existsSync(save), 'stub did not reach the swap').toBe(true);
+    // The external file is untouched — the restore did not follow the link.
+    expect(fs.readFileSync(victim, 'utf8')).toBe(VICTIM_BYTES);
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status, run.stdout + run.stderr).toBe(3);
+    // Compromised out-dir: no record written into it.
+    expect(run.record).toBeNull();
+    expect(run.stdout).toMatch(/grok: ERROR[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/WARNING[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/FATAL[^\n]*out-dir/);
+    // Nothing was written through or swapped: the link is still the planted one.
+    expect(fs.lstatSync(path.join(outDir, 'panel.payload.txt')).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(outDir).filter((n) => n.startsWith('.restore.'))).toEqual([]);
+  });
+
+  test.skipIf(!NEUTRAL_OK)('payload swapped for a SYMLINK to an external file, out-dir still writable → tainted; the LINK is replaced by a regular file with the original bytes, victim untouched', () => {
+    const { victim, save } = mkVictim();
+    const run = runPanel('refuse-then-symlink-payload', { optIn: true, env: { STUB_VICTIM: victim, STUB_SAVE: save } });
+    expectTainted(run);
+    expect(fs.readFileSync(victim, 'utf8')).toBe(VICTIM_BYTES);
+    const p = path.join(run.outDir, 'panel.payload.txt');
+    const st = fs.lstatSync(p);
+    expect(st.isSymbolicLink()).toBe(false);
+    expect(st.isFile()).toBe(true);
+    expect(fs.readFileSync(p, 'utf8')).toBe(fs.readFileSync(save, 'utf8'));
+    expect(fs.readdirSync(run.outDir).filter((n) => n.startsWith('.restore.'))).toEqual([]);
+  });
+
+  /**
+   * PATH-shimmed `mktemp`: every call with a `./.restore.*` template (the taint
+   * recovery's temp) is logged as `<cwd>\t<template>\t<returned>\t<inode>`; all
+   * other calls pass straight through to the real mktemp. mode=record → the REAL
+   * mktemp creates the temp; mode=fifo → a FIFO is planted at the exact name the
+   * shim returns (an attacker who won the name), which recovery must refuse.
+   */
+  const REAL_MKTEMP = spawnSync('/bin/sh', ['-c', 'command -v mktemp'], { encoding: 'utf8', timeout: 10_000 }).stdout.trim() || '/usr/bin/mktemp';
+  function mkMktempShim(mode: 'record' | 'fifo'): { dir: string; log: string } {
+    const dir = mkPriv(path.join(BASE, `mktemp-shim-${runSeq + 1}`));
+    const log = path.join(dir, 'mktemp.log');
+    fs.writeFileSync(
+      path.join(dir, 'mktemp'),
+      `#!/bin/sh
+last=""; for a in "$@"; do last="$a"; done
+case "$last" in
+  ./.restore.*|.restore.*) ;;
+  *) exec ${REAL_MKTEMP} "$@" ;;
+esac
+if [ "${mode}" = fifo ]; then
+  r="./.restore.SHIMFIFO00"
+  mkfifo "$r" || exit 1
+else
+  r="$(${REAL_MKTEMP} "$@")" || exit 1
+fi
+printf '%s\t%s\t%s\t%s\n' "$(pwd -P)" "$last" "$r" "$(ls -di "$r" | awk '{print $1}')" >> "${log}"
+printf '%s\n' "$r"
+`,
+    );
+    fs.chmodSync(path.join(dir, 'mktemp'), 0o755);
+    return { dir, log };
+  }
+  function shimCalls(log: string): { cwd: string; template: string; name: string; inode: string }[] {
+    if (!fs.existsSync(log)) return [];
+    return fs
+      .readFileSync(log, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [cwd, template, name, inode] = l.split('\t');
+        return { cwd, template, name, inode };
+      });
+  }
+
+  test.skipIf(!NEUTRAL_OK)('recovery creates each restore temp with mktemp INSIDE the out-dir, and that exact file is what gets renamed into place', () => {
+    const shim = mkMktempShim('record');
+    const run = runPanel('refuse-then-tamper-payload', { optIn: true, env: { PATH: `${shim.dir}:${STUB_DIR}:${process.env.PATH}` } });
+    expectTainted(run);
+    const calls = shimCalls(shim.log);
+    expect(calls.length, 'recovery never called mktemp').toBeGreaterThan(0);
+    const outPhys = fs.realpathSync(run.outDir);
+    for (const c of calls) {
+      expect(c.cwd).toBe(outPhys);
+      expect(c.template).toMatch(/^(\.\/)?\.restore\.X{10,}$/);
+      expect(lexists(path.join(run.outDir, c.name))).toBe(false); // renamed away
+    }
+    const payload = path.join(run.outDir, 'panel.payload.txt');
+    expect(fs.readFileSync(payload, 'utf8')).not.toContain('INJECTED-BY-GROK');
+    // The restored payload IS the mktemp-created file (same inode), not a rewrite of the old entry.
+    expect(calls.map((c) => c.inode)).toContain(String(fs.lstatSync(payload).ino));
+  });
+
+  test.skipIf(!NEUTRAL_OK)('a FIFO planted at the exact name mktemp returns → recovery fails CLOSED fast (no hang): exit 3, TAINTED, nothing restored or written', () => {
+    const shim = mkMktempShim('fifo');
+    const t0 = Date.now();
+    const run = runPanel('refuse-then-tamper-payload', { optIn: true, env: { PATH: `${shim.dir}:${STUB_DIR}:${process.env.PATH}` } });
+    expect(Date.now() - t0).toBeLessThan(60_000);
+    expect(shimCalls(shim.log).length, 'recovery never called mktemp').toBeGreaterThan(0);
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status, run.stdout + run.stderr).toBe(3);
+    expect(run.record).toBeNull();
+    expect(run.stdout).toMatch(/grok: ERROR[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/WARNING[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/FATAL[^\n]*out-dir/);
+    // Recovery stopped at the first temp: the tampered payload was NOT rewritten,
+    // the FIFO is left as planted (never opened for writing), no other temps remain.
+    expect(fs.readFileSync(path.join(run.outDir, 'panel.payload.txt'), 'utf8')).toContain('INJECTED-BY-GROK');
+    expect(fs.lstatSync(path.join(run.outDir, '.restore.SHIMFIFO00')).isFIFO()).toBe(true);
+    expect(fs.readdirSync(run.outDir).filter((n) => n.startsWith('.restore.'))).toEqual(['.restore.SHIMFIFO00']);
+  }, 90_000);
+
+  test('refusal + opt-in from a NON-git directory (checkout cannot be fingerprinted) → ABSENT fail-closed, exactly 1 spawn, no second receipt', () => {
+    const run = runPanel('refuse-then-ok', { optIn: true, noGit: true });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(1);
+    expect(run.record.status).toBe('absent');
+    // gstack-neutral-cwd runs FIRST: on a host whose temp ancestry is not private
+    // (Linux's 1777 /tmp) it refuses before the fingerprint is ever attempted, so
+    // branch on the INDEPENDENT eligibility oracle — never on the helper itself.
+    if (NEUTRAL_OK) {
+      expect(run.record.reason).toContain('cannot fingerprint');
+    } else {
+      expect(run.record.reason).toContain('no neutral working directory');
+      expect(run.record.reason).not.toContain('cannot fingerprint');
+    }
+    expect(run.record.reason).toContain('fail-closed');
+    expect(run.record).not.toHaveProperty('isolation');
+    expect(run.receipts.length).toBe(1);
+  });
+});
+
 describe('gstack-panel — the bun-less record fallback keeps the degraded-isolation stamp', () => {
   // Extract the real function (brace-balanced) and run it in isolation.
   function extractFn(name: string): string {
@@ -455,7 +776,8 @@ describe('gstack-panel — the bun-less record fallback keeps the degraded-isola
     }
     throw new Error(`${name}: unbalanced braces`);
   }
-  const FNS = `${extractFn('_panel_vendor_fallback')}\n${extractFn('_panel_bash_absent_json')}\n`;
+  const FN_NAMES = ['_panel_vendor_fallback', '_panel_isolation_note_fallback', '_panel_bash_absent_json'];
+  const FNS = `${FN_NAMES.filter((n) => PANEL_SRC.includes(`${n}() {`)).map(extractFn).join('\n')}\n`;
 
   function bashAbsent(isolation: string): any {
     const r = spawnSync('bash', ['-c', `${FNS}\nPANEL_ISOLATION="$1"\n_panel_bash_absent_json grok absent "CLI timed out"`, 'bash', isolation], {
@@ -468,7 +790,9 @@ describe('gstack-panel — the bun-less record fallback keeps the degraded-isola
   test('PANEL_ISOLATION=tool-policy-only → isolation + note present; empty → absent', () => {
     const degraded = bashAbsent('tool-policy-only');
     expect(degraded.isolation).toBe('tool-policy-only');
-    expect(degraded.isolation_note).toContain('opted in');
+    // D2 anti-drift: the bun-less literal is BYTE-IDENTICAL to the registry's
+    // single-source note (what the bun path stamps) — never its own wording.
+    expect(degraded.isolation_note).toBe((VOICES.grok as any).invoke.sandboxRefusal.note);
     expect(degraded.status).toBe('absent');
     const normal = bashAbsent('');
     expect(normal).not.toHaveProperty('isolation');
@@ -533,7 +857,12 @@ describe('plan-deliverables grok gap-check loop (behavioral, /bin/bash + stubs)'
    * TMPDIR); 'checkout' — TMPDIR inside a git checkout with GIT_CEILING_DIRECTORIES
    * set to its root (a git-based guard would be blinded).
    */
-  function runLoop(mode: string, allowUnsandboxed: string, tmp: 'abs' | 'relative' | 'checkout' = 'abs') {
+  function runLoop(
+    mode: string,
+    allowUnsandboxed: string,
+    tmp: 'abs' | 'relative' | 'checkout' = 'abs',
+    repo: 'git' | 'none' = 'git',
+  ) {
     const dir = fs.mkdtempSync(path.join(BASE ?? os.tmpdir(), 'pd-'));
     const home = path.join(dir, 'home');
     const work = path.join(dir, 'work');
@@ -550,7 +879,19 @@ describe('plan-deliverables grok gap-check loop (behavioral, /bin/bash + stubs)'
       `#!/bin/sh\n[ "$1" = get ] && [ "$2" = grok_allow_unsandboxed ] && { printf '%s\\n' "$STUB_ALLOW"; exit 0; }\nexit 0\n`,
     );
     fs.symlinkSync(path.join(ROOT, 'bin', 'gstack-neutral-cwd'), path.join(binDir, 'gstack-neutral-cwd'));
+    // The REAL inert snapshot brackets the opted-in unsandboxed attempt (taint check).
+    fs.symlinkSync(path.join(ROOT, 'bin', 'gstack-lane'), path.join(binDir, 'gstack-lane'));
     for (const f of [path.join(stubs, 'grok'), path.join(binDir, 'gstack-config')]) fs.chmodSync(f, 0o755);
+    // $_REPO_ROOT — the user's checkout the unsandboxed attempt must not touch. A
+    // separate dir (never an ancestor of TMPDIR: the neutral cwd lives there).
+    // 'none' = a plain directory that cannot be fingerprinted.
+    const repoDir = mkPriv(path.join(dir, 'repo'));
+    fs.writeFileSync(path.join(repoDir, 'README.md'), 'checkout\n');
+    if (repo === 'git') {
+      fixtureGit(repoDir, ['init', '-q']);
+      fixtureGit(repoDir, ['add', '-A']);
+      fixtureGit(repoDir, ['commit', '-qm', 'init']);
+    }
 
     let tmpdir = tmpAbs;
     const extraEnv: Record<string, string> = {};
@@ -594,6 +935,8 @@ describe('plan-deliverables grok gap-check loop (behavioral, /bin/bash + stubs)'
         STUB_GROK_LOG: log,
         STUB_GROK_MODE: mode,
         STUB_ALLOW: allowUnsandboxed,
+        STUB_CHECKOUT: repoDir,
+        _REPO_ROOT: repoDir,
       },
     });
     const tmpScan = rel ? path.join(work, 'rel-tmp') : tmp === 'checkout' ? tmpdir : tmpAbs;
@@ -601,7 +944,7 @@ describe('plan-deliverables grok gap-check loop (behavioral, /bin/bash + stubs)'
       r,
       spawns: readSpawns(log),
       status: fs.readFileSync(abs(files.GAP_STATUS), 'utf8').split('\n').filter(Boolean),
-      gap: fs.readFileSync(abs(files.GROK_GAP), 'utf8'),
+      gap: fs.existsSync(abs(files.GROK_GAP)) ? fs.readFileSync(abs(files.GROK_GAP), 'utf8') : '',
       work: fs.realpathSync(work),
       leftovers: fs.readdirSync(tmpScan).filter((n) => n.startsWith('plandeliv-grok-')),
     };
@@ -668,10 +1011,121 @@ describe('plan-deliverables grok gap-check loop (behavioral, /bin/bash + stubs)'
     expect(o.status).toEqual(['grok_rc=0 effort=medium sandbox=read-only']);
   });
 
+  // P3: the opted-in unsandboxed attempt is bracketed by the SAME checkout
+  // fingerprint the panel uses (`gstack-lane _snapshot` on $_REPO_ROOT).
+  test.skipIf(!NEUTRAL_OK)('opted in, the unsandboxed attempt WRITES INTO THE CHECKOUT → output discarded, status grok=tainted, loud warning', () => {
+    const o = runLoop('refuse-then-tamper-checkout', 'true');
+    expect(o.r.status, o.r.stderr).toBe(0);
+    expect(o.spawns.length).toBe(2);
+    expect(o.spawns[1].argv).not.toContain('--sandbox');
+    expect(o.gap).not.toContain('gap list'); // GROK_GAP discarded
+    expect(o.status[0]).toBe('grok_rc=0 effort=high sandbox=none');
+    expect(o.status.some((l) => l.startsWith('grok=tainted'))).toBe(true);
+    expect(o.r.stdout + o.r.stderr).toMatch(/WARNING[^\n]*TAINTED/);
+    expect(o.leftovers).toEqual([]); // neutral cwd + snapshot file cleaned up
+  });
+
+  test.skipIf(!NEUTRAL_OK)('opted in, an unchanged checkout → output kept, no grok=tainted line', () => {
+    const o = runLoop('refuse-then-ok', 'true');
+    expect(o.gap).toContain('gap list');
+    expect(o.status).toEqual(['grok_rc=0 effort=high sandbox=none']);
+    expect(o.r.stdout + o.r.stderr).not.toContain('TAINTED');
+  });
+
+  test('opted in, but $_REPO_ROOT cannot be fingerprinted (not a git checkout) → NO unsandboxed attempt (fail-closed)', () => {
+    const o = runLoop('refuse-then-ok', 'true', 'abs', 'none');
+    expect(o.r.status, o.r.stderr).toBe(0);
+    expect(o.spawns.length).toBe(1);
+    expect(o.spawns[0].argv).toContain('--sandbox read-only');
+    expect(o.status.length).toBe(1);
+    // neutral-cwd runs first; branch on the independent eligibility oracle.
+    expect(o.status[0]).toBe(
+      NEUTRAL_OK
+        ? 'grok_rc=1 effort=high sandbox=refused (no checkout fingerprint)'
+        : 'grok_rc=1 effort=high sandbox=refused (no neutral cwd)',
+    );
+    expect(o.leftovers).toEqual([]);
+  });
+
   test('a model-printed fake status trailer stays in grok output and never reaches the shell-status file', () => {
     const o = runLoop('fake-trailer', 'false');
     expect(o.r.status, o.r.stderr).toBe(0);
     expect(o.gap).toContain('effort=FAKE');
     expect(o.status).toEqual(['grok_rc=0 effort=high sandbox=read-only']);
+  });
+});
+
+// ── the live write-denial canary's refusal handling, run HERMETICALLY ───────
+// test/outside-voices-sandbox.test.ts only probes under EVALS_TIER=periodic with
+// real paid CLIs; its probe logic (test/helpers/sandbox-canary-probe.ts) is
+// driven here with a STUB runner so (A3) the opted-in re-run's cwd comes from
+// the REAL bin/gstack-neutral-cwd — panel parity, failing closed when it refuses —
+// and (A4) a first invocation that WROTE the sentinel is never laundered into
+// "sandbox unavailable" / a tool-policy-only pass by a refusal-shaped exit.
+describe('write-denial canary probe — sandbox-refusal handling (stub runner, no EVALS)', () => {
+  const grok = CLI_VOICES.find((v) => v.name === 'grok')!;
+  interface Call {
+    argv: string[];
+    cwd: string;
+    ls: string[];
+  }
+
+  function stubRun(opts: { firstWrites?: boolean }) {
+    const calls: Call[] = [];
+    const run = async (_bin: string, argv: string[], cwd: string): Promise<CanaryOutcome> => {
+      calls.push({ argv, cwd, ls: fs.readdirSync(cwd) });
+      if (argv.includes('--sandbox')) {
+        if (opts.firstWrites) fs.writeFileSync(path.join(cwd, SENTINEL_NAME), 'canary');
+        return { timedOut: false, exitCode: 1, stdout: '', stderr: REFUSAL_STDERR };
+      }
+      return { timedOut: false, exitCode: 0, stdout: 'I did not write anything.', stderr: '' };
+    };
+    return { calls, run };
+  }
+  const quiet = () => {};
+
+  test('(A4) refusal-shaped exit AFTER the sentinel was written, NOT opted in → wrote:true and NOT sandbox-unavailable (write wins)', async () => {
+    const { calls, run } = stubRun({ firstWrites: true });
+    const probe = await probeVoice(grok, { run, optedIn: () => false, log: quiet });
+    expect(calls.length).toBe(1);
+    expect(probe.wrote).toBe(true);
+    expect(probe.sandboxUnavailable).toBeFalsy();
+    expect(probe.verdict).toBe('blocked'); // → the registration loop's WROTE-WINS failing test
+  });
+
+  test('(A4) refusal-shaped exit AFTER the sentinel was written, opted in → wrote:true, no unsandboxed re-run', async () => {
+    const { calls, run } = stubRun({ firstWrites: true });
+    const probe = await probeVoice(grok, { run, optedIn: () => true, log: quiet });
+    expect(calls.length).toBe(1);
+    expect(probe.wrote).toBe(true);
+    expect(probe.isolation).toBeUndefined();
+  });
+
+  test('(A3) opted in, but the REAL gstack-neutral-cwd refuses (TMPDIR inside a checkout with .grok/) → no unsandboxed re-run; sandbox unavailable', async () => {
+    const co = mkPriv(path.join(BASE, `canary-co-${++runSeq}`));
+    spawnSync('git', ['init', '-q', co], { timeout: 30_000 });
+    mkPriv(path.join(co, '.grok'));
+    const tmp = mkPriv(path.join(co, '.tmp'));
+    const { calls, run } = stubRun({});
+    const probe = await probeVoice(grok, { run, optedIn: () => true, log: quiet, env: { ...process.env, TMPDIR: tmp } });
+    expect(calls.length, JSON.stringify(calls)).toBe(1);
+    expect(probe.sandboxUnavailable).toBe(true);
+    expect(probe.isolation).toBeUndefined();
+    expect(probe.neutralCwdError ?? '').toContain('no neutral cwd');
+    expect(fs.readdirSync(tmp)).toEqual([]);
+  });
+
+  test.skipIf(!NEUTRAL_OK)('(A3) opted in, private TMPDIR → ONE re-run without --sandbox from the helper-made EMPTY dir under that TMPDIR, removed afterwards', async () => {
+    const tmp = mkPriv(path.join(BASE, `canary-tmp-${++runSeq}`));
+    const { calls, run } = stubRun({});
+    const probe = await probeVoice(grok, { run, optedIn: () => true, log: quiet, env: { ...process.env, TMPDIR: tmp } });
+    expect(calls.length).toBe(2);
+    expect(calls[1].argv).not.toContain('--sandbox');
+    expect(calls[1].cwd.startsWith(fs.realpathSync(tmp) + path.sep)).toBe(true);
+    expect(path.basename(calls[1].cwd)).toMatch(/^outside-voices-grok-fallback-/);
+    expect(calls[1].ls).toEqual([]);
+    expect(fs.existsSync(calls[1].cwd)).toBe(false);
+    expect(probe.isolation).toBe('tool-policy-only');
+    expect(probe.wrote).toBe(false);
   });
 });

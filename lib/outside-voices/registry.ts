@@ -291,7 +291,8 @@ export interface CliInvokeSpec {
    * without `sandboxFlag` (`extraFlags` unchanged, so the CLI's read-only tool
    * policy still applies) — under the neutralized env, from the neutral
    * empty dir bin/gstack-neutral-cwd makes (single source: no .git/project config
-   * in it or any ancestor; the review sees only the prompt), after a fresh egress receipt — and stamps
+   * in it or any ancestor; the review sees only the prompt), after a fresh egress receipt, bracketed
+   * by a checkout + out-dir taint check (any change → `error`, TAINTED) — and stamps
    * `isolation`/`isolation_note` on every record for that voice's run. No other
    * failure is retried. Adapters without it can never be built or run
    * unsandboxed (`buildArgv(…, { withoutSandbox: true })` throws).
@@ -482,7 +483,18 @@ const codexAdapter: CliVoiceAdapter = {
  * makes grok ABSENT; with it, ONE plan-mode-only rerun under the neutralized env
  * (`env -u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BASH
  * GROK_ENVRC_TIMEOUT_SECS=0`) from bin/gstack-neutral-cwd's empty dir (the panel cannot strip the
- * user's real checkout the way the lane strips its disposable worktree).
+ * user's real checkout the way the lane strips its disposable worktree), bracketed by a taint check
+ * (bin/gstack-panel: the checkout via bin/gstack-lane's inert `_snapshot`, plus every out-dir entry
+ * and the in-memory bytes of each tallied/reused file — unfingerprintable → ABSENT, any change →
+ * grok `error` TAINTED with siblings restored).
+ *
+ * OPERATORS: the opted-in fallback is UNAVAILABLE (grok stays ABSENT) wherever
+ * bin/gstack-neutral-cwd fails closed — when TMPDIR resolves under a group/other-writable or
+ * foreign-owned dir (e.g. Linux's 1777 /tmp or /var/tmp) or under an ancestor holding `.git` or
+ * agent config (e.g. $HOME, which usually holds .claude/.cursor/.grok, or any checkout). The macOS
+ * default TMPDIR (/var/folders/<id>/T) qualifies; elsewhere set TMPDIR to a private 0700 dir outside
+ * $HOME, /tmp and every checkout (e.g. `$XDG_RUNTIME_DIR`). It is likewise refused when the panel's
+ * cwd is not a git checkout with a commit (nothing to fingerprint).
  */
 const GROK_SANDBOX_REFUSAL: SandboxRefusalSpec = {
   marker: "could not apply the 'read-only' sandbox profile",

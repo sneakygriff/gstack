@@ -19,8 +19,12 @@
  * as ordinary file paths; an unexpanded/quoted glob (e.g. a single `dir/*.json`
  * argv token, as a test harness might pass without a shell) is expanded here.
  *
- * `--json` prints the raw `tallyVoices()` result (a `TallyResult`) as JSON —
- * nothing else. Otherwise the human consensus table renders.
+ * `--json` prints the `tallyVoices()` result (a `TallyResult`) as JSON — and,
+ * ONLY when a voice ran under degraded isolation (panel-stamped
+ * `isolation: "tool-policy-only"`), that voice's `perVoice` entry carries
+ * `isolation` and a top-level `degraded_isolation: [{voice, isolation}]` lists
+ * them. These annotations never change any tally/quorum field. Otherwise the
+ * human consensus table renders.
  *
  * Exit: always 0 — this is advisory and never blocks (§5). A directory/glob
  * that matches nothing tallies as NO_VOICES (§5 guard 1), the same "proceed
@@ -506,7 +510,8 @@ function printUsage(code: number): never {
       '\n' +
       'Flags:\n' +
       '  --dir DIR        Read DIR/*.result.json (non-recursive)\n' +
-      '  --json           Print the raw tallyVoices() result as JSON, no table\n' +
+      '  --json           Print the tallyVoices() result as JSON, no table (+ perVoice[].isolation\n' +
+      '                   and degraded_isolation when a voice ran without its OS sandbox)\n' +
       '  --surface NAME   Label for the Surface: line (default: "unspecified")\n' +
       '  --budget-usd N   Budget cap shown as "spent / N" on the header line\n' +
       '  --nonce TOKEN    Per-run datamark. Nonce authentication is MANDATORY: a\n' +
@@ -520,6 +525,30 @@ function printUsage(code: number): never {
       'as NO_VOICES (§5 guard 1), the same "zero outside input" case as today.\n',
   );
   process.exit(code);
+}
+
+/**
+ * `--json` output: the `tallyVoices()` result, ANNOTATED (never re-computed)
+ * when a voice ran under degraded isolation — the persisted aggregate record
+ * must not be indistinguishable from a fully sandboxed run. Each degraded voice's
+ * `perVoice` entry gains `isolation`, and a top-level `degraded_isolation` lists
+ * them in canonical order. Recommendation, status, quorum, perVendor, tensions,
+ * dissents and diversityFlags are the tally's own values, untouched. With no
+ * degraded voice the output is exactly the tally (no new keys).
+ */
+function withDegradedIsolation(
+  tally: TallyResult,
+  degraded: Set<ResultVoice>,
+): TallyResult | (TallyResult & { degraded_isolation: { voice: ResultVoice; isolation: 'tool-policy-only' }[] }) {
+  if (degraded.size === 0) return tally;
+  const order = (RESULT_VOICES as readonly ResultVoice[]).filter((v) => degraded.has(v));
+  return {
+    ...tally,
+    perVoice: tally.perVoice.map((pv) =>
+      degraded.has(pv.voice) ? { ...pv, isolation: 'tool-policy-only' as const } : pv,
+    ),
+    degraded_isolation: order.map((voice) => ({ voice, isolation: 'tool-policy-only' as const })),
+  };
 }
 
 function main() {
@@ -537,7 +566,7 @@ function main() {
   const tally = tallyVoices(results);
 
   if (bools['--json']) {
-    process.stdout.write(JSON.stringify(tally, null, 2) + '\n');
+    process.stdout.write(JSON.stringify(withDegradedIsolation(tally, degraded), null, 2) + '\n');
     process.exit(0);
   }
 

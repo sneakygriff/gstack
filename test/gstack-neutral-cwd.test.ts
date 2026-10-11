@@ -19,28 +19,26 @@ import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { platformTmpEligibility, neutralCwdEligibility } from './helpers/neutral-cwd-eligibility';
 
 const HELPER = path.resolve(import.meta.dir, '..', 'bin', 'gstack-neutral-cwd');
 const PREFIX = 'ncwd-test';
 
-/** Can the platform temp dir host a neutral cwd at all (private ancestry)? Probed once. */
-const NEUTRAL_OK: boolean = (() => {
-  const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ncwd-probe-'));
-  try {
-    const r = spawnSync('/bin/bash', [HELPER, 'probe'], {
-      encoding: 'utf8',
-      timeout: 30_000,
-      env: { ...process.env, TMPDIR: probe },
-    });
-    if (r.status === 0) return true;
-    process.stderr.write(
-      `\ngstack-neutral-cwd: success-path tests SKIPPED — ${os.tmpdir()} cannot host a neutral cwd here: ${(r.stderr ?? '').trim()}\n`,
-    );
-    return false;
-  } finally {
-    fs.rmSync(probe, { recursive: true, force: true });
-  }
-})();
+/**
+ * Can the platform temp dir host a neutral cwd at all (private ancestry)? Decided
+ * INDEPENDENTLY of the helper under test (test/helpers/neutral-cwd-eligibility.ts):
+ * gating the success cases on the helper's own exit status was circular — a
+ * regression that refuses every clean dir would silently skip them all (A5).
+ * On an eligible host the success cases are REQUIRED; the agreement test below
+ * also fails when the helper and the oracle disagree in either direction.
+ */
+const ELIGIBILITY = platformTmpEligibility();
+const NEUTRAL_OK: boolean = ELIGIBILITY.eligible;
+if (!NEUTRAL_OK) {
+  process.stderr.write(
+    `\ngstack-neutral-cwd: success-path tests SKIPPED — ${os.tmpdir()} cannot host a neutral cwd here (independent check): ${ELIGIBILITY.reason}\n`,
+  );
+}
 
 let BASE: string;
 beforeAll(() => {
@@ -94,6 +92,14 @@ const DENY = ['.git', '.grok', '.claude', '.cursor', '.mcp.json', '.cursorrules'
 const PERM_REASON = 'writable by other users (or not owned by you/root)';
 
 describe('bin/gstack-neutral-cwd', () => {
+  test('agreement: the helper succeeds on a fresh private TMPDIR EXACTLY when the independent ancestry check says the host is eligible', () => {
+    const tmp = mkPriv(path.join(BASE, 'agree-tmp'));
+    const oracle = neutralCwdEligibility(tmp);
+    const r = run({ TMPDIR: tmp });
+    expect(r.code === 0, `oracle: ${JSON.stringify(oracle)}; helper: exit ${r.code} ${r.err}`).toBe(oracle.eligible);
+    if (r.code === 0) fs.rmSync(r.out, { recursive: true, force: true });
+  });
+
   test.skipIf(!NEUTRAL_OK)('(a)/(l) a private TMPDIR → exit 0; absolute, physical, empty dir; no deny-listed name or loose mode in any ancestor', () => {
     const tmp = mkPriv(path.join(BASE, 'clean-tmp'));
     const r = run({ TMPDIR: tmp });
@@ -209,6 +215,60 @@ describe('bin/gstack-neutral-cwd', () => {
     expect(r.code).not.toBe(0);
     expect(r.err).toContain('.GROKRC.toml');
     expect(leftovers(path.join(root, 'tmp'))).toEqual([]);
+  });
+
+  // (m) A1: a writable, NON-sticky shared TMPDIR lets another user swap the
+  // freshly created dir for a symlink before it is resolved. The swap is
+  // reproduced deterministically with a `mktemp` shim on PATH that returns a
+  // symlink at the requested template path. The helper must never adopt (and
+  // never clean up) the symlink TARGET: no recursive delete, no foreign cwd.
+  function mktempSwapShim(victim: string): string {
+    const shimDir = mkPriv(path.join(BASE, `shim-${path.basename(victim)}`));
+    fs.writeFileSync(
+      path.join(shimDir, 'mktemp'),
+      `#!/bin/bash\nt="\${@: -1}"\np="\${t%XXXXXX}AAAAAA"\nln -s "$SHIM_VICTIM" "$p" || exit 1\nprintf '%s\\n' "$p"\n`,
+    );
+    fs.chmodSync(path.join(shimDir, 'mktemp'), 0o755);
+    return shimDir;
+  }
+
+  test('(m) created dir swapped for a symlink to a NON-EMPTY dir → fails closed and the symlink target survives (no rm -rf of it)', () => {
+    const tmp = mkPriv(path.join(BASE, 'swap-tmp-a'));
+    const victim = mkPriv(path.join(BASE, 'victim-a'));
+    fs.writeFileSync(path.join(victim, 'precious.txt'), 'do not delete\n');
+    const shim = mktempSwapShim(victim);
+    const r = run({ TMPDIR: tmp, PATH: `${shim}:${process.env.PATH}`, SHIM_VICTIM: victim });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toBe('');
+    expect(fs.existsSync(path.join(victim, 'precious.txt'))).toBe(true);
+  });
+
+  test('(n) created dir swapped for a symlink to an EMPTY private dir elsewhere → refused (never hands out a cwd outside TMPDIR)', () => {
+    const tmp = mkPriv(path.join(BASE, 'swap-tmp-b'));
+    const victim = mkPriv(path.join(BASE, 'victim-b'));
+    const shim = mktempSwapShim(victim);
+    const r = run({ TMPDIR: tmp, PATH: `${shim}:${process.env.PATH}`, SHIM_VICTIM: victim });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toBe('');
+    expect(fs.existsSync(victim)).toBe(true);
+  });
+
+  test('(o) an unsafe TMPDIR is refused BEFORE anything is created in it', () => {
+    const tmp = mkPriv(path.join(BASE, 'pre-create-0777'));
+    fs.chmodSync(tmp, 0o777);
+    // A mktemp that would record its call: it must never be reached.
+    const shimDir = mkPriv(path.join(BASE, 'shim-precreate'));
+    const marker = path.join(BASE, 'precreate-mktemp-called');
+    fs.writeFileSync(path.join(shimDir, 'mktemp'), `#!/bin/bash\n: > "$SHIM_MARKER"\nexit 1\n`);
+    fs.chmodSync(path.join(shimDir, 'mktemp'), 0o755);
+    try {
+      const r = run({ TMPDIR: tmp, PATH: `${shimDir}:${process.env.PATH}`, SHIM_MARKER: marker });
+      expect(r.code).not.toBe(0);
+      expect(r.err).toContain(PERM_REASON);
+      expect(fs.existsSync(marker)).toBe(false);
+    } finally {
+      fs.chmodSync(tmp, 0o700);
+    }
   });
 
   test('usage: a missing or path-like prefix is rejected (exit 2) without creating anything', () => {

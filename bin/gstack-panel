@@ -80,11 +80,26 @@
 # fallback review sees ONLY the prompt content, never the checkout).
 # `--permission-mode plan` is then the only read-only guard: every grok record
 # for the run is stamped isolation:"tool-policy-only" + isolation_note and the
-# status line says DEGRADED ISOLATION. Operator fix: `grok update`, or a
+# status line says DEGRADED ISOLATION. Because nothing CONTAINS that process, the
+# spawn is bracketed by a TAINT CHECK (see "Taint check" below — bin/gstack-lane's
+# inert `_snapshot` of the checkout + the out-dir's entries and the in-memory bytes
+# of every tallied/reused file): no fingerprint → ABSENT; any change → grok
+# `error` (TAINTED), siblings restored, planted files removed. The fallback is
+# also unavailable (ABSENT) wherever bin/gstack-neutral-cwd fails closed — a
+# TMPDIR under a group/other-writable dir (Linux /tmp 1777) or under an ancestor
+# holding .git/agent config (e.g. $HOME/.claude): set TMPDIR to a private 0700
+# dir outside $HOME, /tmp and every checkout. Operator fix: `grok update`, or a
 # docker.sock that is not a symlink.
 #
 # Hygiene: no `set -e` (many intentional non-zero returns — gate misses, CLI
 # failures — are captured, not fatal), mirroring the autobuilder grok recipe.
+
+# bash 5.2+ hands a heredoc body of <= 64 KiB to the reader through a PIPE written
+# before the command starts; on macOS under pipe-buffer pressure a fresh pipe can be
+# 512 bytes, so the ~1.8 KB `<<'USAGE'` body below could block forever. Compat level
+# 50 restores the pre-5.2 tempfile path (ignored by bash < 4.3, e.g. macOS /bin/bash
+# 3.2) — same guard as bin/gstack-lane; pinned by test/heredoc-pipe-deadlock.test.ts.
+BASH_COMPAT=50
 
 set -o pipefail
 
@@ -352,15 +367,30 @@ _panel_json() { # <mode> <voice> [status] [reason]   (raw via stdin for parse)
     bun -e "$_PANEL_BUN_SCRIPT" 2>/dev/null
 }
 
+# Bun-less copy of the registry's degraded-isolation note (the registry — the
+# single source — is unreachable without bun). BYTE-IDENTICAL to
+# lib/outside-voices/registry.ts GROK_SANDBOX_REFUSAL.note: pinned by
+# test/outside-voices-grok-sandbox-fallback.test.ts (bun-less record fallback),
+# so an edit to either side fails CI until both match. The generic line matches
+# the bun script's fallback for a voice without a sandboxRefusal spec.
+# shellcheck disable=SC2016  # the note's backticks are literal text, never expanded
+_panel_isolation_note_fallback() { # <voice>
+  case "$1" in
+    grok) printf '%s' 'no OS sandbox: grok refused to start under --sandbox read-only (e.g. a symlinked /var/run/docker.sock under OrbStack) and the operator opted in (gstack-config grok_allow_unsandboxed=true). Read-only by grok'\''s --permission-mode plan tool policy alone; run from an empty temp dir with .envrc/folder-trust neutralized, so it reviewed the prompt only, not the checkout. Fix: `grok update`, or a docker.sock that is not a symlink.' ;;
+    *)    printf '%s' 'no OS sandbox: read-only enforced by the CLI tool policy alone' ;;
+  esac
+}
+
 _panel_bash_absent_json() { # <voice> <status> <reason>  — bun-less fallback
-  local voice="$1" status="$2" reason="$3" vendor iso=""
+  local voice="$1" status="$2" reason="$3" vendor iso="" note
   vendor="$(_panel_vendor_fallback "$voice")"
   # reason is our own text (never untrusted output), but escape the basics.
   reason="$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-  # Degraded isolation must survive the bun-less path too (literal note — the
-  # registry, its single source, is unreachable without bun).
-  [ "${PANEL_ISOLATION:-}" = "tool-policy-only" ] && \
-    iso=',"isolation":"tool-policy-only","isolation_note":"no OS sandbox: the CLI refused to start sandboxed and the operator opted in (grok_allow_unsandboxed=true); read-only by its --permission-mode plan tool policy alone, run from an empty temp dir (prompt only, no checkout)"'
+  # Degraded isolation must survive the bun-less path too (see the note fn above).
+  if [ "${PANEL_ISOLATION:-}" = "tool-policy-only" ]; then
+    note="$(_panel_isolation_note_fallback "$voice" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    iso=',"isolation":"tool-policy-only","isolation_note":"'"$note"'"'
+  fi
   printf '{"schema":"outside-voice/v2","voice":"%s","vendor":"%s","status":"%s","verdict":null,"findings":[],"tokens":null,"cost_usd":null,"reason":"%s"%s}' \
     "$voice" "$vendor" "$status" "$reason" "$iso"
 }
@@ -387,6 +417,28 @@ _panel_write_absent() { # <voice> <status> <reason>
   printf '%s\n' "$json" > "$OUT_DIR/$voice.result.json"
   _panel_review_log "$voice" "$status" "null"
   echo "  $voice: ABSENT — $reason$(_panel_isolation_suffix)"
+}
+
+_panel_write_tainted() { # <voice> <rc> <detail> — the unsandboxed fallback run was TAINTED (A2)
+  local voice="$1" rc="$2" reason json
+  local PANEL_ISOLATION="tool-policy-only"   # it DID run without its OS sandbox
+  reason="unsandboxed fallback TAINTED (exit $rc): $3 — verdict discarded (fail-closed); tampered out-dir files restored, planted ones removed; inspect the checkout"
+  if [ "${_PANEL_OUTDIR_COMPROMISED:-0}" = 1 ]; then
+    # The out-dir path no longer names OUR directory, or recovery could not put it
+    # back (a planted entry may remain): writing the record there could write
+    # THROUGH it. Report on stdout/stderr + the review log only.
+    reason="unsandboxed fallback TAINTED (exit $rc): $3 — verdict discarded (fail-closed); NO result file written (the out-dir is not trustworthy); inspect the checkout and the out-dir"
+    _panel_review_log "$voice" error "null"
+    echo "  $voice: ERROR — $reason$(_panel_isolation_suffix)"
+    echo "gstack-panel: WARNING — the unsandboxed $voice fallback was TAINTED and the out-dir ($OUT_DIR) was replaced or could not be recovered: $3" >&2
+    return 0
+  fi
+  json="$(_panel_json absent "$voice" error "$reason")"
+  [ -z "$json" ] && json="$(_panel_bash_absent_json "$voice" error "$reason")"
+  printf '%s\n' "$json" > "$OUT_DIR/$voice.result.json"
+  _panel_review_log "$voice" error "null"
+  echo "  $voice: ERROR — $reason$(_panel_isolation_suffix)"
+  echo "gstack-panel: WARNING — the unsandboxed $voice fallback was TAINTED: $3" >&2
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -706,6 +758,212 @@ _panel_finish_run() { # <voice> <rc> <raw-file> [isolation]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Taint check around the OPTED-IN UNSANDBOXED grok fallback (A2; mirrors
+# bin/gstack-lane's l4 taint detection and REUSES its inert `_snapshot`). Running
+# from bin/gstack-neutral-cwd's empty dir is hygiene, not containment: the
+# unsandboxed process runs as the user, and the per-run nonce is in its prompt,
+# so it could edit the checkout, plant a hook, forge a SIBLING voice's
+# nonce-bearing <voice>.result.json (vote attribution is filename-bound), plant
+# a result for a voice that has not run yet, or rewrite the shared payload the
+# later voices reuse. Around that ONE spawn the panel therefore fingerprints:
+#   - the checkout: `gstack-lane _snapshot` on $REPO_ROOT — git control state
+#     (config/HEAD/refs/packed-refs/hooks/info/core.hooksPath target, plain file
+#     hashing) and, only when that is unchanged, status/diff/untracked via inert
+#     git (no hooks, fsmonitor, filters, external diff, textconv, transport);
+#   - $OUT_DIR: every entry's name/type (+ cksum of regular files), except the
+#     two files the spawn's own redirections write (grok.raw, grok.err); and the
+#     EXACT bytes of every *.result.json and panel.payload.txt, held in shell
+#     MEMORY (a same-user process can rewrite any file, not this process).
+# A checkout that cannot be fingerprinted (not a git checkout, no commit yet,
+# snapshot failure/timeout) REFUSES the fallback (grok ABSENT, fail-closed). ANY
+# change afterwards marks grok `error` ("TAINTED"), restores the in-memory files,
+# and removes entries planted in $OUT_DIR — before anything can be tallied. A
+# checkout change cannot be undone: it is reported loudly. The out-dir's IDENTITY
+# (physical path + device:inode; it must be a real directory, not a symlink) is
+# captured at baseline and re-verified before ANY restore or deletion; recovery
+# itself runs from inside the verified directory (cd + relative names), so a
+# path swapped afterwards cannot redirect it. If the out-dir was REPLACED (e.g. a
+# symlink to another directory), recovery is ABORTED — nothing is written or
+# deleted anywhere — grok is reported TAINTED (status line, review log, stderr;
+# no record file, since the out-dir path is no longer ours) and the panel stops
+# non-zero before any later voice can write through the swapped path. Planted
+# symlinks are only ever unlinked, never followed; a file is restored via a
+# fresh mktemp temp (verified empty/regular/ours) renamed over its name (never written THROUGH the entry),
+# and ANY restore/remove failure (e.g. a read-only out-dir) stops recovery and
+# is handled exactly like a replaced out-dir. Best-effort, like the
+# lane's: a concurrent legitimate edit to the checkout during the run is a
+# (fail-closed) false positive, and writes OUTSIDE the checkout/out-dir are not
+# observed. An out-dir INSIDE the checkout is refused up front (every run would
+# change the checkout). Tunable: GSTACK_PANEL_SNAPSHOT_TIMEOUT_S (default 60).
+# ─────────────────────────────────────────────────────────────────────────────
+PANEL_SNAPSHOT_TIMEOUT_S="${GSTACK_PANEL_SNAPSHOT_TIMEOUT_S:-60}"
+case "$PANEL_SNAPSHOT_TIMEOUT_S" in ''|*[!0-9]*|0) PANEL_SNAPSHOT_TIMEOUT_S=60 ;; esac
+_PANEL_TAINT_SNAP=""      # checkout snapshot before the spawn
+_PANEL_TAINT_LIST=""      # $OUT_DIR listing before the spawn
+_PANEL_TAINT_FILES=()     # tallied/reused files whose bytes are held in memory …
+_PANEL_TAINT_BYTES=()     # … and those bytes
+_PANEL_TAINT_DETAIL=""    # set by _panel_taint_check
+_PANEL_TAINT_WHY=""       # set by _panel_taint_baseline on failure
+_PANEL_OUTDIR_ID=""       # "<physical path>|<dev:inode>" of $OUT_DIR at baseline
+_PANEL_OUTDIR_COMPROMISED=0  # 1 once $OUT_DIR's identity changed or its recovery failed: never write through it again
+
+_panel_dir_id() { # <dir> → "<physical path>|<dev:inode>" of a REAL directory (not a symlink); nonzero otherwise
+  local d="$1" phys di
+  { [ -d "$d" ] && [ ! -L "$d" ]; } || return 1
+  phys="$(cd -P -- "$d" 2>/dev/null && pwd -P)" || return 1
+  [ -n "$phys" ] || return 1
+  # GNU first (BSD stat rejects -c); `stat -f` on GNU means filesystem mode.
+  di="$(stat -c '%d:%i' -- "$d" 2>/dev/null)" || di="$(stat -f '%d:%i' -- "$d" 2>/dev/null)" || return 1
+  case "$di" in *[0-9]:[0-9]*) ;; *) return 1 ;; esac
+  printf '%s|%s\n' "$phys" "$di"
+}
+
+_panel_outdir_listing() { # one line per $OUT_DIR entry (name order), minus grok.raw/grok.err
+  local f n
+  for f in "$OUT_DIR"/* "$OUT_DIR"/.[!.]* "$OUT_DIR"/..?*; do
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    n="${f##*/}"
+    case "$n" in grok.raw|grok.err) continue ;; esac
+    if [ -L "$f" ]; then printf 'link %s -> %s\n' "$n" "$(readlink "$f")"
+    elif [ -f "$f" ]; then printf 'file %s %s\n' "$n" "$(cksum < "$f")"
+    else printf 'other %s\n' "$n"; fi
+  done
+}
+
+_panel_checkout_snapshot() { # <before-file|-> → the inert snapshot on stdout; nonzero on failure/timeout
+  _gstack_codex_timeout_wrapper "$PANEL_SNAPSHOT_TIMEOUT_S" "$BIN_DIR/gstack-lane" _snapshot "$1" "$REPO_ROOT" 2>/dev/null </dev/null
+}
+
+_panel_taint_baseline() { # → 0 when the checkout + out-dir were fingerprinted; else 1 + _PANEL_TAINT_WHY
+  local f c i=0 od rr
+  _PANEL_TAINT_FILES=(); _PANEL_TAINT_BYTES=(); _PANEL_TAINT_LIST=""; _PANEL_TAINT_SNAP=""; _PANEL_TAINT_WHY=""; _PANEL_OUTDIR_ID=""
+  [ -x "$BIN_DIR/gstack-lane" ] || { _PANEL_TAINT_WHY="bin/gstack-lane (the inert snapshot) is missing"; return 1; }
+  # The out-dir's identity, re-verified before any recovery touches it.
+  _PANEL_OUTDIR_ID="$(_panel_dir_id "$OUT_DIR")" || _PANEL_OUTDIR_ID=""
+  [ -n "$_PANEL_OUTDIR_ID" ] || { _PANEL_TAINT_WHY="the out-dir ($OUT_DIR) is not a real directory (a symlink?) or its identity cannot be read"; return 1; }
+  # An out-dir INSIDE the checkout would change it on every run (grok.raw/err) —
+  # a guaranteed false taint; refuse up front with the real reason.
+  od="$(cd "$OUT_DIR" 2>/dev/null && pwd -P)"; rr="$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)"
+  { [ -n "$od" ] && [ -n "$rr" ]; } || { _PANEL_TAINT_WHY="cannot resolve the out-dir or the checkout"; return 1; }
+  case "$od/" in "${rr%/}/"*) _PANEL_TAINT_WHY="the out-dir is inside the checkout ($REPO_ROOT)"; return 1 ;; esac
+  _PANEL_TAINT_SNAP="$(_panel_checkout_snapshot -)" || _PANEL_TAINT_SNAP=""
+  [ -n "$_PANEL_TAINT_SNAP" ] || { _PANEL_TAINT_WHY="$REPO_ROOT is not a git checkout with a commit, or the inert snapshot failed/timed out"; return 1; }
+  printf '%s\n' "$_PANEL_TAINT_SNAP" > "$OUT_DIR/grok.checkout.before" || { _PANEL_TAINT_WHY="cannot write the snapshot"; return 1; }
+  for f in "$OUT_DIR"/*.result.json "$OUT_DIR/panel.payload.txt"; do
+    { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
+    c="$(cat "$f" && printf x)" || { _PANEL_TAINT_WHY="cannot read ${f##*/}"; return 1; }
+    _PANEL_TAINT_FILES[i]="$f"; _PANEL_TAINT_BYTES[i]="${c%x}"; i=$(( i + 1 ))
+  done
+  _PANEL_TAINT_LIST="$(_panel_outdir_listing)"
+  return 0
+}
+
+_panel_restore_entry() { # <name> <bytes> — in the CWD (the verified out-dir); nonzero on ANY failure
+  # Never opens <name>: the bytes go to a NEW temp that mktemp creates (O_EXCL,
+  # libc randomness) in this dir, then rename(2) replaces the entry itself — a
+  # symlink at <name> is replaced, never followed. The temp is written ONLY once
+  # it is verified to be an empty regular non-symlink file we own: a FIFO, device
+  # or link at that name is refused unopened (no write-through, no hang).
+  local n="$1" t
+  t="$(mktemp ./.restore.XXXXXXXXXX 2>/dev/null)" || return 1
+  case "$t" in ./.restore.?*|.restore.?*) ;; *) return 1 ;; esac
+  case "${t#./}" in */*) return 1 ;; esac
+  { [ -f "$t" ] && [ ! -L "$t" ] && [ -O "$t" ] && [ ! -s "$t" ]; } || return 1
+  { printf '%s' "$2" > "$t"; } 2>/dev/null || { rm -f -- "$t" 2>/dev/null; return 1; }
+  # A real directory at <name> cannot be renamed over: remove it (never a link's target).
+  if [ -d "./$n" ] && [ ! -L "./$n" ]; then
+    rm -rf -- "./$n" 2>/dev/null || { rm -f -- "$t" 2>/dev/null; return 1; }
+  fi
+  # -T (GNU) / -h (BSD): a symlink-to-dir target is REPLACED, never moved into.
+  mv -fT -- "$t" "./$n" 2>/dev/null || mv -fh -- "$t" "./$n" 2>/dev/null || { rm -f -- "$t" 2>/dev/null; return 1; }
+  { [ -f "./$n" ] && [ ! -L "./$n" ] && [ ! -e "$t" ]; } || return 1
+}
+
+_panel_taint_check() { # → 0 + _PANEL_TAINT_DETAIL when TAINTED; restores what it can
+  local after i f c n changed="" keep now_id rc_rec
+  _PANEL_TAINT_DETAIL=""
+  # Identity FIRST: every read/restore/delete below goes through $OUT_DIR. A
+  # replaced out-dir (symlink to another dir, a fresh dir, a swapped ancestor) →
+  # abort recovery entirely; write and delete NOTHING.
+  now_id="$(_panel_dir_id "$OUT_DIR")" || now_id="UNREADABLE"
+  if [ "$now_id" != "$_PANEL_OUTDIR_ID" ]; then
+    _PANEL_OUTDIR_COMPROMISED=1
+    _PANEL_TAINT_DETAIL="the out-dir ($OUT_DIR) was REPLACED during the run (identity changed: ${_PANEL_OUTDIR_ID} -> ${now_id}) — recovery ABORTED: nothing restored or removed; the checkout was NOT re-verified"
+    return 0
+  fi
+  after="$(_panel_checkout_snapshot "$OUT_DIR/grok.checkout.before")" || after="SNAPSHOT-FAILED"
+  if [ "$after" != "$_PANEL_TAINT_SNAP" ]; then
+    case "$after" in
+      SNAPSHOT-FAILED) _PANEL_TAINT_DETAIL="post-run checkout snapshot failed or timed out" ;;
+      *CONTROL-CHANGED) _PANEL_TAINT_DETAIL="the checkout's git control state (hooks/config/refs/info) changed" ;;
+      *) _PANEL_TAINT_DETAIL="the checkout changed (status/diff/untracked)" ;;
+    esac
+  fi
+  i=0
+  while [ "$i" -lt "${#_PANEL_TAINT_FILES[@]}" ]; do
+    f="${_PANEL_TAINT_FILES[i]}"
+    if [ -L "$f" ] || [ ! -f "$f" ]; then
+      changed="$changed ${f##*/}"
+    else
+      c="$(cat "$f" 2>/dev/null && printf x)"
+      [ "${c%x}" = "${_PANEL_TAINT_BYTES[i]}" ] || changed="$changed ${f##*/}"
+    fi
+    i=$(( i + 1 ))
+  done
+  if [ -n "$changed" ] || [ "$(_panel_outdir_listing)" != "$_PANEL_TAINT_LIST" ]; then
+    _PANEL_TAINT_DETAIL="${_PANEL_TAINT_DETAIL:+$_PANEL_TAINT_DETAIL; }out-dir changed${changed:+ (rewritten:$changed)}"
+    # Recovery runs INSIDE the out-dir (relative names only) after re-verifying,
+    # from there, that it is still the baseline directory — a path swapped after
+    # the check above cannot redirect a restore or a delete elsewhere. It NEVER
+    # writes through an existing entry (a swapped-in symlink to an external file
+    # must not be followed): each file is written to a FRESH exclusive-create temp
+    # in this dir, then renamed over the name (rename replaces the entry itself).
+    # ANY failure (e.g. the run made the out-dir read-only) stops recovery at once
+    # → exit 4 → the out-dir is COMPROMISED (same handling as a replaced out-dir).
+    (
+      cd -P -- "$OUT_DIR" 2>/dev/null || exit 3
+      [ "$(_panel_dir_id .)" = "$_PANEL_OUTDIR_ID" ] || exit 3
+      i=0
+      while [ "$i" -lt "${#_PANEL_TAINT_FILES[@]}" ]; do
+        n="${_PANEL_TAINT_FILES[i]##*/}"
+        _panel_restore_entry "$n" "${_PANEL_TAINT_BYTES[i]}" || exit 4
+        i=$(( i + 1 ))
+      done
+      # Drop entries that were not there before.
+      for f in ./* ./.[!.]* ./..?*; do
+        { [ -e "$f" ] || [ -L "$f" ]; } || continue
+        n="${f##*/}"
+        case "$n" in grok.raw|grok.err) continue ;; esac
+        keep=0
+        while IFS= read -r c; do
+          case "$c" in
+            "file $n "*|"link $n -> "*|"other $n") keep=1; break ;;
+          esac
+        done <<EOF_LIST
+$_PANEL_TAINT_LIST
+EOF_LIST
+        [ "$keep" = 1 ] && continue
+        # A planted symlink (to a dir or anything else) is UNLINKED, never followed.
+        if [ -L "$f" ]; then rm -f -- "$f"; else rm -rf -- "$f"; fi 2>/dev/null || exit 4
+        { [ -e "$f" ] || [ -L "$f" ]; } && exit 4
+      done
+      exit 0
+    )
+    rc_rec=$?
+    case "$rc_rec" in
+      0) ;;
+      4)
+        _PANEL_OUTDIR_COMPROMISED=1
+        _PANEL_TAINT_DETAIL="$_PANEL_TAINT_DETAIL; out-dir RECOVERY FAILED in $OUT_DIR (an entry could not be replaced or removed — e.g. the out-dir was made read-only) — recovery ABORTED part-way; the out-dir is NOT trustworthy" ;;
+      *)
+        _PANEL_OUTDIR_COMPROMISED=1
+        _PANEL_TAINT_DETAIL="$_PANEL_TAINT_DETAIL; the out-dir ($OUT_DIR) could not be re-verified for recovery — recovery ABORTED: nothing restored or removed" ;;
+    esac
+  fi
+  [ -n "$_PANEL_TAINT_DETAIL" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-voice invoke sites — EXPLICIT per voice so (a) the verbatim registry
 # sandbox flag string is greppable for the T10 anti-drift invariant, and (b) the
 # fail-closed egress receipt for outside-voice:<v> provably precedes each spawn
@@ -719,6 +977,7 @@ _panel_finish_run() { # <voice> <rc> <raw-file> [isolation]
 # opted in (grok_allow_unsandboxed=true), from bin/gstack-neutral-cwd's empty dir
 # (no .git/project config in any ancestor), and only after its OWN fail-closed receipt — a second send gets a
 # second receipt. The first receipt's outcome records sandbox-refused:exit:<rc>.
+# The fallback spawn is bracketed by _panel_taint_baseline / _panel_taint_check.
 # ─────────────────────────────────────────────────────────────────────────────
 _panel_invoke_codex() {
   local payload="$PAYLOAD_FILE" rid rc
@@ -763,17 +1022,7 @@ _panel_invoke_grok() {
       _panel_write_absent grok absent "grok OS sandbox unavailable on this host (sandbox-refused); opt in with gstack-config set grok_allow_unsandboxed true"
       return 0
     fi
-    echo "  grok: WARNING — grok refused to start under --sandbox read-only (exit $rc; stderr kept in grok.sandbox-refused.err). grok_allow_unsandboxed=true: re-running ONCE with NO OS sandbox — read-only by tool policy (--permission-mode plan) only, from an empty temp dir (prompt only, no checkout). Fix: grok update, or a docker.sock that is not a symlink."
-    # The retry shares this voice's budget: min(what is left of the per-voice
-    # timeout, what is left of the surface wall-clock).
-    now="$(date +%s 2>/dev/null || echo 0)"
-    left=$(( ${PANEL_VOICE_TIMEOUT_S:-$LADDER_S} - (now - t0) ))
-    [ $(( WALL_CLOCK_S - (now - START_TS) )) -lt "$left" ] && left=$(( WALL_CLOCK_S - (now - START_TS) ))
-    if [ "$left" -lt 1 ]; then
-      _panel_write_absent grok absent "OS sandbox refused to start and no time is left for the plan-mode fallback: wall-clock"
-      return 0
-    fi
-    PANEL_VOICE_TIMEOUT_S="$left"
+    echo "  grok: WARNING — grok refused to start under --sandbox read-only (exit $rc; stderr kept in grok.sandbox-refused.err). grok_allow_unsandboxed=true: re-running ONCE with NO OS sandbox — read-only by tool policy (--permission-mode plan) only, from an empty temp dir (prompt only, no checkout), with a taint check on the checkout + out-dir. Fix: grok update, or a docker.sock that is not a symlink."
     # The panel runs in the user's REAL checkout and cannot strip its .grok/.envrc/
     # AGENTS.md/hooks/MCP config (the lane strips a disposable worktree), so the
     # unsandboxed spawn runs from a NEUTRAL cwd: bin/gstack-neutral-cwd (the single
@@ -785,9 +1034,26 @@ _panel_invoke_grok() {
     case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
     fbdir="$("$BIN_DIR/gstack-neutral-cwd" gstack-panel-grok 2>"$out/grok.neutral-cwd.err")" || fbdir=""
     if [ -z "$fbdir" ]; then
-      _panel_write_absent grok absent "no neutral working directory for the unsandboxed fallback ($(head -1 "$out/grok.neutral-cwd.err" 2>/dev/null | cut -c1-240)) — refusing send (fail-closed): sandbox-refused"
+      _panel_write_absent grok absent "no neutral working directory for the unsandboxed fallback ($(head -1 "$out/grok.neutral-cwd.err" 2>/dev/null | cut -c1-240)) — refusing send (fail-closed): sandbox-refused. TMPDIR must be a private dir outside \$HOME, /tmp and every checkout (see bin/gstack-neutral-cwd)"
       return 0
     fi
+    # Taint baseline (see "Taint check" above): no fingerprint → no unsandboxed send.
+    if ! _panel_taint_baseline; then
+      rmdir "$fbdir" 2>/dev/null
+      _panel_write_absent grok absent "cannot fingerprint the checkout for the unsandboxed fallback's taint check ($_PANEL_TAINT_WHY) — refusing send (fail-closed): sandbox-refused"
+      return 0
+    fi
+    # The retry shares this voice's budget: min(what is left of the per-voice
+    # timeout, what is left of the surface wall-clock).
+    now="$(date +%s 2>/dev/null || echo 0)"
+    left=$(( ${PANEL_VOICE_TIMEOUT_S:-$LADDER_S} - (now - t0) ))
+    [ $(( WALL_CLOCK_S - (now - START_TS) )) -lt "$left" ] && left=$(( WALL_CLOCK_S - (now - START_TS) ))
+    if [ "$left" -lt 1 ]; then
+      rmdir "$fbdir" 2>/dev/null
+      _panel_write_absent grok absent "OS sandbox refused to start and no time is left for the plan-mode fallback: wall-clock"
+      return 0
+    fi
+    PANEL_VOICE_TIMEOUT_S="$left"
     rid="$("$BIN_DIR/gstack-egress-receipt" write --sink outside-voice:grok --host api.x.ai \
           --class review-prompt --payload-file "$payload" --consent "grok_reviews=enabled;grok_allow_unsandboxed=true" 2>/dev/null)" || rid=""
     if [ -z "$rid" ]; then
@@ -801,6 +1067,10 @@ _panel_invoke_grok() {
     rc=$?
     rm -rf "$fbdir"
     "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "exit:$rc" 2>/dev/null || true
+    if _panel_taint_check; then
+      _panel_write_tainted grok "$rc" "$_PANEL_TAINT_DETAIL"
+      return 0
+    fi
     _panel_finish_run grok "$rc" "$OUT_DIR/grok.raw" tool-policy-only
     return 0
   fi
@@ -1141,6 +1411,13 @@ run_panel() {
       gemini) _panel_invoke_gemini ;;
     esac
     _panel_add_spend "$voice" "$est"
+    # A replaced or unrecoverable out-dir (P1-a/P1-b) is no longer ours: stop before any later voice,
+    # record or salvage writes THROUGH it. Non-zero so the caller cannot tally.
+    if [ "$_PANEL_OUTDIR_COMPROMISED" = "1" ]; then
+      echo "gstack-panel: FATAL — the out-dir ($OUT_DIR) was replaced or could not be recovered during the unsandboxed $voice fallback; stopping the panel (remaining voices NOT run, nothing more written). Do NOT tally or --collect this out-dir; inspect it and the checkout." >&2
+      echo "gstack-panel ABORTED — out-dir compromised (TAINTED); do not tally"
+      exit 3
+    fi
   done
 
   # fable kill-switch — the panel does NOT dispatch the fable subagent (that is

@@ -271,10 +271,13 @@ else
     # REFUSAL (e.g. OrbStack's symlinked docker.sock; marker on stderr, not 124, no stdout) → skipped as
     # sandbox=refused unless `gstack-config set grok_allow_unsandboxed true`; then exactly ONE
     # plan-mode-only attempt from bin/gstack-neutral-cwd's empty dir (no .git/project config in any
-    # ancestor; prompt only) — lane G1. Paths go absolute first: that attempt runs after a cd.
+    # ancestor; prompt only) — lane G1. That ONE attempt is bracketed by the panel's checkout
+    # fingerprint (`gstack-lane _snapshot` on $_REPO_ROOT, before/after; no fingerprint -> no attempt):
+    # any change -> its output is DISCARDED and GAP_STATUS gets `grok=tainted`. Paths go absolute
+    # first: that attempt runs after a cd.
     case $GAP_PROMPT_FILE in /*) ;; *) GAP_PROMPT_FILE=$PWD/$GAP_PROMPT_FILE ;; esac; case $GROK_GAP in /*) ;; *) GROK_GAP=$PWD/$GROK_GAP ;; esac
     case $TMPERR_GROK in /*) ;; *) TMPERR_GROK=$PWD/$TMPERR_GROK ;; esac; case $GAP_STATUS in /*) ;; *) GAP_STATUS=$PWD/$GAP_STATUS ;; esac
-    _e=high; _t=300; _r=1; _n=0; _sb=read-only; _iso=read-only; _cwd=.
+    _e=high; _t=300; _r=1; _n=0; _sb=read-only; _iso=read-only; _cwd=.; _snapf=; _snapb=
     while [ "$_n" -lt 4 ]; do
       _n=$((_n + 1))
       if [ -z "$_sb" ]; then { [ -d "$_cwd" ] && [ -r "$GAP_PROMPT_FILE" ]; } || { _iso="refused (launch failed)"; break; }; _iso=none; fi
@@ -285,6 +288,11 @@ else
         _iso="refused (opt in: gstack-config set grok_allow_unsandboxed true)"
         [ "$(~/.claude/skills/gstack/bin/gstack-config get grok_allow_unsandboxed 2>/dev/null)" = true ] || break
         _iso="refused (no neutral cwd)"; _cwd=$(~/.claude/skills/gstack/bin/gstack-neutral-cwd plandeliv-grok) || break
+        _iso="refused (no checkout fingerprint)"; [ -n "$_REPO_ROOT" ] || break
+        _snapf=$(mktemp "${TMPDIR:-/tmp}/plandeliv-grok-snap-XXXXXX") || { _snapf=; break; }
+        case $_snapf in /*) ;; *) _snapf=$PWD/$_snapf ;; esac
+        _gstack_codex_timeout_wrapper 60 ~/.claude/skills/gstack/bin/gstack-lane _snapshot - "$_REPO_ROOT" < /dev/null > "$_snapf" 2>/dev/null || break
+        _snapb=$(cat "$_snapf") && [ -n "$_snapb" ] || break
         _iso=refused; _sb=; continue
       fi
       [ -z "$_sb" ] && break   # the ONE unsandboxed attempt is never retried
@@ -294,6 +302,15 @@ else
       case "$_lc" in *capacity*|*overloaded*|*"rate limit"*|*429*|*500*|*502*|*503*|*504*) sleep $((_n * 5)); continue ;; *) break ;; esac
     done
     echo "grok_rc=$_r effort=$_e sandbox=$_iso" >> "$GAP_STATUS"
+    if [ "$_iso" = none ]; then   # the unsandboxed attempt ran: re-fingerprint the checkout
+      _snapa=$(_gstack_codex_timeout_wrapper 60 ~/.claude/skills/gstack/bin/gstack-lane _snapshot "$_snapf" "$_REPO_ROOT" < /dev/null 2>/dev/null) || _snapa=SNAPSHOT-FAILED
+      if [ "$_snapa" != "$_snapb" ]; then
+        rm -f "$GROK_GAP"
+        echo "grok=tainted (the checkout $_REPO_ROOT changed, or could not be re-fingerprinted, during the unsandboxed attempt) - grok output DISCARDED" >> "$GAP_STATUS"
+        echo "WARNING: grok gap-check TAINTED - the unsandboxed grok attempt changed $_REPO_ROOT (or it could not be re-fingerprinted); its output was discarded. Inspect the checkout (git status, .git/hooks, .git/config) before continuing." >&2
+      fi
+    fi
+    [ -n "$_snapf" ] && rm -f "$_snapf"
     case "$_cwd" in .|'') ;; *) rm -rf "$_cwd" ;; esac
   ) &
   GPID=$!
@@ -312,7 +329,9 @@ continue; the reported `effort=` tells you which rung actually produced the outp
 non-zero `_rc` (auth, empty, crash) → note the one-line reason and continue. `sandbox=refused` =
 grok's OS sandbox can't start on this host, so grok was skipped (opting in is the operator's call);
 `sandbox=none` = it ran under plan mode only after that opt-in: **degraded isolation** — say so when
-citing its findings. If neither model
+citing its findings. A `grok=tainted` line = that unsandboxed attempt changed the checkout (or it could
+not be re-fingerprinted): its output was discarded — treat grok as ABSENT for this piece, surface the
+WARNING to the user, and have them inspect the checkout (`git status`, `.git/hooks`, `.git/config`). If neither model
 produced usable output, note "cross-model gap-check unavailable — proceeding on in-distribution
 knowledge only" and carry on. **Never block the loop on a CLI model.**
 

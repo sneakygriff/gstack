@@ -914,10 +914,11 @@ describe('bin/gstack-vote --nonce — tabulation-time verdict authentication (co
 
 // grok sandbox-refusal fallback (2026-10-11): bin/gstack-panel stamps
 // `isolation: "tool-policy-only"` on a voice that ran WITHOUT its OS sandbox.
-// The table marks that voice's row; the marker is display-only — the tally,
-// quorum and nonce authentication are byte-identical with or without it.
+// The table marks that voice's row and --json carries it (perVoice[].isolation +
+// top-level degraded_isolation); the tally, quorum and nonce authentication are
+// identical with or without it.
 describe('bin/gstack-vote CLI — degraded-isolation row marker (display only)', () => {
-  test('a panel-stamped isolation:"tool-policy-only" record gets "[no OS sandbox]" on its row; tally/--json unchanged', () => {
+  test('a panel-stamped isolation:"tool-policy-only" record gets "[no OS sandbox]" on its row and is surfaced in --json; tally math unchanged', () => {
     const plain = mkFixtureDir();
     const stamped = mkFixtureDir();
     try {
@@ -939,10 +940,19 @@ describe('bin/gstack-vote CLI — degraded-isolation row marker (display only)',
       expect(codexRow).not.toContain('[no OS sandbox]');
       expect(runVote(['--dir', plain, '--nonce', TABLE_NONCE]).stdout).not.toContain('[no OS sandbox]');
 
-      // Tally math is untouched by the marker.
-      const a = runVote(['--dir', plain, '--nonce', TABLE_NONCE, '--json']).stdout;
-      const b = runVote(['--dir', stamped, '--nonce', TABLE_NONCE, '--json']).stdout;
-      expect(b).toBe(a);
+      // --json (the persisted aggregate record) SURFACES the degraded voice too
+      // (D3): a per-voice `isolation` on its perVoice entry + a top-level
+      // `degraded_isolation` list — while every tally/quorum field is unchanged.
+      const a = JSON.parse(runVote(['--dir', plain, '--nonce', TABLE_NONCE, '--json']).stdout);
+      const b = JSON.parse(runVote(['--dir', stamped, '--nonce', TABLE_NONCE, '--json']).stdout);
+      expect(a).not.toHaveProperty('degraded_isolation'); // undegraded output is byte-for-byte the tally
+      for (const pv of a.perVoice) expect(pv).not.toHaveProperty('isolation');
+      expect(b.degraded_isolation).toEqual([{ voice: 'grok', isolation: 'tool-policy-only' }]);
+      expect(b.perVoice.find((pv: any) => pv.voice === 'grok').isolation).toBe('tool-policy-only');
+      expect(b.perVoice.find((pv: any) => pv.voice === 'codex')).not.toHaveProperty('isolation');
+      const { degraded_isolation: _d, ...bTally } = b;
+      bTally.perVoice = bTally.perVoice.map(({ isolation: _i, ...rest }: any) => rest);
+      expect(bTally).toEqual(a);
     } finally {
       fs.rmSync(plain, { recursive: true, force: true });
       fs.rmSync(stamped, { recursive: true, force: true });
