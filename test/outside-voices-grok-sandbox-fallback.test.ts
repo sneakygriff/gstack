@@ -87,6 +87,11 @@ printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "\${line# }" "$(pwd -P)" "$(ls -A |
   "\${GROK_ENVRC_TIMEOUT_SECS-UNSET}" "\${GROK_FOLDER_TRUST-UNSET}" "\${GROK_SANDBOX-UNSET}" "\${GROK_SANDBOX_AUTO_ALLOW_BASH-UNSET}" >> "$STUB_GROK_LOG"
 sandboxed=0; effort=""; prev=""
 for a in "$@"; do [ "$a" = "--sandbox" ] && sandboxed=1; [ "$prev" = "--effort" ] && effort="$a"; prev="$a"; done
+# A1 ordering pin: snapshot what the PANEL had already written to its stdout (a file)
+# at the moment of THIS spawn — one "=== spawn sandboxed=<0|1>" section per spawn.
+if [ -n "\${STUB_STDOUT_AT_SPAWN:-}" ]; then
+  { printf '=== spawn sandboxed=%s\\n' "$sandboxed"; cat "$STUB_PANEL_STDOUT"; } >> "$STUB_STDOUT_AT_SPAWN"
+fi
 refusal() {
   cat >&2 <<'REFUSAL'
 ${REFUSAL_STDERR}
@@ -230,6 +235,23 @@ case "$STUB_GROK_MODE" in
       mv "$d" "$d.aside" && mkdir "$d" && echo decoy > "$d/marker" && chmod 0500 "$d" || exit 98
     done
     verdict; exit 0 ;;
+  # A2 P3: rename the private dir aside with NOTHING left at its pathname — cleanup cannot
+  # remove it (identity unverifiable) and must say where the copies may still be.
+  refuse-then-move-privdir)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    set -- "$TMPDIR"/gstack-panel-taint.*
+    [ -d "$1" ] || exit 98
+    for d in "$@"; do mv "$d" "$d.aside" || exit 98; done
+    verdict; exit 0 ;;
+  # Evidence: the checkout fingerprint itself (grok.checkout.before) rewritten / deleted.
+  refuse-then-forge-fingerprint)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    printf 'FORGED-FINGERPRINT\\n' > "$STUB_OUT_DIR/grok.checkout.before" || exit 98
+    verdict; exit 0 ;;
+  refuse-then-delete-fingerprint)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    rm -f "$STUB_OUT_DIR/grok.checkout.before" || exit 98
+    verdict; exit 0 ;;
   *) echo "stub: unknown STUB_GROK_MODE" >&2; exit 99 ;;
 esac
 `;
@@ -350,6 +372,11 @@ function runPanel(
     seed?: Record<string, Buffer>;
     /** Out-dir entries created as SYMLINKS (name → target) before the panel starts. */
     links?: Record<string, string>;
+    /**
+     * Send the panel's stdout to this FILE (not a pipe) and expose it to the stub grok as
+     * STUB_PANEL_STDOUT, so a spawn can snapshot what the panel had printed by then.
+     */
+    stdoutFile?: string;
   } = {},
 ): PanelRun {
   const dir = mkPriv(path.join(BASE, `run-${++runSeq}`));
@@ -395,6 +422,7 @@ function runPanel(
     fixtureGit(cwd, ['commit', '-qm', 'init']);
   }
   const log = path.join(dir, 'grok-spawns.log');
+  const stdoutFd = opts.stdoutFile ? fs.openSync(opts.stdoutFile, 'w') : null;
 
   const r = spawnSync(
     'bash',
@@ -428,10 +456,13 @@ function runPanel(
         STUB_CHECKOUT: cwd,
         STUB_PANEL: PANEL,
         TMPDIR: privTmp,
+        ...(opts.stdoutFile ? { STUB_PANEL_STDOUT: opts.stdoutFile } : {}),
         ...(opts.env ?? {}),
       },
+      ...(stdoutFd !== null ? { stdio: ['pipe', stdoutFd, 'pipe'] as ('pipe' | number)[] } : {}),
     },
   );
+  if (stdoutFd !== null) fs.closeSync(stdoutFd);
 
   const resultPath = path.join(outDir, 'grok.result.json');
   const record = fs.existsSync(resultPath) ? JSON.parse(fs.readFileSync(resultPath, 'utf8')) : null;
@@ -442,7 +473,7 @@ function runPanel(
   return {
     status: r.status,
     signal: r.signal ?? null,
-    stdout: r.stdout ?? '',
+    stdout: opts.stdoutFile ? fs.readFileSync(opts.stdoutFile, 'utf8') : (r.stdout ?? ''),
     stderr: r.stderr ?? '',
     spawns: readSpawns(log),
     record,
@@ -1193,6 +1224,114 @@ printf '%s\n' "$r"
     expect(subs[0].mode).toBe(0o500); // never chmod'ed
     expect(subs[0].marker).toBe('decoy\n'); // never removed
     expect(run!.stderr).toContain('could not be removed');
+  });
+
+  // ── exit-3 follow-ups ──
+  // A2 P3: the private dir renamed/moved away with NOTHING left at its recorded path. The
+  // removal block cannot run (the identity at that path is gone) and the old residue check
+  // (something AT the path) stayed silent — the payload/result copies leaked unreported.
+  test.skipIf(!NEUTRAL_OK)('the private dir renamed AWAY (nothing left at its path) → cleanup WARNS with the path + dev:inode and where the copies may remain', () => {
+    const run = runPanel('refuse-then-move-privdir', { optIn: true });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    // The copies' path is empty → no trusted bytes → exit 3 (the existing badcopy route).
+    expect(run.status, run.stdout + run.stderr).toBe(3);
+    expect(run.stdout).toContain('gstack-panel ABORTED');
+    const aside = fs.readdirSync(run.tmpDir).filter((n) => /^gstack-panel-taint\.[^.]+\.aside$/.test(n));
+    expect(aside.length).toBe(1);
+    const asidePath = path.join(run.tmpDir, aside[0]);
+    const recorded = asidePath.slice(0, -'.aside'.length);
+    const st = fs.lstatSync(asidePath);
+    const warn = run.stderr.split('\n').filter((l) => l.includes('WARNING') && l.includes(recorded));
+    expect(warn.length, run.stderr).toBe(1);
+    expect(warn[0]).toContain(`${st.dev}:${st.ino}`);
+    expect(warn[0]).toContain(`${run.tmpDir}/gstack-panel-taint.*`);
+    expect(warn[0]).toMatch(/payload\/result copies may remain/);
+    // Not mis-reported as "something at the path could not be removed".
+    expect(run.stderr).not.toContain('could not be removed');
+  });
+
+  // Fable P3: a dev:inode read failure on the FRESH private dir must fail CLOSED like every
+  // other check on that dir — not proceed with an empty identity (which also left the dir
+  // unremovable by cleanup). A PATH-shimmed `stat` fails only for the private dir's path.
+  test.skipIf(!NEUTRAL_OK)('the private dir\'s dev:inode cannot be read at baseline → no baseline: the unsandboxed fallback never starts (grok ABSENT fail-closed, 1 spawn, 1 receipt), no copy left', () => {
+    const realStat = realBin('stat', '/usr/bin/stat');
+    const shim = mkShimDir({
+      stat: `#!/bin/sh\nfor a in "$@"; do case "$a" in */gstack-panel-taint.*) exit 1 ;; esac; done\nexec ${realStat} "$@"\n`,
+    });
+    const run = runPanel('refuse-then-ok', { optIn: true, env: { PATH: `${shim}:${STUB_DIR}:${process.env.PATH}` } });
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(1);
+    expect(run.receipts.length).toBe(1);
+    expect(run.stdout).toContain(UNSANDBOXED_MARK); // announced, but the baseline refused
+    expect(run.record.status).toBe('absent');
+    expect(run.record.reason).toContain('cannot fingerprint');
+    expect(run.record.reason).toContain('dev:inode');
+    expect(run.record.reason).toContain('fail-closed');
+    expect(lexists(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(false);
+    expect(run.stderr).not.toContain('could not be removed');
+    expectNoPrivateCopies(run);
+  });
+
+  // Fable P3 (evidence): the fingerprint is KEPT on ANY taint and is the PANEL's bytes — a
+  // run that rewrites or deletes grok.checkout.before is TAINTED, the file is restored
+  // byte-exactly (it is one of the copied entries), and the post-run snapshot compares
+  // against the trusted copy (a forged fingerprint is not misreported as a git change).
+  for (const mode of ['refuse-then-forge-fingerprint', 'refuse-then-delete-fingerprint']) {
+    test.skipIf(!NEUTRAL_OK)(`evidence: ${mode.replace('refuse-then-', '')} → TAINTED; grok.checkout.before restored to the panel's own fingerprint and kept`, () => {
+      const run = runPanel(mode, { optIn: true });
+      expectTainted(run); // asserts the kept fingerprint holds '== end-control'
+      const fp = path.join(run.outDir, CHECKOUT_BEFORE);
+      expect(fs.lstatSync(fp).isFile()).toBe(true);
+      expect(fs.readFileSync(fp, 'utf8')).not.toContain('FORGED-FINGERPRINT');
+      expect(run.record.reason).toContain(`rewritten: ${CHECKOUT_BEFORE}`);
+      expect(run.record.reason).not.toContain('git control state');
+      expect(run.record.reason).not.toContain('the checkout changed');
+    });
+  }
+
+  // A1 (the recipe's <T> rule): `NO OS sandbox` is on the panel's STDOUT strictly before the
+  // single unsandboxed grok spawn — snapshotted by the stub at each spawn (stdout → a file).
+  test.skipIf(!NEUTRAL_OK)('A1 ordering: `NO OS sandbox` is already on the panel\'s stdout when the ONE unsandboxed grok spawn starts — and not yet at the sandboxed spawn', () => {
+    const outFile = path.join(BASE, `stdout-${runSeq + 1}.txt`);
+    const snaps = path.join(BASE, `stdout-at-spawn-${runSeq + 1}.txt`);
+    const run = runPanel('refuse-then-ok', { optIn: true, stdoutFile: outFile, env: { STUB_STDOUT_AT_SPAWN: snaps } });
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(run.record.status).toBe('ready');
+    const sections = fs.readFileSync(snaps, 'utf8').split('=== spawn sandboxed=').filter(Boolean);
+    expect(sections.length).toBe(2);
+    expect(sections.filter((s) => s.startsWith('0\n')).length).toBe(1); // exactly ONE unsandboxed spawn
+    expect(sections[0].startsWith('1\n')).toBe(true);
+    expect(sections[0]).not.toContain(UNSANDBOXED_MARK);
+    expect(sections[1].startsWith('0\n')).toBe(true);
+    expect(sections[1]).toContain(UNSANDBOXED_MARK);
+    expect(run.stdout.split(UNSANDBOXED_MARK).length - 1).toBe(1);
+  });
+
+  test('A1 ordering (static): in _panel_invoke_grok the `NO OS sandbox` echo (stdout) precedes the ONLY grok spawn without --sandbox', () => {
+    const start = PANEL_SRC.indexOf('_panel_invoke_grok() {');
+    const end = PANEL_SRC.indexOf('\n}\n', start);
+    expect(start).toBeGreaterThan(-1);
+    const body = PANEL_SRC.slice(start, end);
+    // Each grok spawn = the `grok -p` line plus its continuation line(s).
+    const lines = body.split('\n');
+    const spawns: { at: number; text: string }[] = [];
+    let off = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (/\bgrok -p "\$\(cat "\$payload"\)"/.test(lines[i])) {
+        let text = lines[i];
+        for (let j = i; lines[j].endsWith('\\') && j + 1 < lines.length; j++) text += `\n${lines[j + 1]}`;
+        spawns.push({ at: off, text });
+      }
+      off += lines[i].length + 1;
+    }
+    expect(spawns.length).toBe(2);
+    const unsandboxed = spawns.filter((s) => !s.text.includes('--sandbox'));
+    expect(unsandboxed.length).toBe(1);
+    const marks = lines.filter((l) => l.includes(UNSANDBOXED_MARK));
+    expect(marks.length).toBe(1);
+    expect(marks[0].trim().startsWith('echo "')).toBe(true);
+    expect(marks[0]).not.toMatch(/>&2|>\s*"|>>/); // the panel's own stdout
+    expect(body.indexOf(UNSANDBOXED_MARK)).toBeLessThan(unsandboxed[0].at);
   });
 
   test('refusal + opt-in from a NON-git directory (checkout cannot be fingerprinted) → ABSENT fail-closed, exactly 1 spawn, no second receipt', () => {

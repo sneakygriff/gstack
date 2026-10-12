@@ -814,6 +814,9 @@ describe('Outside Voices — a TAINTED panel (gstack-panel exit 3 / ABORTED, or 
   const RESIDUAL =
     'This check is point-in-time — a detached unsandboxed grok could act after it, an accepted residual of `grok_allow_unsandboxed=true`.';
   const STEP4_XREF = '`gstack-vote --dir` still tabulates (unless TAINTED — Step 2).';
+  // A1: the converse of T_RULE — no marker → the unsandboxed fallback never spawned.
+  const SANDBOXED_ONLY =
+    'A non-zero exit WITHOUT `NO OS sandbox` ran only sandboxed voices (`<T>`=`0`) and is salvaged fail-soft by `--collect`.';
   const RECORD =
     '**TAINTED (Step 2):** skip the `gstack-vote` re-read; in the log command below fill REC=`none`, TALLY_STATUS=`TAINTED`, N=V=`null`, `"voices":[]`; do NOT `rm -rf` or read the out-dir (left for the user).';
 
@@ -828,6 +831,10 @@ describe('Outside Voices — a TAINTED panel (gstack-panel exit 3 / ABORTED, or 
       expect(collect).toBeGreaterThan(-1);
       expect(text.indexOf(BACKGROUND_WAITS_FOR_EXIT)).toBeLessThan(collect);
       expect(text.indexOf(T_RULE)).toBeLessThan(collect);
+      // …and its converse: a non-zero exit with no marker is NOT tainted — salvaged fail-soft.
+      expect(text).toContain(SANDBOXED_ONLY);
+      expect(text.indexOf(SANDBOXED_ONLY)).toBeGreaterThan(text.indexOf(T_RULE));
+      expect(text.indexOf(SANDBOXED_ONLY)).toBeLessThan(collect);
     });
 
     test(`${label}: TAINTED → skip Steps 3–6 (gstack-vote) → canonical TAINTED report, with the point-in-time residual`, () => {
@@ -910,8 +917,11 @@ describe('Outside Voices — F2: the post-panel bash fences are MECHANICALLY gat
       fs.mkdirSync(stub);
       fs.mkdirSync(outDir);
       const log = path.join(root, 'calls.log');
+      const recordFile = path.join(root, 'review-log.record.json');
       for (const s of STUBS) {
-        fs.writeFileSync(path.join(stub, s), `#!/bin/sh\nprintf '%s\\n' "${s} $*" >> "${log}"\n`);
+        // gstack-review-log also keeps its record argument verbatim (parsed below).
+        const keep = s === 'gstack-review-log' ? `printf '%s' "$1" > "${recordFile}"\n` : '';
+        fs.writeFileSync(path.join(stub, s), `#!/bin/sh\nprintf '%s\\n' "${s} $*" >> "${log}"\n${keep}`);
         fs.chmodSync(path.join(stub, s), 0o755);
       }
       for (const f of ['prompt.txt', 'untrusted.txt', 'codex.result.json', 'panel.payload.txt']) {
@@ -929,13 +939,25 @@ describe('Outside Voices — F2: the post-panel bash fences are MECHANICALLY gat
           .split("<this phase's surface label>").join('/x')
           .split('<surface label>').join('/x');
         if (t !== null) f = f.split('<T>').join(t);
+        if (t === '1') {
+          // The recipe's Step 7 TAINTED fill: REC=none, TALLY_STATUS=TAINTED, N=V=null, voices=[].
+          f = f
+            .split('"recommendation":"REC"').join('"recommendation":"none"')
+            .split('"tally_status":"TALLY_STATUS"').join('"tally_status":"TAINTED"')
+            .split('"ready":N,"vendors":V').join('"ready":null,"vendors":null')
+            .split('"voices":[{"voice":"…","vendor":"…","status":"…","verdict":"…"}]').join('"voices":[]');
+          if (f.includes('gstack-review-log')) {
+            expect(f, 'the TAINTED fill must replace every aggregate-record placeholder').not.toMatch(/"REC"|"TALLY_STATUS"|:N,|:V,|"…"/);
+          }
+        }
         expect(f, 'every <literal …>/<surface…> placeholder in a gated fence must be substituted by this harness').not.toMatch(/<literal |<surface|<this phase/);
         const r = spawnSync('bash', ['-c', f], { cwd: root, encoding: 'utf8', timeout: 30_000 });
         expect(r.error, String(r.error)).toBeUndefined();
       }
       const calls = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
       const exists = fs.existsSync(outDir);
-      return { fences, calls, exists, before, after: exists ? fs.readdirSync(outDir).sort() : [] };
+      const record = fs.existsSync(recordFile) ? fs.readFileSync(recordFile, 'utf8') : null;
+      return { fences, calls, exists, before, after: exists ? fs.readdirSync(outDir).sort() : [], record };
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -965,6 +987,19 @@ describe('Outside Voices — F2: the post-panel bash fences are MECHANICALLY gat
         expect(r.exists, 'the out-dir was rm -rf-ed on a TAINTED path').toBe(true);
         expect(r.after).toEqual(r.before);
         expect(r.calls.filter((c) => c.startsWith('gstack-review-log ')).length).toBe(1);
+        if (t === '1') {
+          // The logged aggregate record, as the recipe's TAINTED fill renders it, is valid JSON
+          // that can never be read as a tally.
+          expect(r.record, 'gstack-review-log received no record').not.toBeNull();
+          const rec = JSON.parse(r.record!);
+          expect(rec.skill).toBe('outside-voices');
+          expect(rec.tally_status).toBe('TAINTED');
+          expect(rec.recommendation).toBe('none');
+          expect(rec.ready).toBeNull();
+          expect(rec.vendors).toBeNull();
+          expect(rec.cost_usd).toBeNull();
+          expect(rec.voices).toEqual([]);
+        }
       });
     }
 
