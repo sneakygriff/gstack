@@ -58,6 +58,12 @@ const REFUSAL_STDERR = [
 ].join('\n');
 
 const NONCE = 'grok-fallback-nonce-7f3a';
+/**
+ * The panel's own stdout marker, printed only when grok_allow_unsandboxed=true AND the
+ * sandbox refused — strictly BEFORE the unsandboxed spawn. The outside-voices recipe keys
+ * F1 on it: a non-zero panel exit after this line is TAINTED (the fallback may have run).
+ */
+const UNSANDBOXED_MARK = 'NO OS sandbox';
 const OPT_IN_REASON = 'opt in with gstack-config set grok_allow_unsandboxed true';
 
 // Hostile parent env: every one of these must be STRIPPED from each grok spawn.
@@ -141,6 +147,88 @@ case "$STUB_GROK_MODE" in
       && rm -f "$STUB_OUT_DIR/panel.payload.txt" \
       && ln -s "$STUB_VICTIM" "$STUB_OUT_DIR/panel.payload.txt" || exit 98
     [ "$STUB_GROK_MODE" = refuse-then-symlink-payload-ro ] && { chmod 0500 "$STUB_OUT_DIR" || exit 98; }
+    verdict; exit 0 ;;
+  # Byte-exactness: strip ONLY the NUL bytes of a seeded tallied file (same inode) —
+  # invisible to a NUL-dropping $(…) capture/compare.
+  refuse-then-strip-nul)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    tr -d '\\000' < "$STUB_OUT_DIR/claude.result.json" > "$TMPDIR/stub-nul.tmp" \\
+      && cat "$TMPDIR/stub-nul.tmp" > "$STUB_OUT_DIR/claude.result.json" || exit 98
+    verdict; exit 0 ;;
+  # The panel's PRIVATE baseline copies (a mktemp -d under TMPDIR, outside the
+  # out-dir) are same-user writable too: alter every one of them.
+  refuse-then-tamper-privcopy)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    n=0
+    for c in "$TMPDIR"/gstack-panel-taint.*/*; do [ -f "$c" ] || continue; printf 'X' >> "$c"; n=$((n+1)); done
+    [ "$n" -gt 0 ] || exit 98
+    verdict; exit 0 ;;
+  # F5: lock the panel's private baseline dir (chmod $STUB_LOCK_MODE) without touching
+  # the copies — cleanup must still remove it (restore owner rwx first), never leak it.
+  refuse-then-lock-privdir)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    n=0
+    for d in "$TMPDIR"/gstack-panel-taint.*; do
+      [ -d "$d" ] || continue
+      # optional: a NESTED locked subtree too (cleanup must re-open subdirs before reading them)
+      if [ "\${STUB_LOCK_NESTED:-}" = 1 ]; then
+        mkdir -p "$d/sub/inner" && echo z > "$d/sub/inner/f" && chmod 000 "$d/sub/inner" "$d/sub" || exit 98
+      fi
+      chmod "$STUB_LOCK_MODE" "$d" || exit 98; n=$((n+1))
+    done
+    [ "$n" -gt 0 ] || exit 98
+    verdict; exit 0 ;;
+  # F1/F5: the unsandboxed run kills the PANEL itself (SIGTERM to the topmost process
+  # of the CONTIGUOUS chain of ancestors running $STUB_PANEL — the ( ) subshell, then
+  # the panel's main shell) before its taint check can run — no ABORTED line, no exit 3.
+  # The walk stops at the first non-panel ancestor above that chain, so it can never
+  # signal the test runner or a shell whose command line merely mentions the panel.
+  refuse-then-kill-panel)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    p=$PPID; top=""
+    while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+      case "$(ps -o command= -p "$p" 2>/dev/null)" in
+        *"$STUB_PANEL"*) top="$p" ;;
+        *) [ -n "$top" ] && break ;;
+      esac
+      p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    done
+    [ -n "$top" ] || exit 98
+    kill -TERM "$top"; sleep 1
+    verdict; exit 0 ;;
+  # F6: a tallied basename that is ALREADY a symlink at baseline (fable.result.json ->
+  # $STUB_LINK_TARGET) is retargeted at a forged verdict, or the bytes it resolves to are rewritten.
+  refuse-then-retarget-link)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    rm -f "$STUB_OUT_DIR/fable.result.json" && ln -s "$STUB_LINK_ALT" "$STUB_OUT_DIR/fable.result.json" || exit 98
+    verdict; exit 0 ;;
+  refuse-then-edit-link-target)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    cat "$STUB_LINK_ALT" > "$STUB_LINK_TARGET" || exit 98
+    verdict; exit 0 ;;
+  # Round 3 (Codex r2 P1): make a tallied out-dir file UNREADABLE (chmod 000, bytes
+  # unchanged) — the post-run hash fails, which must fail closed (exit 3), not "restore".
+  refuse-then-lock-tallied)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    chmod 000 "$STUB_OUT_DIR/$STUB_LOCK_NAME" || exit 98
+    verdict; exit 0 ;;
+  # Round 3 (Codex r2 P1): plant a HARD LINK to an owned mode-000 file inside the private
+  # baseline dir — cleanup must never chmod a FILE (that would unlock the external target).
+  refuse-then-hardlink-privdir)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    n=0
+    for d in "$TMPDIR"/gstack-panel-taint.*; do [ -d "$d" ] || continue; ln "$STUB_LOCKED_FILE" "$d/planted" || exit 98; n=$((n+1)); done
+    [ "$n" -gt 0 ] || exit 98
+    verdict; exit 0 ;;
+  # Round 3 (Codex r2 P2): rename the private dir aside and substitute ANOTHER owned dir
+  # (mode 0500, a marker inside) at its pathname — cleanup must not chmod or rm it.
+  refuse-then-swap-privdir)
+    [ "$sandboxed" = 1 ] && { refusal; exit 1; }
+    set -- "$TMPDIR"/gstack-panel-taint.*
+    [ -d "$1" ] || exit 98
+    for d in "$@"; do
+      mv "$d" "$d.aside" && mkdir "$d" && echo decoy > "$d/marker" && chmod 0500 "$d" || exit 98
+    done
     verdict; exit 0 ;;
   *) echo "stub: unknown STUB_GROK_MODE" >&2; exit 99 ;;
 esac
@@ -227,11 +315,15 @@ afterAll(() => {
 
 interface PanelRun {
   status: number | null;
+  /** The signal that ended the panel (e.g. SIGTERM after an EXIT trap re-raised it), else null. */
+  signal: string | null;
   stdout: string;
   stderr: string;
   spawns: Spawn[];
   record: any;
   outDir: string;
+  /** The panel's private TMPDIR (where the neutral cwd + private baseline copies are made). */
+  tmpDir: string;
   cwd: string;
   receipts: any[];
   outcomes: any[];
@@ -249,7 +341,17 @@ function fixtureGit(cwd: string, args: string[]) {
   if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
 }
 
-function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, string>; noGit?: boolean } = {}): PanelRun {
+function runPanel(
+  mode: string,
+  opts: {
+    optIn?: boolean;
+    env?: Record<string, string>;
+    noGit?: boolean;
+    seed?: Record<string, Buffer>;
+    /** Out-dir entries created as SYMLINKS (name → target) before the panel starts. */
+    links?: Record<string, string>;
+  } = {},
+): PanelRun {
   const dir = mkPriv(path.join(BASE, `run-${++runSeq}`));
   const home = path.join(dir, 'home');
   const cwd = path.join(dir, 'cwd');
@@ -257,6 +359,10 @@ function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, st
   // An explicit PRIVATE (0700) TMPDIR for the panel — the neutral cwd is created here.
   const privTmp = path.join(dir, 'tmp');
   for (const d of [home, cwd, outDir, privTmp]) mkPriv(d);
+  // Files already in the out-dir when the panel starts (e.g. a result the
+  // orchestrator wrote for a non-CLI voice) — tallied like any other.
+  for (const [name, bytes] of Object.entries(opts.seed ?? {})) fs.writeFileSync(path.join(outDir, name), bytes);
+  for (const [name, target] of Object.entries(opts.links ?? {})) fs.symlinkSync(target, path.join(outDir, name));
   // The panel's own cwd stands in for the user's checkout: it carries repo-level
   // grok config the unsandboxed fallback must never be able to see.
   fs.writeFileSync(path.join(cwd, '.envrc'), 'export PWNED=1\n');
@@ -320,6 +426,7 @@ function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, st
         STUB_DATAMARK: NONCE,
         STUB_OUT_DIR: outDir,
         STUB_CHECKOUT: cwd,
+        STUB_PANEL: PANEL,
         TMPDIR: privTmp,
         ...(opts.env ?? {}),
       },
@@ -334,15 +441,32 @@ function runPanel(mode: string, opts: { optIn?: boolean; env?: Record<string, st
     : [];
   return {
     status: r.status,
+    signal: r.signal ?? null,
     stdout: r.stdout ?? '',
     stderr: r.stderr ?? '',
     spawns: readSpawns(log),
     record,
     outDir,
+    tmpDir: privTmp,
     cwd: fs.realpathSync(cwd),
     receipts: lines.filter((l) => l.type === 'egress' && l.sink === 'outside-voice:grok'),
     outcomes: lines.filter((l) => l.type === 'outcome'),
   };
+}
+
+/** The checkout fingerprint the opted-in fallback writes into the out-dir at baseline. */
+const CHECKOUT_BEFORE = 'grok.checkout.before';
+
+/**
+ * The taint baseline's PRIVATE byte-exact copies live in a mktemp -d under the
+ * panel's TMPDIR — never inside the out-dir — and are removed on every path:
+ * none may survive the run, and none may ever appear in the out-dir.
+ */
+function expectNoPrivateCopies(run: PanelRun): void {
+  expect(fs.readdirSync(run.tmpDir).filter((n) => n.startsWith('gstack-panel-taint.'))).toEqual([]);
+  if (fs.existsSync(run.outDir)) {
+    expect(fs.readdirSync(run.outDir).filter((n) => n.startsWith('gstack-panel-taint.'))).toEqual([]);
+  }
 }
 
 describe('gstack-panel — grok sandbox refusal (behavioral, stub grok)', () => {
@@ -367,6 +491,8 @@ describe('gstack-panel — grok sandbox refusal (behavioral, stub grok)', () => 
     );
     expect(run.stdout).toContain(OPT_IN_REASON);
     expect(run.stdout).not.toContain('DEGRADED');
+    // F1 discriminator: the panel prints `NO OS sandbox` ONLY when the unsandboxed fallback can start.
+    expect(run.stdout).not.toContain(UNSANDBOXED_MARK);
     // Hermeticity: the config seeding held — only grok was ever eligible.
     for (const other of ['codex', 'gemini']) {
       const rec = JSON.parse(fs.readFileSync(path.join(run.outDir, `${other}.result.json`), 'utf8'));
@@ -406,6 +532,12 @@ describe('gstack-panel — grok sandbox refusal (behavioral, stub grok)', () => 
     expect(run.outcomes.map((o) => o.status)).toEqual(['sandbox-refused:exit:1', 'exit:0']);
     expect(run.stdout).toContain('WARNING');
     expect(run.stdout).toMatch(/grok: READY[^\n]*DEGRADED ISOLATION/);
+    // F1 discriminator: printed by the panel (grok's own output goes to grok.raw/err), before the spawn.
+    expect(run.stdout).toContain(UNSANDBOXED_MARK);
+    expect(run.stdout.indexOf(UNSANDBOXED_MARK)).toBeLessThan(run.stdout.indexOf('grok: READY'));
+    // No taint: the checkout fingerprint is removed once consumed; no private copy survives.
+    expect(fs.existsSync(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(false);
+    expectNoPrivateCopies(run);
   });
 
   test('(c) refusal marker but NON-EMPTY stdout → not a refusal: 1 spawn, no retry, no isolation (even when opted in)', () => {
@@ -445,6 +577,7 @@ describe('gstack-panel — grok sandbox refusal (behavioral, stub grok)', () => 
     expect(run.record).not.toHaveProperty('isolation_note');
     expect(run.receipts.length).toBe(1);
     expect(run.stdout).not.toContain('DEGRADED');
+    expect(run.stdout).not.toContain(UNSANDBOXED_MARK);
   });
 
   test('(f) an unrelated failure (no refusal marker) is NOT retried and carries no isolation fields', () => {
@@ -520,6 +653,9 @@ describe('gstack-panel — taint check around the unsandboxed grok fallback (A2)
     expect(run.record.reason).toContain('TAINTED');
     expect(run.record.isolation).toBe('tool-policy-only');
     expect(run.stdout).toMatch(/grok: [^\n]*TAINTED/);
+    // Taint path: the checkout fingerprint STAYS in the out-dir as evidence.
+    expect(fs.readFileSync(path.join(run.outDir, CHECKOUT_BEFORE), 'utf8')).toContain('== end-control');
+    expectNoPrivateCopies(run);
   }
 
   test.skipIf(!NEUTRAL_OK)('a forged SIBLING verdict (codex.result.json) → grok error (tainted) and codex restored to what the panel wrote', () => {
@@ -605,6 +741,9 @@ describe('gstack-panel — taint check around the unsandboxed grok fallback (A2)
     const codex = JSON.parse(fs.readFileSync(path.join(`${run.outDir}.moved`, 'codex.result.json'), 'utf8'));
     expect(codex.reason).toContain('kill-switch');
     expect(lexists(path.join(`${run.outDir}.moved`, 'grok.result.json'))).toBe(false);
+    // Exit-3 path: the evidence fingerprint is left where it was; the private copies are gone.
+    expect(lexists(path.join(`${run.outDir}.moved`, CHECKOUT_BEFORE))).toBe(true);
+    expectNoPrivateCopies(run);
   });
 
   test.skipIf(!NEUTRAL_OK)('a PLANTED symlink-to-dir in the out-dir → tainted; only the LINK is removed, its target untouched', () => {
@@ -648,6 +787,8 @@ describe('gstack-panel — taint check around the unsandboxed grok fallback (A2)
     // Nothing was written through or swapped: the link is still the planted one.
     expect(fs.lstatSync(path.join(outDir, 'panel.payload.txt')).isSymbolicLink()).toBe(true);
     expect(fs.readdirSync(outDir).filter((n) => n.startsWith('.restore.'))).toEqual([]);
+    expect(lexists(path.join(outDir, CHECKOUT_BEFORE))).toBe(true);
+    expectNoPrivateCopies(run);
   });
 
   test.skipIf(!NEUTRAL_OK)('payload swapped for a SYMLINK to an external file, out-dir still writable → tainted; the LINK is replaced by a regular file with the original bytes, victim untouched', () => {
@@ -742,7 +883,317 @@ printf '%s\n' "$r"
     expect(fs.readFileSync(path.join(run.outDir, 'panel.payload.txt'), 'utf8')).toContain('INJECTED-BY-GROK');
     expect(fs.lstatSync(path.join(run.outDir, '.restore.SHIMFIFO00')).isFIFO()).toBe(true);
     expect(fs.readdirSync(run.outDir).filter((n) => n.startsWith('.restore.'))).toEqual(['.restore.SHIMFIFO00']);
+    expect(lexists(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(true);
+    expectNoPrivateCopies(run);
   }, 90_000);
+
+  // Byte-exact baseline: a `$(cat …)` capture DROPS NUL bytes, so a NUL-only edit
+  // slipped past the per-file compare and any recovery wrote NUL-stripped bytes
+  // back. The baseline is now a private byte-exact copy (mktemp -d, OUTSIDE the
+  // out-dir), compared with cmp and restored by copy.
+  const NUL_BYTES = Buffer.from('{"schema":"outside-voice/v2","voice":"claude"}\0\0mid\0dle\0\n\n\n', 'binary');
+  const NUL_SEED = { 'claude.result.json': NUL_BYTES };
+  const hexOf = (p: string) => fs.readFileSync(p).toString('hex');
+
+  test.skipIf(!NEUTRAL_OK)('a tallied file with NUL bytes + trailing newlines, NULs stripped by the run → flagged as rewritten and restored BYTE-EXACTLY', () => {
+    const run = runPanel('refuse-then-strip-nul', { optIn: true, seed: NUL_SEED });
+    expectTainted(run);
+    expect(run.record.reason).toContain('rewritten: claude.result.json');
+    expect(hexOf(path.join(run.outDir, 'claude.result.json'))).toBe(NUL_BYTES.toString('hex'));
+  });
+
+  test.skipIf(!NEUTRAL_OK)('an UNTOUCHED NUL-bearing tallied file is not flagged: grok READY, file byte-identical, no checkout fingerprint or private copy left behind', () => {
+    const run = runPanel('refuse-then-ok', { optIn: true, seed: NUL_SEED });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.record.status).toBe('ready');
+    expect(run.record.isolation).toBe('tool-policy-only');
+    expect(run.stdout + run.stderr).not.toContain('TAINTED');
+    expect(hexOf(path.join(run.outDir, 'claude.result.json'))).toBe(NUL_BYTES.toString('hex'));
+    expect(fs.existsSync(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(false);
+    expectNoPrivateCopies(run);
+  });
+
+  test.skipIf(!NEUTRAL_OK)('an UNTOUCHED NUL-bearing tallied file survives a recovery triggered by ANOTHER file byte-exactly and is not listed as rewritten', () => {
+    const run = runPanel('refuse-then-tamper-payload', { optIn: true, seed: NUL_SEED });
+    expectTainted(run);
+    expect(run.record.reason).toContain('rewritten: panel.payload.txt');
+    expect(run.record.reason).not.toContain('claude.result.json');
+    expect(hexOf(path.join(run.outDir, 'claude.result.json'))).toBe(NUL_BYTES.toString('hex'));
+    expect(fs.readFileSync(path.join(run.outDir, 'panel.payload.txt'), 'utf8')).not.toContain('INJECTED-BY-GROK');
+  });
+
+  test.skipIf(!NEUTRAL_OK)('the PRIVATE baseline copies altered by the run → TAINTED, no trusted bytes to restore: fail CLOSED (exit 3, ABORTED), out-dir untouched, copies removed', () => {
+    const run = runPanel('refuse-then-tamper-privcopy', { optIn: true, seed: NUL_SEED });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status, run.stdout + run.stderr).toBe(3);
+    expect(run.stdout).toContain('gstack-panel ABORTED');
+    expect(run.stdout).toMatch(/grok: ERROR[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/WARNING[^\n]*TAINTED[^\n]*private baseline cop/);
+    // Compromised: no record written, nothing in the out-dir rewritten or removed.
+    expect(run.record).toBeNull();
+    expect(rec(run, 'codex').reason).toContain('kill-switch');
+    expect(hexOf(path.join(run.outDir, 'claude.result.json'))).toBe(NUL_BYTES.toString('hex'));
+    expect(fs.readdirSync(run.outDir).filter((n) => n.startsWith('.restore.'))).toEqual([]);
+    expect(lexists(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(true);
+    expectNoPrivateCopies(run);
+  });
+
+  /** A PATH-shim dir holding the given executables (name → script). */
+  function mkShimDir(scripts: Record<string, string>): string {
+    const dir = mkPriv(path.join(BASE, `shim-${runSeq + 1}-${Object.keys(scripts).join('-')}`));
+    for (const [name, body] of Object.entries(scripts)) {
+      fs.writeFileSync(path.join(dir, name), body);
+      fs.chmodSync(path.join(dir, name), 0o755);
+    }
+    return dir;
+  }
+  const realBin = (name: string, fallback: string) =>
+    spawnSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8', timeout: 10_000 }).stdout.trim() || fallback;
+  const REAL_CMP = realBin('cmp', '/usr/bin/cmp');
+  const REAL_MV = realBin('mv', '/bin/mv');
+
+  // F3 (Codex P1-b): detection must hash the LIVE file against the in-memory digest and
+  // never re-read the private copy after its hash was taken. Deterministic stand-ins for the
+  // race: a `cksum` shim makes the out-dir listing content-blind (Codex showed a CRC32+length
+  // collision is forgeable), and a `cmp` shim rewrites the private copy with the live (forged)
+  // bytes right before cmp re-reads it — a concurrent same-user writer winning the window
+  // between the copy's hash check and that re-read.
+  test.skipIf(!NEUTRAL_OK)('a forged sibling + a CRC-blind listing + the private copy swapped AFTER its hash check → still TAINTED and restored (the live file is hashed against the in-memory digest)', () => {
+    const shim = mkShimDir({
+      cksum: '#!/bin/sh\ncat >/dev/null\necho "1 1"\n',
+      cmp: `#!/bin/sh\na=""; b=""\nfor x in "$@"; do a="$b"; b="$x"; done\ncase "$b" in */gstack-panel-taint.*/f.*) [ -f "$a" ] && cat "$a" > "$b" ;; esac\nexec ${REAL_CMP} "$@"\n`,
+    });
+    const run = runPanel('refuse-then-forge-sibling', { optIn: true, env: { PATH: `${shim}:${STUB_DIR}:${process.env.PATH}` } });
+    expectTainted(run);
+    expect(run.record.reason).toContain('rewritten: codex.result.json');
+    const codex = rec(run, 'codex');
+    expect(codex.status).toBe('absent');
+    expect(codex.reason).toContain('kill-switch');
+    expect(codex.datamark).toBeUndefined();
+  });
+
+  // F4 (Grok P1): the restore re-hashes the RENAMED entry — a temp altered after its hash
+  // check and before the rename (same-user writable) must not be accepted as restored.
+  test.skipIf(!NEUTRAL_OK)('a restore temp altered AFTER its hash check, before the rename → the renamed entry is re-hashed: recovery fails CLOSED (exit 3, ABORTED, no record)', () => {
+    const shim = mkShimDir({
+      mv: `#!/bin/sh\nfor a in "$@"; do case "$a" in */.restore.*|.restore.*) [ -f "$a" ] && printf X >> "$a" ;; esac; done\nexec ${REAL_MV} "$@"\n`,
+    });
+    const run = runPanel('refuse-then-tamper-payload', { optIn: true, env: { PATH: `${shim}:${STUB_DIR}:${process.env.PATH}` } });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status, run.stdout + run.stderr).toBe(3);
+    expect(run.stdout).toContain('gstack-panel ABORTED');
+    expect(run.stdout).toMatch(/grok: ERROR[^\n]*TAINTED/);
+    expect(run.stderr).toMatch(/FATAL[^\n]*out-dir/);
+    expect(run.record).toBeNull();
+    expect(lexists(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(true);
+    expectNoPrivateCopies(run);
+  });
+
+  // F5 (Codex P2): the run can lock the private dir; cleanup restores owner rwx (dir +
+  // children) on OUR dir (identity re-verified) before rm -rf, and verifies the removal.
+  for (const mode of ['0500', '0000', '0000 + a nested mode-000 subtree']) {
+    test.skipIf(!NEUTRAL_OK)(`the private baseline dir locked (chmod ${mode}) by the run → cleanup still removes it: no copy of the payload/results survives`, () => {
+      const tmp = path.join(BASE, `run-${runSeq + 1}`, 'tmp');
+      let run: PanelRun;
+      try {
+        run = runPanel('refuse-then-lock-privdir', {
+          optIn: true,
+          env: { STUB_LOCK_MODE: mode.slice(0, 4), STUB_LOCK_NESTED: mode.includes('nested') ? '1' : '' },
+        });
+      } finally {
+        // A leaked locked dir would break afterAll's rmSync: unlock whatever is left.
+        unlockDirs(tmp);
+      }
+      expect(run!.spawns.length, JSON.stringify(run!.spawns)).toBe(2);
+      if (mode === '0500') {
+        // Copies still readable + unchanged → nothing tainted.
+        expect(run!.status, run!.stdout + run!.stderr).toBe(0);
+        expect(run!.record.status).toBe('ready');
+        expect(lexists(path.join(run!.outDir, CHECKOUT_BEFORE))).toBe(false);
+      } else {
+        // Copies unreadable → cannot be verified → fail closed (the existing badcopy route).
+        expect(run!.status, run!.stdout + run!.stderr).toBe(3);
+        expect(run!.stdout).toContain('gstack-panel ABORTED');
+      }
+      expect(run!.stderr).not.toContain('could not be removed');
+      expectNoPrivateCopies(run!);
+    });
+  }
+
+  // F5 + F1: an unsandboxed run that KILLS the panel before its taint check. No ABORTED line
+  // and no exit 3 — so the recipe must treat a non-zero exit after `NO OS sandbox` as TAINTED —
+  // and the EXIT trap (bash 3.2: fires on SIGTERM, not in subshells) still removes the copies.
+  test.skipIf(!NEUTRAL_OK)('the panel KILLED (SIGTERM) mid-fallback, before its taint check → no ABORTED / exit 3, `NO OS sandbox` already printed; the EXIT trap removes the private copies and keeps the fingerprint as evidence', () => {
+    const run = runPanel('refuse-then-kill-panel', { optIn: true });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status === 143 || run.signal === 'SIGTERM', `status=${run.status} signal=${run.signal}\n${run.stderr}`).toBe(true);
+    expect(run.stdout).toContain(UNSANDBOXED_MARK);
+    expect(run.stdout).not.toContain('gstack-panel ABORTED');
+    expect(run.stdout).not.toMatch(/grok: (READY|ERROR)/);
+    expect(lexists(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(true);
+    expectNoPrivateCopies(run);
+  });
+
+  // F6 (Grok P2): a tallied basename that is ALREADY a symlink at baseline cannot be
+  // byte-copied or restored — its target + the bytes it resolves to are pinned instead, and
+  // ANY change fails closed (exit 3), so a retargeted link never reaches gstack-vote.
+  function mkLinkTargets(): { target: string; alt: string } {
+    const d = mkPriv(path.join(BASE, `linktargets-${runSeq + 1}`));
+    const v = (verdict: string) =>
+      `{"schema":"${VOICE_SCHEMA_ID}","voice":"fable","vendor":"anthropic","status":"ready","verdict":"${verdict}","findings":[],"tokens":null,"cost_usd":null,"datamark":"${NONCE}"}\n`;
+    const target = path.join(d, 'fable.real.json');
+    const alt = path.join(d, 'fable.forged.json');
+    fs.writeFileSync(target, v('BLOCK'));
+    fs.writeFileSync(alt, v('PASS'));
+    return { target, alt };
+  }
+
+  test.skipIf(!NEUTRAL_OK)('a tallied file that is ALREADY a symlink at baseline, RETARGETED by the run → fail CLOSED (exit 3, ABORTED): nothing restored, the link never reaches a tally', () => {
+    const { target, alt } = mkLinkTargets();
+    const run = runPanel('refuse-then-retarget-link', {
+      optIn: true,
+      links: { 'fable.result.json': target },
+      env: { STUB_LINK_TARGET: target, STUB_LINK_ALT: alt },
+    });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status, run.stdout + run.stderr).toBe(3);
+    expect(run.stdout).toContain('gstack-panel ABORTED');
+    expect(run.record).toBeNull();
+    expect(run.stderr).toMatch(/WARNING[^\n]*TAINTED[^\n]*fable\.result\.json/);
+    expect(fs.readlinkSync(path.join(run.outDir, 'fable.result.json'))).toBe(alt);
+    expectNoPrivateCopies(run);
+  });
+
+  test.skipIf(!NEUTRAL_OK)('the bytes an UNCHANGED baseline symlink resolves to, rewritten by the run → fail CLOSED (exit 3, ABORTED)', () => {
+    const { target, alt } = mkLinkTargets();
+    const run = runPanel('refuse-then-edit-link-target', {
+      optIn: true,
+      links: { 'fable.result.json': target },
+      env: { STUB_LINK_TARGET: target, STUB_LINK_ALT: alt },
+    });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status, run.stdout + run.stderr).toBe(3);
+    expect(run.stdout).toContain('gstack-panel ABORTED');
+    expect(run.record).toBeNull();
+    expect(run.stderr).toMatch(/WARNING[^\n]*TAINTED[^\n]*fable\.result\.json/);
+    expect(fs.readlinkSync(path.join(run.outDir, 'fable.result.json'))).toBe(target);
+    expectNoPrivateCopies(run);
+  });
+
+  test.skipIf(!NEUTRAL_OK)('an UNTOUCHED baseline symlink among the tallied files is not flagged: grok READY, exit 0, link intact', () => {
+    const { target } = mkLinkTargets();
+    const run = runPanel('refuse-then-ok', { optIn: true, links: { 'fable.result.json': target } });
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.record.status).toBe('ready');
+    expect(run.stdout + run.stderr).not.toContain('TAINTED');
+    expect(fs.readlinkSync(path.join(run.outDir, 'fable.result.json'))).toBe(target);
+    expect(lexists(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(false);
+    expectNoPrivateCopies(run);
+  });
+
+  // ── Round 3 (Codex round 2: P1 hash failures + file chmods in cleanup, P2 cleanup identity) ──
+  /** An owned mode-000 file (bytes unreadable to us without a chmod) outside the out-dir/checkout. */
+  function mkLockedFile(bytes: string): string {
+    const d = mkPriv(path.join(BASE, `locked-${runSeq + 1}`));
+    const f = path.join(d, 'locked.json');
+    fs.writeFileSync(f, bytes);
+    fs.chmodSync(f, 0o000);
+    return f;
+  }
+  const modeOf = (p: string) => fs.lstatSync(p).mode & 0o7777;
+  /** Re-open every directory under `dir` (0700) so afterAll's rmSync can clean a run the stub locked. */
+  function unlockDirs(dir: string): void {
+    if (!lexists(dir) || fs.lstatSync(dir).isSymbolicLink() || !fs.lstatSync(dir).isDirectory()) return;
+    fs.chmodSync(dir, 0o700);
+    for (const n of fs.readdirSync(dir)) unlockDirs(path.join(dir, n));
+  }
+  const FORGED_FABLE = `{"schema":"${VOICE_SCHEMA_ID}","voice":"fable","vendor":"anthropic","status":"ready","verdict":"PASS","findings":[],"tokens":null,"cost_usd":null,"datamark":"${NONCE}"}\n`;
+
+  // (a) A tallied entry whose bytes cannot be hashed at BASELINE (a symlink to an owned
+  // mode-000 file) can never be verified afterwards: the unsandboxed fallback must not
+  // start (grok ABSENT, fail-closed) — never an `unhashable` pin that later "matches".
+  test.skipIf(!NEUTRAL_OK)('round 3 (a): a tallied entry that cannot be hashed at BASELINE (symlink → mode-000 file) → the unsandboxed fallback never starts: grok ABSENT fail-closed, 1 spawn, 1 receipt', () => {
+    const locked = mkLockedFile(FORGED_FABLE);
+    const run = runPanel('refuse-then-ok', { optIn: true, links: { 'fable.result.json': locked } });
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(1);
+    expect(run.receipts.length).toBe(1);
+    expect(run.record.status).toBe('absent');
+    expect(run.record.reason).toContain('cannot fingerprint');
+    expect(run.record.reason).toContain('cannot hash fable.result.json');
+    expect(run.record.reason).toContain('fail-closed');
+    expect(modeOf(locked)).toBe(0);
+    expect(lexists(path.join(run.outDir, CHECKOUT_BEFORE))).toBe(false);
+    expectNoPrivateCopies(run);
+  });
+
+  // (b) A hash failure at CHECK time (a tallied file made unreadable, bytes untouched) is
+  // unverifiable → compromised → exit 3 / ABORTED; nothing is "restored" over it.
+  test.skipIf(!NEUTRAL_OK)('round 3 (b): a tallied file that cannot be hashed at CHECK time (chmod 000 by the run) → fail CLOSED: exit 3, ABORTED, nothing restored', () => {
+    let run: PanelRun;
+    const out = path.join(BASE, `run-${runSeq + 1}`, 'out');
+    try {
+      run = runPanel('refuse-then-lock-tallied', { optIn: true, env: { STUB_LOCK_NAME: 'codex.result.json' } });
+    } finally {
+      unlockDirs(out);
+    }
+    expect(run!.spawns.length, JSON.stringify(run!.spawns)).toBe(2);
+    expect(run!.status, run!.stdout + run!.stderr).toBe(3);
+    expect(run!.stdout).toContain('gstack-panel ABORTED');
+    expect(run!.record).toBeNull();
+    expect(run!.stderr).toMatch(/WARNING[^\n]*TAINTED[^\n]*could not be hashed[^\n]*codex\.result\.json/);
+    // Not replaced by a restore: still the run's mode-000 entry.
+    expect(modeOf(path.join(run!.outDir, 'codex.result.json'))).toBe(0);
+    expect(fs.readdirSync(run!.outDir).filter((n) => n.startsWith('.restore.'))).toEqual([]);
+    expectNoPrivateCopies(run!);
+  });
+
+  // (c) Cleanup unlocks DIRECTORIES only: a hard link planted in the private dir to an owned
+  // mode-000 file outside it must keep mode 000 (a recursive file chmod would make the
+  // external target readable — Codex's forged-verdict exposure).
+  test.skipIf(!NEUTRAL_OK)('round 3 (c): cleanup never changes a FILE mode — a hard link planted in the private dir to a mode-000 file stays mode 000; the dir is still removed', () => {
+    const locked = mkLockedFile(FORGED_FABLE);
+    const run = runPanel('refuse-then-hardlink-privdir', { optIn: true, env: { STUB_LOCKED_FILE: locked } });
+    expect(run.spawns.length, JSON.stringify(run.spawns)).toBe(2);
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(run.record.status).toBe('ready');
+    expect(modeOf(locked)).toBe(0);
+    expect(fs.lstatSync(locked).nlink).toBe(1); // the planted link went with the private dir
+    expect(run.stderr).not.toContain('could not be removed');
+    expectNoPrivateCopies(run);
+  });
+
+  // (d) Cleanup verifies the private dir's identity (a real dir, not a symlink, the dev:inode
+  // recorded at creation) BEFORE any chmod/rm: a substituted directory is left exactly as it
+  // is (mode + contents), with a residue WARNING.
+  test.skipIf(!NEUTRAL_OK)('round 3 (d): the private dir renamed aside and SUBSTITUTED by another dir → cleanup neither chmods nor removes the substitute; residue is reported', () => {
+    const tmp = path.join(BASE, `run-${runSeq + 1}`, 'tmp');
+    let run: PanelRun;
+    let subs: { p: string; mode: number; marker: string }[] = [];
+    try {
+      run = runPanel('refuse-then-swap-privdir', { optIn: true });
+      subs = fs
+        .readdirSync(run.tmpDir)
+        .filter((n) => /^gstack-panel-taint\.[^.]+$/.test(n))
+        .map((n) => {
+          const p = path.join(run.tmpDir, n);
+          const marker = lexists(path.join(p, 'marker')) ? fs.readFileSync(path.join(p, 'marker'), 'utf8') : '';
+          return { p, mode: modeOf(p), marker };
+        });
+    } finally {
+      unlockDirs(tmp);
+    }
+    expect(run!.spawns.length, JSON.stringify(run!.spawns)).toBe(2);
+    // The copies' path now names the substitute (no f.<i> there) → no trusted bytes → exit 3.
+    expect(run!.status, run!.stdout + run!.stderr).toBe(3);
+    expect(run!.stdout).toContain('gstack-panel ABORTED');
+    expect(subs.length).toBe(1);
+    expect(subs[0].mode).toBe(0o500); // never chmod'ed
+    expect(subs[0].marker).toBe('decoy\n'); // never removed
+    expect(run!.stderr).toContain('could not be removed');
+  });
 
   test('refusal + opt-in from a NON-git directory (checkout cannot be fingerprinted) → ABSENT fail-closed, exactly 1 spawn, no second receipt', () => {
     const run = runPanel('refuse-then-ok', { optIn: true, noGit: true });

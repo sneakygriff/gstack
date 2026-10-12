@@ -82,8 +82,8 @@
 # for the run is stamped isolation:"tool-policy-only" + isolation_note and the
 # status line says DEGRADED ISOLATION. Because nothing CONTAINS that process, the
 # spawn is bracketed by a TAINT CHECK (see "Taint check" below — bin/gstack-lane's
-# inert `_snapshot` of the checkout + the out-dir's entries and the in-memory bytes
-# of every tallied/reused file): no fingerprint → ABSENT; any change → grok
+# inert `_snapshot` of the checkout + the out-dir's entries and a private byte-exact
+# copy of every tallied/reused file): no fingerprint → ABSENT; any change → grok
 # `error` (TAINTED), siblings restored, planted files removed. The fallback is
 # also unavailable (ABSENT) wherever bin/gstack-neutral-cwd fails closed — a
 # TMPDIR under a group/other-writable dir (Linux /tmp 1777) or under an ancestor
@@ -771,14 +771,31 @@ _panel_finish_run() { # <voice> <rc> <raw-file> [isolation]
 #     hashing) and, only when that is unchanged, status/diff/untracked via inert
 #     git (no hooks, fsmonitor, filters, external diff, textconv, transport);
 #   - $OUT_DIR: every entry's name/type (+ cksum of regular files), except the
-#     two files the spawn's own redirections write (grok.raw, grok.err); and the
-#     EXACT bytes of every *.result.json and panel.payload.txt, held in shell
-#     MEMORY (a same-user process can rewrite any file, not this process).
+#     two files the spawn's own redirections write (grok.raw, grok.err); and a
+#     BYTE-EXACT copy of every *.result.json and panel.payload.txt (NUL bytes and
+#     trailing newlines included — a `$(…)` capture would drop NULs) in a fresh
+#     private mktemp -d (0700) OUTSIDE the out-dir and the checkout, verified with
+#     `cmp` at baseline. Each copy's SHA-256 is held in shell MEMORY (a same-user
+#     process can rewrite any file, not this process): detection hashes the LIVE
+#     out-dir file against that in-memory digest (never a re-read of the copy), a
+#     restore is re-hashed AFTER its rename, and an altered copy is never trusted —
+#     recovery ABORTS (fail-closed, like a replaced out-dir). A tallied name that is
+#     NOT a regular file at baseline (a symlink, a dir) cannot be copied or
+#     restored: its shape is pinned instead (a link's target + the SHA-256 of what it
+#     resolves to) and ANY change to it aborts the same way. The copies are removed
+#     on every path — also by an EXIT trap (SIGTERM/SIGINT/SIGHUP; no INT/TERM trap:
+#     that would defer the kill until grok exits) — only once the dir's identity is
+#     re-verified, re-opening its DIRECTORIES (never a file's mode) and warning on
+#     residue. A tallied entry that cannot be HASHED fails closed: at baseline the
+#     fallback does not start, after the run it aborts recovery. The checkout
+#     fingerprint (grok.checkout.before) is removed once consumed when nothing was
+#     tainted, KEPT as evidence when it was (and when the run was interrupted).
 # A checkout that cannot be fingerprinted (not a git checkout, no commit yet,
 # snapshot failure/timeout) REFUSES the fallback (grok ABSENT, fail-closed). ANY
-# change afterwards marks grok `error` ("TAINTED"), restores the in-memory files,
-# and removes entries planted in $OUT_DIR — before anything can be tallied. A
-# checkout change cannot be undone: it is reported loudly. The out-dir's IDENTITY
+# change afterwards marks grok `error` ("TAINTED"), restores the tallied files
+# from their verified copies, and removes entries planted in $OUT_DIR — before
+# anything can be tallied. A checkout change cannot be undone: it is reported
+# loudly. The out-dir's IDENTITY
 # (physical path + device:inode; it must be a real directory, not a symlink) is
 # captured at baseline and re-verified before ANY restore or deletion; recovery
 # itself runs from inside the verified directory (cd + relative names), so a
@@ -800,8 +817,12 @@ PANEL_SNAPSHOT_TIMEOUT_S="${GSTACK_PANEL_SNAPSHOT_TIMEOUT_S:-60}"
 case "$PANEL_SNAPSHOT_TIMEOUT_S" in ''|*[!0-9]*|0) PANEL_SNAPSHOT_TIMEOUT_S=60 ;; esac
 _PANEL_TAINT_SNAP=""      # checkout snapshot before the spawn
 _PANEL_TAINT_LIST=""      # $OUT_DIR listing before the spawn
-_PANEL_TAINT_FILES=()     # tallied/reused files whose bytes are held in memory …
-_PANEL_TAINT_BYTES=()     # … and those bytes
+_PANEL_TAINT_FILES=()     # tallied/reused files copied byte-exactly to $_PANEL_TAINT_PRIV/f.<index> …
+_PANEL_TAINT_SUMS=()      # … and each copy's SHA-256 (in memory: the copies are same-user writable)
+_PANEL_TAINT_PRIV=""      # the private (0700, mktemp -d, outside $OUT_DIR) dir holding those copies
+_PANEL_TAINT_PRIV_ID=""   # its dev:inode at creation (no-follow): cleanup only unlocks/removes THAT directory
+_PANEL_TAINT_ODD=""       # tallied names that were NOT regular files at baseline, one _panel_odd_entry line each
+_PANEL_TAINT_SNAPFILE=""  # the checkout fingerprint this baseline wrote ($OUT_DIR/grok.checkout.before)
 _PANEL_TAINT_DETAIL=""    # set by _panel_taint_check
 _PANEL_TAINT_WHY=""       # set by _panel_taint_baseline on failure
 _PANEL_OUTDIR_ID=""       # "<physical path>|<dev:inode>" of $OUT_DIR at baseline
@@ -834,9 +855,76 @@ _panel_checkout_snapshot() { # <before-file|-> → the inert snapshot on stdout;
   _gstack_codex_timeout_wrapper "$PANEL_SNAPSHOT_TIMEOUT_S" "$BIN_DIR/gstack-lane" _snapshot "$1" "$REPO_ROOT" 2>/dev/null </dev/null
 }
 
-_panel_taint_baseline() { # → 0 when the checkout + out-dir were fingerprinted; else 1 + _PANEL_TAINT_WHY
-  local f c i=0 od rr
-  _PANEL_TAINT_FILES=(); _PANEL_TAINT_BYTES=(); _PANEL_TAINT_LIST=""; _PANEL_TAINT_SNAP=""; _PANEL_TAINT_WHY=""; _PANEL_OUTDIR_ID=""
+_panel_sha256() { # <file> → its SHA-256 (64 lowercase hex) on stdout; nonzero when it cannot be hashed
+  local h
+  h="$(shasum -a 256 2>/dev/null < "$1")" || h=""
+  [ -n "$h" ] || { h="$(sha256sum 2>/dev/null < "$1")" || h=""; }
+  [ -n "$h" ] || { h="$(openssl dgst -sha256 -r 2>/dev/null < "$1")" || h=""; }
+  h="${h%% *}"
+  case "$h" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#h}" -eq 64 ] || return 1
+  printf '%s\n' "$h"
+}
+
+_panel_dev_ino() { # <path> → "dev:inode" of the path ITSELF (a symlink is not followed); nonzero otherwise
+  local di
+  di="$(stat -c '%d:%i' -- "$1" 2>/dev/null)" || di="$(stat -f '%d:%i' -- "$1" 2>/dev/null)" || return 1
+  case "$di" in *[0-9]:[0-9]*) printf '%s\n' "$di" ;; *) return 1 ;; esac
+}
+
+_panel_taint_cleanup() { # [keep-evidence] — EVERY path after a baseline attempt + the EXIT trap (idempotent)
+  # The private copies always go — but ONLY from the directory this baseline created:
+  # identity is verified FIRST (a real dir, not a symlink, the dev:inode recorded at
+  # mktemp; no-follow stat, so a dir the run locked 0000 still verifies). Anything
+  # else at that path (a symlink, a substituted or renamed-aside dir) is NOT touched:
+  # no chmod, no rm — only the residue WARNING below. Then DIRECTORIES get owner rwx
+  # back — the verified dir itself first (BSD find cannot open a mode-000 start
+  # point), then every subdir pre-order, so a locked subdir opens before it is read —
+  # never a file's mode: unlinking needs a writable parent, and a chmod'ed hard link
+  # would unlock its external target — and rm -rf; the removal is VERIFIED. Residual:
+  # pathname-based — a swap between the identity check and the chmod/rm could redirect
+  # them; closing that needs descriptor-relative cleanup, which bash 3.2 cannot do.
+  # The checkout fingerprint goes too unless the run was TAINTED or interrupted
+  # (keep-evidence) — on a REPLACED out-dir that also means nothing is ever deleted
+  # through the out-dir path.
+  local p="$_PANEL_TAINT_PRIV" id
+  case "$p" in */gstack-panel-taint.?*)
+    if [ -n "$_PANEL_TAINT_PRIV_ID" ] && [ -d "$p" ] && [ ! -L "$p" ] \
+       && id="$(_panel_dev_ino "$p")" && [ "$id" = "$_PANEL_TAINT_PRIV_ID" ]; then
+      chmod u+rwx "$p"; find "$p" -type d -exec chmod u+rwx {} \; ; rm -rf -- "$p"
+    fi 2>/dev/null
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      echo "gstack-panel: WARNING — the taint check's private copies (payload/result bytes) could not be removed: $p — delete it by hand" >&2
+    fi ;;
+  esac
+  _PANEL_TAINT_PRIV=""; _PANEL_TAINT_PRIV_ID=""
+  if [ "${1:-}" != keep-evidence ] && [ -n "$_PANEL_TAINT_SNAPFILE" ]; then
+    rm -f -- "$_PANEL_TAINT_SNAPFILE" 2>/dev/null
+  fi
+  _PANEL_TAINT_SNAPFILE=""
+  return 0
+}
+
+_panel_odd_entry() { # <out-dir path> → "<name>\t<shape>": link (+ SHA-256 of what it resolves to, + target) | file | other | none
+  # NONZERO when a link resolves to a regular file that cannot be hashed (e.g. mode
+  # 000): unverifiable bytes are never pinned — callers fail closed.
+  local f="$1" h="-"
+  if [ -L "$f" ]; then
+    if [ -f "$f" ]; then h="$(_panel_sha256 "$f")" || return 1; fi
+    printf '%s\tlink %s %s' "${f##*/}" "$h" "$(readlink "$f")"
+  elif [ -f "$f" ]; then printf '%s\tfile' "${f##*/}"
+  elif [ -e "$f" ]; then printf '%s\tother' "${f##*/}"
+  else printf '%s\tnone' "${f##*/}"; fi
+}
+
+_panel_taint_baseline() { # → 0 when the checkout + out-dir were fingerprinted; else 1 + _PANEL_TAINT_WHY (caller: _panel_taint_cleanup either way)
+  local f s i=0 od rr pp
+  _PANEL_TAINT_FILES=(); _PANEL_TAINT_SUMS=(); _PANEL_TAINT_LIST=""; _PANEL_TAINT_SNAP=""; _PANEL_TAINT_WHY=""; _PANEL_OUTDIR_ID=""
+  _PANEL_TAINT_PRIV=""; _PANEL_TAINT_PRIV_ID=""; _PANEL_TAINT_SNAPFILE=""; _PANEL_TAINT_ODD=""
+  # A kill (SIGTERM/SIGINT/SIGHUP) from here on must not orphan the private copies.
+  # EXIT only: bash runs it on those signals, never in ( ) subshells; an INT/TERM
+  # trap would instead defer the kill until the foreground grok exits.
+  trap '_panel_taint_cleanup keep-evidence' EXIT
   [ -x "$BIN_DIR/gstack-lane" ] || { _PANEL_TAINT_WHY="bin/gstack-lane (the inert snapshot) is missing"; return 1; }
   # The out-dir's identity, re-verified before any recovery touches it.
   _PANEL_OUTDIR_ID="$(_panel_dir_id "$OUT_DIR")" || _PANEL_OUTDIR_ID=""
@@ -848,28 +936,54 @@ _panel_taint_baseline() { # → 0 when the checkout + out-dir were fingerprinted
   case "$od/" in "${rr%/}/"*) _PANEL_TAINT_WHY="the out-dir is inside the checkout ($REPO_ROOT)"; return 1 ;; esac
   _PANEL_TAINT_SNAP="$(_panel_checkout_snapshot -)" || _PANEL_TAINT_SNAP=""
   [ -n "$_PANEL_TAINT_SNAP" ] || { _PANEL_TAINT_WHY="$REPO_ROOT is not a git checkout with a commit, or the inert snapshot failed/timed out"; return 1; }
-  printf '%s\n' "$_PANEL_TAINT_SNAP" > "$OUT_DIR/grok.checkout.before" || { _PANEL_TAINT_WHY="cannot write the snapshot"; return 1; }
+  _PANEL_TAINT_SNAPFILE="$OUT_DIR/grok.checkout.before"
+  printf '%s\n' "$_PANEL_TAINT_SNAP" > "$_PANEL_TAINT_SNAPFILE" || { _PANEL_TAINT_WHY="cannot write the snapshot"; return 1; }
+  # Byte-exact copies of the tallied/reused files in a FRESH private dir outside
+  # the out-dir and the checkout (never in the out-dir: no vote/result glob sees them).
+  _PANEL_TAINT_PRIV="$(mktemp -d "${TMPDIR:-/tmp}/gstack-panel-taint.XXXXXXXXXX" 2>/dev/null)" || _PANEL_TAINT_PRIV=""
+  case "$_PANEL_TAINT_PRIV" in
+    */gstack-panel-taint.?*) ;;
+    *) _PANEL_TAINT_PRIV=""; _PANEL_TAINT_WHY="cannot create a private temp dir for the baseline copies"; return 1 ;;
+  esac
+  case "$_PANEL_TAINT_PRIV" in /*) ;; *) _PANEL_TAINT_PRIV="$PWD/$_PANEL_TAINT_PRIV" ;; esac
+  _PANEL_TAINT_PRIV_ID="$(_panel_dev_ino "$_PANEL_TAINT_PRIV")" || _PANEL_TAINT_PRIV_ID=""
+  pp="$(cd -P -- "$_PANEL_TAINT_PRIV" 2>/dev/null && pwd -P)" || pp=""
+  { [ -n "$pp" ] && [ -d "$_PANEL_TAINT_PRIV" ] && [ ! -L "$_PANEL_TAINT_PRIV" ] && [ -O "$_PANEL_TAINT_PRIV" ] \
+    && chmod 700 "$_PANEL_TAINT_PRIV"; } 2>/dev/null || { _PANEL_TAINT_WHY="the baseline-copy temp dir is not a private directory of ours"; return 1; }
+  case "$pp/" in "${od%/}/"*|"${rr%/}/"*) _PANEL_TAINT_WHY="the baseline-copy temp dir ($pp) is inside the out-dir or the checkout — set TMPDIR elsewhere"; return 1 ;; esac
   for f in "$OUT_DIR"/*.result.json "$OUT_DIR/panel.payload.txt"; do
-    { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
-    c="$(cat "$f" && printf x)" || { _PANEL_TAINT_WHY="cannot read ${f##*/}"; return 1; }
-    _PANEL_TAINT_FILES[i]="$f"; _PANEL_TAINT_BYTES[i]="${c%x}"; i=$(( i + 1 ))
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    if [ -L "$f" ] || [ ! -f "$f" ]; then
+      # Not byte-copyable (a symlink, a dir): pin its shape — any change aborts recovery.
+      s="$(_panel_odd_entry "$f")" || { _PANEL_TAINT_WHY="cannot hash ${f##*/} (a tallied entry whose bytes cannot be read)"; return 1; }
+      _PANEL_TAINT_ODD="$_PANEL_TAINT_ODD$s
+"
+      continue
+    fi
+    { ( set -o noclobber; cat -- "$f" > "$_PANEL_TAINT_PRIV/f.$i" ) && cmp -s -- "$f" "$_PANEL_TAINT_PRIV/f.$i"; } 2>/dev/null \
+      || { _PANEL_TAINT_WHY="cannot copy ${f##*/} byte-exactly"; return 1; }
+    s="$(_panel_sha256 "$_PANEL_TAINT_PRIV/f.$i")" || { _PANEL_TAINT_WHY="cannot SHA-256 ${f##*/} (no working shasum/sha256sum/openssl)"; return 1; }
+    _PANEL_TAINT_FILES[i]="$f"; _PANEL_TAINT_SUMS[i]="$s"; i=$(( i + 1 ))
   done
   _PANEL_TAINT_LIST="$(_panel_outdir_listing)"
   return 0
 }
 
-_panel_restore_entry() { # <name> <bytes> — in the CWD (the verified out-dir); nonzero on ANY failure
-  # Never opens <name>: the bytes go to a NEW temp that mktemp creates (O_EXCL,
-  # libc randomness) in this dir, then rename(2) replaces the entry itself — a
-  # symlink at <name> is replaced, never followed. The temp is written ONLY once
-  # it is verified to be an empty regular non-symlink file we own: a FIFO, device
-  # or link at that name is refused unopened (no write-through, no hang).
-  local n="$1" t
+_panel_restore_entry() { # <name> <private copy> <sha256> — in the CWD (the verified out-dir); nonzero on ANY failure
+  # Never opens <name>: the copy's bytes go to a NEW temp that mktemp creates
+  # (O_EXCL, libc randomness) in this dir and must match the in-memory SHA-256,
+  # then rename(2) replaces the entry itself — a symlink at <name> is replaced,
+  # never followed. The temp is written ONLY once it is verified to be an empty
+  # regular non-symlink file we own: a FIFO, device or link at that name is
+  # refused unopened (no write-through, no hang).
+  local n="$1" src="$2" t
+  { [ -n "$3" ] && [ -f "$src" ] && [ ! -L "$src" ]; } || return 1
   t="$(mktemp ./.restore.XXXXXXXXXX 2>/dev/null)" || return 1
   case "$t" in ./.restore.?*|.restore.?*) ;; *) return 1 ;; esac
   case "${t#./}" in */*) return 1 ;; esac
   { [ -f "$t" ] && [ ! -L "$t" ] && [ -O "$t" ] && [ ! -s "$t" ]; } || return 1
-  { printf '%s' "$2" > "$t"; } 2>/dev/null || { rm -f -- "$t" 2>/dev/null; return 1; }
+  { cat -- "$src" > "$t"; } 2>/dev/null || { rm -f -- "$t" 2>/dev/null; return 1; }
+  [ "$(_panel_sha256 "$t")" = "$3" ] || { rm -f -- "$t" 2>/dev/null; return 1; }
   # A real directory at <name> cannot be renamed over: remove it (never a link's target).
   if [ -d "./$n" ] && [ ! -L "./$n" ]; then
     rm -rf -- "./$n" 2>/dev/null || { rm -f -- "$t" 2>/dev/null; return 1; }
@@ -877,10 +991,13 @@ _panel_restore_entry() { # <name> <bytes> — in the CWD (the verified out-dir);
   # -T (GNU) / -h (BSD): a symlink-to-dir target is REPLACED, never moved into.
   mv -fT -- "$t" "./$n" 2>/dev/null || mv -fh -- "$t" "./$n" 2>/dev/null || { rm -f -- "$t" 2>/dev/null; return 1; }
   { [ -f "./$n" ] && [ ! -L "./$n" ] && [ ! -e "$t" ]; } || return 1
+  # The temp was same-user writable until the rename: re-hash what actually landed.
+  [ "$(_panel_sha256 "./$n")" = "$3" ]
 }
 
 _panel_taint_check() { # → 0 + _PANEL_TAINT_DETAIL when TAINTED; restores what it can
-  local after i f c n changed="" keep now_id rc_rec
+  local after i f c n l h e changed="" badcopy="" badodd="" badhash="" keep now_id rc_rec tab
+  tab="$(printf '\t')"
   _PANEL_TAINT_DETAIL=""
   # Identity FIRST: every read/restore/delete below goes through $OUT_DIR. A
   # replaced out-dir (symlink to another dir, a fresh dir, a swapped ancestor) →
@@ -901,15 +1018,39 @@ _panel_taint_check() { # → 0 + _PANEL_TAINT_DETAIL when TAINTED; restores what
   fi
   i=0
   while [ "$i" -lt "${#_PANEL_TAINT_FILES[@]}" ]; do
-    f="${_PANEL_TAINT_FILES[i]}"
-    if [ -L "$f" ] || [ ! -f "$f" ]; then
+    f="${_PANEL_TAINT_FILES[i]}"; c="$_PANEL_TAINT_PRIV/f.$i"
+    # The private copy is the restore source only while it still matches its in-memory
+    # SHA-256; detection hashes the LIVE file against that digest — never a re-read of
+    # the copy, which a same-user writer could swap after its own check.
+    if ! { [ -f "$c" ] && [ ! -L "$c" ] && [ "$(_panel_sha256 "$c")" = "${_PANEL_TAINT_SUMS[i]}" ]; }; then
+      badcopy="$badcopy ${f##*/}"
+    elif [ -L "$f" ] || [ ! -f "$f" ]; then
       changed="$changed ${f##*/}"
-    else
-      c="$(cat "$f" 2>/dev/null && printf x)"
-      [ "${c%x}" = "${_PANEL_TAINT_BYTES[i]}" ] || changed="$changed ${f##*/}"
+    elif ! h="$(_panel_sha256 "$f")"; then
+      badhash="$badhash ${f##*/}"   # unreadable now: its bytes cannot be verified — fail closed
+    elif [ "$h" != "${_PANEL_TAINT_SUMS[i]}" ]; then
+      changed="$changed ${f##*/}"
     fi
     i=$(( i + 1 ))
   done
+  # A tallied name that was not a regular file at baseline must be EXACTLY as pinned
+  # (same link target, same resolved bytes): it cannot be restored, so no repair is tried.
+  while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    n="${l%%"$tab"*}"
+    { e="$(_panel_odd_entry "$OUT_DIR/$n")" && [ "$e" = "$l" ]; } || badodd="$badodd $n"
+  done <<EOF_ODD
+$_PANEL_TAINT_ODD
+EOF_ODD
+  if [ -n "$badcopy" ] || [ -n "$badodd" ] || [ -n "$badhash" ]; then
+    # No trusted bytes to compare against or restore from: handled like a replaced out-dir.
+    _PANEL_OUTDIR_COMPROMISED=1
+    [ -n "$badcopy" ] && _PANEL_TAINT_DETAIL="${_PANEL_TAINT_DETAIL:+$_PANEL_TAINT_DETAIL; }the panel's private baseline copies were altered during the run (of:$badcopy)"
+    [ -n "$badodd" ] && _PANEL_TAINT_DETAIL="${_PANEL_TAINT_DETAIL:+$_PANEL_TAINT_DETAIL; }a tallied entry that was a symlink/non-file at baseline was retargeted, replaced, or its resolved bytes changed or could not be hashed (of:$badodd)"
+    [ -n "$badhash" ] && _PANEL_TAINT_DETAIL="${_PANEL_TAINT_DETAIL:+$_PANEL_TAINT_DETAIL; }a tallied file could not be hashed after the run (of:$badhash)"
+    _PANEL_TAINT_DETAIL="$_PANEL_TAINT_DETAIL — recovery ABORTED: nothing restored or removed; the out-dir is NOT trustworthy"
+    return 0
+  fi
   if [ -n "$changed" ] || [ "$(_panel_outdir_listing)" != "$_PANEL_TAINT_LIST" ]; then
     _PANEL_TAINT_DETAIL="${_PANEL_TAINT_DETAIL:+$_PANEL_TAINT_DETAIL; }out-dir changed${changed:+ (rewritten:$changed)}"
     # Recovery runs INSIDE the out-dir (relative names only) after re-verifying,
@@ -926,7 +1067,7 @@ _panel_taint_check() { # → 0 + _PANEL_TAINT_DETAIL when TAINTED; restores what
       i=0
       while [ "$i" -lt "${#_PANEL_TAINT_FILES[@]}" ]; do
         n="${_PANEL_TAINT_FILES[i]##*/}"
-        _panel_restore_entry "$n" "${_PANEL_TAINT_BYTES[i]}" || exit 4
+        _panel_restore_entry "$n" "$_PANEL_TAINT_PRIV/f.$i" "${_PANEL_TAINT_SUMS[i]}" || exit 4
         i=$(( i + 1 ))
       done
       # Drop entries that were not there before.
@@ -1040,6 +1181,7 @@ _panel_invoke_grok() {
     # Taint baseline (see "Taint check" above): no fingerprint → no unsandboxed send.
     if ! _panel_taint_baseline; then
       rmdir "$fbdir" 2>/dev/null
+      _panel_taint_cleanup
       _panel_write_absent grok absent "cannot fingerprint the checkout for the unsandboxed fallback's taint check ($_PANEL_TAINT_WHY) — refusing send (fail-closed): sandbox-refused"
       return 0
     fi
@@ -1050,6 +1192,7 @@ _panel_invoke_grok() {
     [ $(( WALL_CLOCK_S - (now - START_TS) )) -lt "$left" ] && left=$(( WALL_CLOCK_S - (now - START_TS) ))
     if [ "$left" -lt 1 ]; then
       rmdir "$fbdir" 2>/dev/null
+      _panel_taint_cleanup
       _panel_write_absent grok absent "OS sandbox refused to start and no time is left for the plan-mode fallback: wall-clock"
       return 0
     fi
@@ -1058,6 +1201,7 @@ _panel_invoke_grok() {
           --class review-prompt --payload-file "$payload" --consent "grok_reviews=enabled;grok_allow_unsandboxed=true" 2>/dev/null)" || rid=""
     if [ -z "$rid" ]; then
       rm -rf "$fbdir"
+      _panel_taint_cleanup
       _panel_write_absent grok absent "egress receipt for the sandbox-refusal fallback could not be written — refusing send (fail-closed): receipt-failed"
       return 0
     fi
@@ -1068,9 +1212,11 @@ _panel_invoke_grok() {
     rm -rf "$fbdir"
     "$BIN_DIR/gstack-egress-receipt" outcome "$rid" "exit:$rc" 2>/dev/null || true
     if _panel_taint_check; then
+      _panel_taint_cleanup keep-evidence   # grok.checkout.before stays as evidence
       _panel_write_tainted grok "$rc" "$_PANEL_TAINT_DETAIL"
       return 0
     fi
+    _panel_taint_cleanup   # no taint: _panel_taint_check was the fingerprint's last consumer
     _panel_finish_run grok "$rc" "$OUT_DIR/grok.raw" tool-policy-only
     return 0
   fi
