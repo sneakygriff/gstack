@@ -327,6 +327,305 @@ describe('bin/gstack-lane security round 3 (G1–G4: grok runs only inside its O
   }, 30_000);
 });
 
+describe('bin/gstack-lane sandbox evidence (F1–F4: L4 only with its OS sandbox POSITIVELY enforced)', () => {
+  const REVIEW = `echo '${JSON.stringify({ text: 'LGTM.\nREVIEW_COMPLETE: findings=0', stopReason: 'end_turn', modelUsage: { 'grok-4.7-build': { outputTokens: 20 } } })}'\n`;
+  const optIn = (sb: ReturnType<typeof mkSandbox>) =>
+    expect(spawnSync(CONFIG, ['set', 'grok_allow_unsandboxed', 'true'], { env: sb.env, encoding: 'utf8', timeout: 20_000 }).status).toBe(0);
+  const noEvent = (sb: ReturnType<typeof mkSandbox>) => fs.writeFileSync(path.join(sb.dir, 'grok.no-sandbox-event'), '');
+  const event = (o: Record<string, unknown>, ws = '$(pwd -P)') =>
+    `printf '%s\\n' "{\\"timestamp\\":\\"$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)\\",\\"workspace\\":\\"${ws}\\",${JSON.stringify(o).slice(1, -1).replace(/"/g, '\\"')}}" >> "\${GROK_HOME:-$HOME/.grok}/sandbox-events.jsonl"\n`;
+  const review = (sb: ReturnType<typeof mkSandbox>, task: string, env: Record<string, string> = {}) => {
+    const wt = wtAdd(sb, task, { detach: true });
+    const r = run(sb, { lane: 'l4', mode: 'review', effort: 'high', cwd: wt }, [], env);
+    const adj = lane(sb, ['adjudicate', '--out', r.outPath, '--seat', 'grok', '--gate-class', 'critical', '--reviewed-sha', sh('git', ['rev-parse', 'HEAD'], wt)], env);
+    return { ...r, wt, verdict: adj.out.trim(), verdictCode: adj.code };
+  };
+
+  test('F1: a grok that WARNS its sandbox could not be applied and still exits 0 is ABSENT by default — never a sandboxed clean review', () => {
+    const sb = mkSandbox();
+    noEvent(sb);
+    step(sb, 'grok', `echo "2026-10-12T10:00:00Z WARN xai_grok_sandbox: Sandbox could not be applied, continuing without sandbox" >&2\n${REVIEW}`);
+    const r = review(sb, 'gate-f1a');
+    expect(r.code).toBe(5);
+    expect(r.status()).toMatchObject({ class: 'auth', sandbox: 'read-only', sandbox_evidence: 'stderr-not-applied', published: false });
+    expect(r.status().unsandboxed_opt_in).toBeUndefined();
+    expect(r.status().attempts.map((a: any) => a.class)).toEqual(['sandbox-unverified']);
+    expect(calls(sb, 'grok')).toHaveLength(1);
+    expect(H.lanesOf(sb).l4.status).toBe('absent');
+    expect(H.lanesOf(sb).l4.reason).toContain('grok OS sandbox enforcement not verified');
+    expect(r.verdict).toStartWith('VERDICT=ABSENT reason=auth ');
+  }, 30_000);
+
+  test('F1: a SILENT fail-open (exit 0, no warning, no ProfileApplied event) is ABSENT too: absence of positive evidence fails closed', () => {
+    const sb = mkSandbox();
+    noEvent(sb);
+    step(sb, 'grok', REVIEW);
+    const r = review(sb, 'gate-f1b');
+    expect(r.code).toBe(5);
+    expect(r.status()).toMatchObject({ class: 'auth', sandbox: 'read-only', sandbox_evidence: 'no-event' });
+    expect(r.verdict).toStartWith('VERDICT=ABSENT ');
+  }, 30_000);
+
+  test('F1: only a ProfileApplied read-only event, enforced, for THIS cwd, written during THIS invocation counts', () => {
+    for (const [label, body, want] of [
+      ['enforced:false', event({ event_type: 'ProfileApplied', profile: 'read-only', enforced: false }), 'apply-failed'],
+      ['ApplyFailed', event({ event_type: 'ApplyFailed', profile: 'read-only' }), 'apply-failed'],
+      ['another workspace', event({ event_type: 'ProfileApplied', profile: 'read-only', enforced: true }, '/somewhere/else'), 'no-event'],
+      ['another profile', event({ event_type: 'ProfileApplied', profile: 'workspace', enforced: true }), 'no-event'],
+    ] as const) {
+      const sb = mkSandbox();
+      noEvent(sb);
+      step(sb, 'grok', `mkdir -p "$HOME/.grok"\n${body}${REVIEW}`);
+      const r = review(sb, `gate-f1c-${label.replace(/[^a-z]/gi, '')}`);
+      expect({ label, code: r.code, ev: r.status().sandbox_evidence }).toEqual({ label, code: 5, ev: want });
+    }
+    // an event already in the log BEFORE this invocation (even one stamped in the future) is not evidence
+    const sb = mkSandbox();
+    const wt = wtAdd(sb, 'gate-f1c-old', { detach: true });
+    fs.mkdirSync(path.join(sb.home, '.grok'), { recursive: true });
+    fs.writeFileSync(path.join(sb.home, '.grok', 'sandbox-events.jsonl'),
+      `${JSON.stringify({ timestamp: new Date(Date.now() + 3600e3).toISOString(), event_type: 'ProfileApplied', profile: 'read-only', workspace: wt, enforced: true })}\n`);
+    noEvent(sb);
+    step(sb, 'grok', REVIEW);
+    expect(run(sb, { lane: 'l4', mode: 'review', effort: 'high', cwd: wt }).code).toBe(5);
+  }, 60_000);
+
+  test('F1: positive evidence is recorded (status sandbox_evidence + the matched event in the invocation dir); GROK_HOME is honored', () => {
+    const sb = mkSandbox();
+    step(sb, 'grok', REVIEW);
+    const r = review(sb, 'gate-f1d');
+    expect(r.code).toBe(0);
+    expect(r.status()).toMatchObject({ class: 'ok', sandbox: 'read-only', sandbox_evidence: 'profile-applied' });
+    const ev = JSON.parse(fs.readFileSync(path.join(r.status().attempts[0].dir, 'sandbox-event.json'), 'utf8'));
+    expect(ev).toMatchObject({ event_type: 'ProfileApplied', profile: 'read-only', enforced: true, workspace: r.wt });
+    expect(r.verdict).toBe('VERDICT=PRESENT_CLEAN reason=no_p1 p1_count=0 runtime_model=grok-4.7-build');
+    const g = review(sb, 'gate-f1d-gh', { GROK_HOME: path.join(sb.dir, 'grok-home') });
+    expect(g.code).toBe(0);
+    expect(fs.existsSync(path.join(sb.dir, 'grok-home', 'sandbox-events.jsonl'))).toBe(true);
+    expect(review(sb, 'gate-f1d-rel', { GROK_HOME: 'relative-grok-home' }).status().sandbox_evidence).not.toBe('profile-applied');
+  }, 60_000);
+
+  test('F1: opted in (grok_allow_unsandboxed=true), unverified enforcement reruns WITHOUT --sandbox and is recorded as unsandboxed', () => {
+    const sb = mkSandbox();
+    optIn(sb);
+    noEvent(sb);
+    step(sb, 'grok', REVIEW);
+    const r = review(sb, 'gate-f1e');
+    expect(r.code).toBe(0);
+    expect(calls(sb, 'grok').map((c) => c.argv.includes('--sandbox'))).toEqual([true, false]);
+    expect(r.status()).toMatchObject({ class: 'ok', sandbox: 'none', unsandboxed_opt_in: true, sandbox_evidence: 'not-requested' });
+    expect(r.status().attempts.map((a: any) => a.class)).toEqual(['sandbox-unverified', 'ok']);
+    expect(r.verdict).toBe('VERDICT=PRESENT_CLEAN reason=no_p1,unsandboxed p1_count=0 runtime_model=grok-4.7-build');
+  }, 30_000);
+
+  test('F1: a ProfileApplied event CONTRADICTED by a not-applied warning is INVALID (class error) — never a rerun, never clean', () => {
+    const sb = mkSandbox();
+    optIn(sb);
+    step(sb, 'grok', `echo "WARN: sandbox could not be applied; continuing without enforcement" >&2\n${REVIEW}`);
+    const r = review(sb, 'gate-f1f');
+    expect(r.code).toBe(1);
+    expect(r.status()).toMatchObject({ class: 'error', sandbox: 'read-only', sandbox_evidence: 'contradicted' });
+    expect(calls(sb, 'grok')).toHaveLength(1);
+    expect(r.verdict).toStartWith('VERDICT=INVALID ');
+  }, 30_000);
+
+  test('F1: the L4 PROBE needs the same positive evidence', () => {
+    const sb = mkSandbox();
+    noEvent(sb);
+    step(sb, 'grok', `echo '{"text":"OK","modelUsage":{"grok-4.7-build":{"outputTokens":1}}}'\n`);
+    const p = JSON.parse(lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l4', '--json']).out).l4;
+    expect(p.status).toBe('absent');
+    expect(p.reason).toContain('grok OS sandbox enforcement not verified');
+    fs.rmSync(path.join(sb.dir, 'grok.no-sandbox-event'));
+    expect(JSON.parse(lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l4', '--json']).out).l4.status).toBe('ok');
+  }, 30_000);
+
+  test('F2: the refusal phrase ANYWHERE in stderr of a completed sandboxed review is not a refusal — classified normally (error ⇒ INVALID), no unsandboxed rerun', () => {
+    const marker = "could not apply the 'read-only' sandbox profile";
+    for (const opted of [false, true]) {
+      const sb = mkSandbox();
+      if (opted) optIn(sb);
+      step(sb, 'grok', `echo "tool read_file: docs/x.md: Error: ${marker} (quoted from the reviewed repo)" >&2\n${REVIEW.replace(/\n$/, '')}\nexit 1\n`);
+      const r = review(sb, `gate-f2a-${opted}`);
+      expect({ opted, code: r.code, cls: r.status().class, n: calls(sb, 'grok').length }).toEqual({ opted, code: 1, cls: 'error', n: 1 });
+      expect(r.status().unsandboxed_opt_in).toBeUndefined();
+      expect(H.lanesOf(sb).l4.status).not.toBe('absent');
+      expect(r.verdict).toStartWith('VERDICT=INVALID reason=class_error ');
+    }
+    // empty stdout, but the phrase is not grok's anchored bootstrap error line → error, not a refusal
+    const sb = mkSandbox();
+    optIn(sb);
+    step(sb, 'grok', `echo "hook output: ${marker}" >&2\nexit 1\n`);
+    const r = review(sb, 'gate-f2b');
+    expect({ code: r.code, cls: r.status().class, n: calls(sb, 'grok').length }).toEqual({ code: 1, cls: 'error', n: 1 });
+  }, 60_000);
+
+  test('F2: a DEADLINE (rc 124) with the phrase on stderr stays a timeout — never auth/ABSENT latching, never a rerun', () => {
+    const sb = mkSandbox();
+    optIn(sb);
+    step(sb, 'grok', `echo "error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing." >&2\nsleep 30\n`);
+    const wt = wtAdd(sb, 'gate-f2c', { detach: true });
+    const r = run(sb, { lane: 'l4', mode: 'review', effort: 'high', cwd: wt, timeout: '2', 'retry-timeout': '1' });
+    expect(r.code).toBe(124);
+    expect(r.status()).toMatchObject({ class: 'timeout', sandbox: 'read-only' });
+    expect(r.status().attempts.map((a: any) => a.class)).toEqual(['timeout', 'timeout']);
+    expect(calls(sb, 'grok').every((c) => c.argv.includes('--sandbox'))).toBe(true);
+    expect(H.lanesOf(sb).l4.status).not.toBe('absent');
+  }, 30_000);
+
+  test('F2: the REAL grok refusal shape (warning line, then the anchored error line, empty stdout) is still a refusal ⇒ ABSENT', () => {
+    const sb = mkSandbox();
+    step(sb, 'grok', `printf '%s\\n' "warning: sandbox could not be applied: /var/run/docker.sock is a symlink" "error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing." >&2\nexit 1\n`);
+    const r = review(sb, 'gate-f2d');
+    expect(r.code).toBe(5);
+    expect(r.status()).toMatchObject({ class: 'auth', sandbox_evidence: 'refused' });
+    expect(H.lanesOf(sb).l4.reason).toContain('grok OS sandbox unavailable on this host');
+  }, 30_000);
+
+  test('F4: claude_overflow_dir with a literal $HOME / ${HOME} is expanded, canonicalized once, and that SAME path reaches CLAUDE_CONFIG_DIR', () => {
+    const sb = mkSandbox();
+    step(sb, 'claude', OK_CLAUDE);
+    const ovf = path.join(sb.home, 'ovf-real');
+    fs.mkdirSync(ovf);
+    fs.writeFileSync(path.join(ovf, '.claude.json'), '{"oauthAccount": {"emailAddress": "second@example.com"}}');
+    fs.symlinkSync(ovf, path.join(sb.home, 'ovf'));
+    const cfg = path.join(sb.dir, 'state', 'config.yaml');
+    for (const v of ['$HOME/ovf', '${HOME}/ovf', '~/ovf']) {
+      fs.writeFileSync(cfg, `grok_reviews: enabled\nclaude_overflow_dir: ${v}\n`);
+      H.writeLanes(sb, {});
+      const r = run(sb, { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low' });
+      expect({ v, code: r.code }).toEqual({ v, code: 0 });
+      expect({ v, dir: calls(sb, 'claude').pop()!.env.CLAUDE_CONFIG_DIR }).toEqual({ v, dir: fs.realpathSync(ovf) });
+    }
+  }, 60_000);
+
+  test('F4: a RELATIVE claude dir, or one inside the run dir or the task cwd, is refused (l2 absent, nothing launched)', () => {
+    const sb = mkSandbox();
+    step(sb, 'claude', OK_CLAUDE);
+    const creds = (d: string) => { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, '.claude.json'), '{"oauthAccount": {"emailAddress": "second@example.com"}}'); };
+    creds(path.join(sb.dir, 'rel-ovf'));            // resolvable from the helper's cwd (sb.dir) …
+    creds(path.join(sb.run, 'ovf'));
+    creds(path.join(sb.wt, 'ovf'));
+    const cfg = path.join(sb.dir, 'state', 'config.yaml');
+    fs.writeFileSync(cfg, 'grok_reviews: enabled\nclaude_overflow_dir: rel-ovf\n');
+    const rel = run(sb, { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low' });
+    expect(rel.code).toBe(5);
+    expect(rel.status()).toMatchObject({ class: 'auth', note: 'claude-dir-invalid' });
+    expect(H.lanesOf(sb).l2.reason).toContain('absolute');
+    for (const d of [path.join(sb.run, 'ovf'), path.join(sb.wt, 'ovf'), 'rel-ovf']) {
+      H.writeLanes(sb, {});
+      const r = run(sb, { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low', 'claude-dir': d });
+      expect({ d, code: r.code, note: r.status().note }).toEqual({ d, code: 5, note: 'claude-dir-invalid' });
+    }
+    expect(calls(sb, 'claude')).toEqual([]);
+  }, 60_000);
+
+  test('F4: a claude dir that EXISTS but cannot be safely resolved (symlink in run dir / task cwd → control-char-named dir, dangling link) is refused, not treated as missing', () => {
+    const sb = mkSandbox();
+    step(sb, 'claude', OK_CLAUDE);
+    const evil = path.join(sb.home, 'ovf\nevil');
+    fs.mkdirSync(evil);
+    fs.writeFileSync(path.join(evil, '.claude.json'), '{"oauthAccount": {"emailAddress": "second@example.com"}}');
+    const inRun = path.join(sb.run, 'ovf-link');
+    const inWt = path.join(sb.wt, 'ovf-link');
+    const dangling = path.join(sb.home, 'ovf-dangling');
+    fs.mkdirSync(sb.run, { recursive: true });
+    fs.mkdirSync(sb.wt, { recursive: true });
+    fs.symlinkSync(evil, inRun);
+    fs.symlinkSync(evil, inWt);
+    fs.symlinkSync(path.join(sb.home, 'no-such-target'), dangling);
+    for (const d of [inRun, inWt, dangling]) {
+      H.writeLanes(sb, {});
+      const r = run(sb, { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low', 'claude-dir': d });
+      expect({ d, code: r.code, st: r.status() }).toMatchObject({ d, code: 5, st: { class: 'auth', note: 'claude-dir-invalid' } });
+      expect(H.lanesOf(sb).l2.status).toBe('absent');
+    }
+    // A genuinely non-existent dir still falls through to the no-credentials refusal.
+    H.writeLanes(sb, {});
+    const gone = run(sb, { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low', 'claude-dir': path.join(sb.home, 'nope') });
+    expect(gone.code).toBe(5);
+    expect(gone.status()).toMatchObject({ class: 'auth', note: 'no-credentials' });
+    expect(calls(sb, 'claude')).toEqual([]);
+  }, 60_000);
+
+  // A `$(…)` strips TRAILING newlines before any validation could see them: a clean-named link to a
+  // dir literally named `X<newline>` must never canonicalize to its sibling `X`.
+  test('F4/S5: a link to a dir whose name ENDS in a newline never canonicalizes to the newline-less sibling (claude-dir / --cwd / --run-dir / --out)', () => {
+    const sb = mkSandbox();
+    step(sb, 'claude', OK_CLAUDE);
+    const creds = (d: string) => { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, '.claude.json'), '{"oauthAccount": {"emailAddress": "second@example.com"}}'); };
+    const L2 = { lane: 'l2', mode: 'impl', model: 'claude-sonnet-5-5', effort: 'low' } as const;
+    const trick = (base: string, name: string, sibling: () => void) => {
+      fs.mkdirSync(path.join(base, `${name}\n`), { recursive: true });
+      sibling();
+      fs.symlinkSync(path.join(base, `${name}\n`), path.join(base, `${name}-link`));
+      return path.join(base, `${name}-link`);
+    };
+    // claude dir: the sibling `ovf` is itself a link INTO the task cwd (worker-writable creds).
+    creds(path.join(sb.wt, 'planted'));
+    const cdir = trick(sb.home, 'ovf', () => fs.symlinkSync(path.join(sb.wt, 'planted'), path.join(sb.home, 'ovf')));
+    H.writeLanes(sb, {});
+    const c = run(sb, { ...L2, 'claude-dir': cdir });
+    expect({ code: c.code, st: c.status() }).toMatchObject({ code: 5, st: { class: 'auth', note: 'claude-dir-invalid' } });
+    expect(calls(sb, 'claude')).toEqual([]);
+    // --cwd: the sibling is an ordinary dir the link must NOT reach.
+    const cwd = trick(sb.dir, 'cwdx', () => fs.mkdirSync(path.join(sb.dir, 'cwdx')));
+    const w = run(sb, { ...L2, 'claude-dir': sb.claudeDir, cwd });
+    expect({ what: '--cwd', code: w.code }).toEqual({ what: '--cwd', code: 2 });
+    // --run-dir: --out names the newline-less sibling, which the link must not canonicalize to.
+    const rlink = trick(sb.dir, 'runx', () => fs.mkdirSync(path.join(sb.dir, 'runx')));
+    const rout = path.join(sb.dir, 'runx', 'attempts', 't1', 'r1', 'out.txt');
+    const r = lane(sb, ['run', '--run-dir', rlink, '--cwd', sb.wt, '--prompt-file', sb.prompt, '--out', rout,
+      '--lane', 'l2', '--mode', 'impl', '--model', 'claude-sonnet-5-5', '--effort', 'low', '--claude-dir', sb.claudeDir]);
+    expect({ what: '--run-dir', code: r.code }).toEqual({ what: '--run-dir', code: 2 });
+    // --out: the attempt dir is a link to `<attempt><newline>` beside it.
+    const t1 = path.join(sb.run, 'attempts', 't1');
+    fs.mkdirSync(t1, { recursive: true });
+    trick(t1, 'ax', () => {});
+    fs.renameSync(path.join(t1, 'ax-link'), path.join(t1, 'ax'));
+    const o = run(sb, { ...L2, 'claude-dir': sb.claudeDir, out: path.join(t1, 'ax', 'out.txt') });
+    expect({ what: '--out', code: o.code }).toEqual({ what: '--out', code: 2 });
+    expect(calls(sb, 'claude')).toEqual([]);
+  }, 60_000);
+
+  // The hermetic CODEX_HOME holds a copy of the operator's auth.json: its containment check must
+  // compare CANONICAL paths only — an unresolvable / aliased base never falls back to the lexical
+  // alias, so the home can never be created inside the task cwd.
+  test('D6/S5: a hermetic CODEX_HOME base that aliases INTO the task cwd (newline-target link, missing tail under a link, linked lane-codex-home) refuses l3 — no auth copy anywhere under the task dir', () => {
+    const L3 = { lane: 'l3', mode: 'impl', model: 'gpt-6.1-sol', effort: 'low', timeout: '10' } as const;
+    const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => {
+      const p = path.join(d, e.name);
+      return e.isDirectory() ? walk(p) : [p];
+    });
+    const cases: [string, (sb: ReturnType<typeof mkSandbox>) => Record<string, string>][] = [
+      ['~/.gstack -> <task>/state<LF> (GSTACK_HOME unset)', (sb) => {
+        fs.mkdirSync(path.join(sb.wt, 'state\n'));
+        fs.symlinkSync(path.join(sb.wt, 'state\n'), path.join(sb.home, '.gstack'));
+        return { GSTACK_HOME: '' };
+      }],
+      ['GSTACK_HOME=<link into task>/missing/tail', (sb) => {
+        fs.symlinkSync(sb.wt, path.join(sb.home, 'gs'));
+        return { GSTACK_HOME: path.join(sb.home, 'gs', 'missing', 'tail') };
+      }],
+      ['<GSTACK_HOME>/lane-codex-home -> <task>/lch', (sb) => {
+        fs.mkdirSync(sb.gstackHome, { recursive: true });
+        fs.mkdirSync(path.join(sb.wt, 'lch'));
+        fs.symlinkSync(path.join(sb.wt, 'lch'), path.join(sb.gstackHome, 'lane-codex-home'));
+        return {};
+      }],
+    ];
+    for (const [what, setup] of cases) {
+      const sb = mkSandbox();
+      step(sb, 'codex', OK_CODEX);
+      const env = setup(sb);
+      if (env.GSTACK_HOME === '') { delete sb.env.GSTACK_HOME; delete env.GSTACK_HOME; }
+      const r = run(sb, L3, [], env);
+      expect({ what, refused: r.code !== 0, launched: calls(sb, 'codex').length }).toEqual({ what, refused: true, launched: 0 });
+      expect({ what, auth: walk(sb.wt).filter((f) => f.endsWith('auth.json')) }).toEqual({ what, auth: [] });
+    }
+  }, 60_000);
+});
+
 describe('invariants across every recorded invocation', () => {
   test('no stub invocation ever received --always-approve; grok never got the prompt text in argv; codex always ran with --json', () => {
     expect(H.checkInvariants()).toBeGreaterThan(3);

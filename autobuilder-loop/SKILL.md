@@ -670,7 +670,8 @@ recipe.
 ok|cooling|absent`, `reason`, `next_probe_at`, `runtime_model`). L2: haiku "reply OK"; L3:
 `gpt-6-luna` low under the hermetic home; L4: grok inside its OS sandbox, recording the runtime model
 id (ABSENT "disabled by grok_reviews" unless `grok_reviews=enabled`; ABSENT "sandbox unavailable" when
-`--sandbox read-only` cannot apply and `grok_allow_unsandboxed` is not `true`). Print the roster. A
+`--sandbox read-only` cannot apply, or "enforcement not verified" when grok's own sandbox event log has no
+`ProfileApplied` read-only event for the run, and `grok_allow_unsandboxed` is not `true`). Print the roster. A
 cooling/absent lane's rows spill to the next lane in the routing table — the run proceeds, and
 absent/cooling lanes are re-probed at every milestone and gate start. Operator notes, printed once, never
 blocking: **L2 needs a one-time interactive login** (`CLAUDE_CONFIG_DIR=~/.claude-overflow claude` →
@@ -1320,8 +1321,11 @@ esac
 *Grok member — latest model (no `-m` in the recipe; the helper resolves and pins the CLI default; a
 family mismatch is `model_mismatch: true`, a coercion NOTE — the only seat with that concession),
 ladder `high`@600s → `medium`@300s, `--permission-mode plan` + `--sandbox read-only` in its OWN detached
-worktree. The OS sandbox is mandatory: on the "could not apply the 'read-only' sandbox profile" refusal
-the member is ABSENT (reason "sandbox unavailable") — the plan-only fallback runs ONLY when the operator
+worktree. The OS sandbox is mandatory and must be POSITIVELY enforced: on the "could not apply the
+'read-only' sandbox profile" refusal, or when grok's sandbox event log shows no enforced `ProfileApplied`
+read-only event for this run (grok fails open with a warning), the member is ABSENT (status
+`sandbox_evidence` says why; `adjudicate` returns INVALID for any L4 review without
+`sandbox_evidence: profile-applied`) — the plan-only fallback runs ONLY when the operator
 set `grok_allow_unsandboxed true` (status `sandbox: none, unsandboxed_opt_in: true`), and plan mode is
 NOT an OS boundary, so the helper then fingerprints both worktrees AND the shared git control state
 before/after (bounded); any change or snapshot timeout → `tainted: true` → INVALID. NEVER

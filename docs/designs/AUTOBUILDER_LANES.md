@@ -253,9 +253,16 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
     --output-format json`, cwd MUST be a registered linked worktree under `$RUN_DIR/wt/` (verified via
     `git worktree list --porcelain` + path prefix), one detached worktree PER forum member. Runs with
     `--sandbox read-only` — MANDATORY by default: on the "could not apply the 'read-only' sandbox
-    profile" refusal the lane is ABSENT (reason "sandbox unavailable"), NO plan-only fallback, unless the
+    profile" refusal (recognized only as grok's anchored pre-start error with nothing on stdout), or when
+    enforcement is not POSITIVELY established — grok fails open for built-in profiles ("continuing without
+    sandbox"), so a usable result needs a `ProfileApplied` read-only `enforced: true` event for the review
+    cwd appended to `$GROK_HOME/sandbox-events.jsonl` during the invocation and no not-applied wording on
+    stderr (status `sandbox_evidence`) — the lane is ABSENT (reason "sandbox unavailable" / "enforcement
+    not verified"), NO plan-only fallback, unless the
     operator opted in with `gstack-config set grok_allow_unsandboxed true` (default false), in which case
-    the fallback runs and status records `sandbox: none, unsandboxed_opt_in: true`. Before every L4
+    the fallback runs and status records `sandbox: none, unsandboxed_opt_in: true`. `adjudicate` counts an
+    L4 review only with `sandbox: read-only` + `sandbox_evidence: profile-applied`, or `sandbox: none` +
+    `unsandboxed_opt_in: true` while `grok_allow_unsandboxed` is STILL `true` (else INVALID). Before every L4
     review the helper strips repo grok/agent config (`.grok/`, `.envrc`, case-insensitive) from the
     review worktree and refuses a worktree with populated submodules. It fingerprints — before/after — the review worktree,
     the primary worktree AND the shared git control state (`git rev-parse --git-common-dir` → hooks/
@@ -375,11 +382,16 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
   implementer has). Only L3 (codex `workspace-write`) runs its checks inside an OS sandbox.
 - **Grok is reviewer-only, sandboxed by default.** grok merges repo-checked-in `.grok/config.toml`
   permission grants, so it cannot be isolated for implementation; the helper rejects `--lane l4 --mode
-  impl`. Reviews run only inside grok's OS sandbox; when it cannot apply L4 is ABSENT — the unsandboxed
+  impl`. Reviews run only inside grok's OS sandbox, positively verified from grok's own sandbox event
+  log; when it cannot apply or is not verified L4 is ABSENT — the unsandboxed
   (plan-only) fallback is OPT-IN only (`grok_allow_unsandboxed=true`, status `sandbox: none,
   unsandboxed_opt_in: true`) and remains not OS-contained (F8). Before each L4 review the helper strips
   repo grok/agent config (`.grok/`, `.envrc`, matched case-insensitively) from the disposable review
   worktree and refuses populated submodules.
+- **L4 sandbox evidence holds only against processes that cannot write `$GROK_HOME`:** a failed-open grok or ANY
+  concurrent same-user process (e.g. an L2/L3 impl worker running repo tests) could append a forged `ProfileApplied`
+  line during a review window. Format confirmed from grok ≤1.0.3x logs + 1.0.50 docs only — check the first real
+  sandboxed L4 run once (if 1.0.50 stopped logging, L4 fails closed: ABSENT, `sandbox_evidence: no-event`).
 
 ### v1.7.1 follow-ups (from the pre-merge eng review)
 

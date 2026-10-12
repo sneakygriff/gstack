@@ -13,7 +13,9 @@
  * `codex exec --json` (JSONL events) and writes a session rollout into its
  * CODEX_HOME; the real captured samples live in test/fixtures/gstack-lane/ (the
  * rollout is a sanitized reduction). `grok models` is answered by the stub itself
- * (recorded as `grok-models`). git is real (temp repos).
+ * (recorded as `grok-models`). A grok call with `--sandbox <p>` appends a ProfileApplied
+ * event for its cwd to $GROK_HOME/sandbox-events.jsonl (default $HOME/.grok), as real grok
+ * does, unless $STUB_DIR/grok.no-sandbox-event exists. git is real (temp repos).
  */
 import { expect } from 'bun:test';
 import { spawnSync } from 'child_process';
@@ -49,6 +51,17 @@ fi
 pwd > "$rec/cwd"
 cat > "$rec/stdin" 2>/dev/null || true
 mv "$rec" "$final"   # publish the record atomically (readers never see a half-written one)
+# Real grok appends a ProfileApplied event to $GROK_HOME/sandbox-events.jsonl when it applies a
+# --sandbox profile; the stub does the same unless the test removes it (grok.no-sandbox-event).
+if [ "$name" = grok ] && [ ! -f "$d/grok.no-sandbox-event" ]; then
+  sbx=""; prev=""
+  for a in "$@"; do [ "$prev" = --sandbox ] && sbx="$a"; prev="$a"; done
+  if [ -n "$sbx" ]; then
+    gh="\${GROK_HOME:-$HOME/.grok}"; mkdir -p "$gh"
+    printf '{"timestamp":"%s","event_type":"ProfileApplied","profile":"%s","workspace":"%s","platform":"macos/seatbelt","enforced":true,"restrict_network":true}\\n' \\
+      "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)" "$sbx" "$(pwd -P)" >> "$gh/sandbox-events.jsonl"
+  fi
+fi
 if [ "$name" = grok-models ] && [ ! -f "$d/grok-models.step" ]; then
   echo "You are logged in with grok.com"; echo "Default model: \${STUB_GROK_DEFAULT:-grok-4.7-build}"; echo "Available models:"; exit 0
 fi

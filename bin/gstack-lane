@@ -128,12 +128,34 @@
 #                   GROK_ENVRC_TIMEOUT_SECS=0 (disables .envrc evaluation — grok 1.0.40 has
 #                   no other per-run switch for session.load_envrc), no GROK_FOLDER_TRUST
 #                   (=0 would ungate project config), no GROK_SANDBOX[_AUTO_ALLOW_BASH].
-#                   OS SANDBOX (G1): on "could not apply the 'read-only' sandbox profile" L4
-#                   is ABSENT (class auth, exit 5, reason "grok OS sandbox unavailable on this
-#                   host; opt in with gstack-config set grok_allow_unsandboxed true") — NO
-#                   plan-only fallback — unless `gstack-config get grok_allow_unsandboxed`
-#                   is exactly `true`; then it reruns at once without --sandbox and records
-#                   "sandbox":"none", "unsandboxed_opt_in": true. SUBMODULES (G4): a review
+#                   OS SANDBOX (G1): on grok's pre-start refusal L4 is ABSENT (class auth, exit
+#                   5, reason "grok OS sandbox unavailable on this host; opt in with gstack-config
+#                   set grok_allow_unsandboxed true") — NO plan-only fallback — unless
+#                   `gstack-config get grok_allow_unsandboxed` is exactly `true`; then it reruns
+#                   at once without --sandbox and records "sandbox":"none",
+#                   "unsandboxed_opt_in": true. A refusal is recognized ONLY when unambiguous
+#                   (F2): nonzero exit other than 124, nothing structured on stdout (no JSON, no
+#                   REVIEW_COMPLETE), and one of the first 5 non-empty stderr lines STARTS with
+#                   "error: " + $GL_SANDBOX_REFUSAL (case-sensitive; regex built from it);
+#                   the phrase anywhere else is ordinary stderr (error ⇒ INVALID).
+#                   POSITIVE EVIDENCE (F1): grok fails OPEN for built-in profiles ("Sandbox could
+#                   not be applied, continuing without sandbox"), so a result is usable only when
+#                   grok's own event log ${GROK_HOME:-~/.grok}/sandbox-events.jsonl gained, during
+#                   THIS invocation, a {"event_type":"ProfileApplied","profile":"read-only",
+#                   "enforced":true} event whose "workspace" is the canonical --cwd (bytes after
+#                   the pre-launch offset, timestamp inside the invocation window, no ApplyFailed
+#                   / unenforced event for it) AND stderr — on every exit code — carries no
+#                   not-applied wording (could not apply/be applied, not supported/applied/
+#                   enforced, without enforcement, continuing without sandbox, ApplyFailed;
+#                   case-insensitive). The matched event is kept in inv-<n>/sandbox-event.json.
+#                   An ok result without that evidence is handled EXACTLY like a refusal
+#                   (attempt class "sandbox-unverified"; ABSENT unless opted in, then the
+#                   unsandboxed rerun); an event contradicted by a not-applied warning is class
+#                   error (INVALID, never a rerun); a non-ok result keeps its class; a deadline
+#                   (124) is a timeout. Status "sandbox_evidence" (l4): profile-applied ·
+#                   contradicted · stderr-not-applied · apply-failed · no-event · refused ·
+#                   unverified-timeout · unverifiable · not-requested (sandbox none). The same
+#                   rules apply to the L4 probe. SUBMODULES (G4): a review
 #                   whose review or primary worktree has an INITIALIZED submodule is refused
 #                   (its own filters/hooks are out of reach). --cwd must be a registered, detached LINKED
 #                   worktree directly under <run-dir>/wt/ (one per forum member). TAINT
@@ -181,8 +203,8 @@
 #         unauthorized, forbidden, not logged in, authentication, …) > throttle (429, rate
 #         limit — incl. OpenAI's "Rate limit reached … try again in 20s" — overloaded, 5xx,
 #         Reconnecting, network, …) > error. A bare "limit reached" is never quota (H19).
-#         (The grok sandbox-refusal phrase on stderr only triggers the plan-only rerun;
-#         it is never a class.)
+#         (grok's sandbox evidence — the anchored refusal and the event log, see l4 above —
+#         decides only ABSENT / the opted-in unsandboxed rerun; it is never a vendor class.)
 #       Outcome handling:
 #         timeout  → review: exactly ONE retry, effort stepped down (max/xhigh/high →
 #                    medium, medium → low, lower stays), under --retry-timeout. impl: NO
@@ -244,7 +266,11 @@
 #           not_a_review; exit_code or CLI exit ≠ 0 → nonzero_exit; status out/attempt_id ≠
 #           this --out → attempt_mismatch; reviewed_sha ≠ --reviewed-sha → stale_sha; grok
 #           without taint_checked → taint_unchecked; grok without grok_project_config_stripped
-#           → grok_config_not_stripped (S4); nothing published / whitespace-only
+#           → grok_config_not_stripped (S4); grok sandbox "none" without BOTH the recorded
+#           unsandboxed_opt_in true AND `gstack-config get grok_allow_unsandboxed` exactly
+#           `true` at adjudication time → unsandboxed_not_opted_in; any other grok sandbox
+#           than "read-only" with sandbox_evidence "profile-applied" → sandbox_unverified
+#           (F3); nothing published / whitespace-only
 #           review text → empty_body; no completion marker → no-completion-marker (V4: the
 #           review text's LAST non-empty line must be exactly `REVIEW_COMPLETE: findings=<n>`,
 #           n = its [P0]–[P3] finding count, optionally wrapped in ` ** or __ — an "I could
@@ -378,8 +404,9 @@
 #                               (applied|none|pending), cmd_redacted (stdin prompt →
 #                               <prompt-file>, schema → <schema-file>), attempts[] (each
 #                               with its inv-<n> dir), lane_status{}; l4 reviews also
-#                               grok_project_config_stripped (true) and, when the
-#                               opted-in fallback ran, unsandboxed_opt_in (true).
+#                               grok_project_config_stripped (true), sandbox_evidence
+#                               (the final invocation's, see l4) and, when the opted-in
+#                               fallback ran, unsandboxed_opt_in (true).
 #   <out>.stdout.log / .stderr.log   final invocation's raw streams
 #   <out>.logs/inv-<n>/{stdout,stderr,out,rollout.jsonl}   every invocation; plus snapshot.* and grok-models.*
 #   ${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/<task>+<attempt_id>-inv<n>/   per-invocation
@@ -436,7 +463,8 @@
 # may contain a control character (a newline in --run-dir would forge a stdout line) —
 # checked on the value AND again on the canonical path after symlink resolution (S5:
 # `_gl_realdir`/`_gl_realfile` treat a resolved path holding a control character as
-# unresolvable).
+# unresolvable; the check runs on $PWD inside the subshell, before any `$(…)` could strip a
+# TRAILING newline, and git worktree paths are read with --porcelain -z).
 #
 # GIT HYGIENE (S1–S3): every git process the helper starts on a repo runs with
 # GIT_CONFIG_NOSYSTEM, GIT_NO_REPLACE_OBJECTS, GIT_NO_LAZY_FETCH=1 (a partial clone's
@@ -496,6 +524,19 @@
 #     exits (the locked sections — bun, a short install — spawn no long-lived children).
 #   - The l2 credential check is a heuristic (.credentials.json, or oauthAccount /
 #     primaryApiKey in <dir>/.claude.json — macOS keeps the token in Keychain).
+#   - l2 claude dir (F4): a literal leading ~ / $HOME / ${HOME} (from --claude-dir or
+#     claude_overflow_dir) is expanded; the result must be ABSOLUTE and is canonicalized once —
+#     that one path is what the account/credential checks read and what CLAUDE_CONFIG_DIR gets;
+#     a relative dir, one inside the run dir or the task cwd, or one that exists but cannot be
+#     safely canonicalized (dangling link, non-directory, control-char target) makes l2 ABSENT
+#     (class auth, note claude-dir-invalid, no launch); only a truly absent dir → no-credentials.
+#   - L4 sandbox evidence is grok's own event log ($GROK_HOME/sandbox-events.jsonl); it holds only
+#     against processes that CANNOT write $GROK_HOME. A FAILED-OPEN grok, or ANY concurrently
+#     running same-user process (e.g. an L2/L3 impl worker running repo test code), could append
+#     a forged ProfileApplied line during a review window. The event format was confirmed from
+#     grok <=1.0.3x logs + the 1.0.50 embedded docs only: check the first real sandboxed L4 run
+#     on a host where grok's sandbox applies once. A grok that stopped writing the log makes L4
+#     ABSENT (fail closed, sandbox_evidence no-event), never clean.
 #   - l2 same-account guard: a --claude-dir resolving to $HOME, $HOME/.claude or
 #     $CLAUDE_CONFIG_DIR, or whose oauthAccount.accountUuid equals the root's
 #     (CLAUDE_CODE_ACCOUNT_UUID, else $HOME/.claude.json) makes l2 ABSENT (class auth,
@@ -548,8 +589,12 @@ done
 # Whole-string id grammar ([[ =~ ]] anchors the whole value; no newline can match).
 GL_ID_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 GL_FILE_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
-GL_SANDBOX_REFUSAL="could not apply the 'read-only' sandbox profile"
 GL_TAB=$'\t'
+# grok's sandbox-refusal marker — the ONE copy in this file (byte-identical to the registry's
+# grok.invoke.sandboxRefusal.marker and bin/gstack-panel's PANEL_GROK_SANDBOX_REFUSAL; pinned by
+# test/skill-recipe-invariants.test.ts T10 (i)). grokSandbox() builds its anchored,
+# case-sensitive refusal regex from it (GL_REFUSAL_MARKER); never match it unanchored.
+GL_SANDBOX_REFUSAL="could not apply the 'read-only' sandbox profile"
 GL_PERL="$(command -v /usr/bin/perl 2>/dev/null || command -v perl 2>/dev/null || true)"
 
 # Fixed hermetic Codex config (E4). Model/effort travel only as -c overrides, so every
@@ -690,6 +735,78 @@ function classify() {
   if (body !== null && E.GL_INV_OUT) fs.writeFileSync(E.GL_INV_OUT, body, { mode: 0o600 });
   if (result[0] === "ok" && E.GL_RUN_MODE === "review" && reviewBodyEmpty(body)) result = ["error", "empty review body"];
   return result;
+}
+// ── L4 OS-sandbox evidence (F1/F2) ──
+// grok's own bootstrap refusal (1.0.50: "warning: sandbox could not be applied: <cause>" then
+// "error: <GL_SANDBOX_REFUSAL>; see the warning above for the cause. Refusing to start …"):
+// case-sensitive, at the START of one of the first non-empty stderr lines. Built from the shell's
+// single GL_SANDBOX_REFUSAL constant (passed as GL_REFUSAL_MARKER); absent → never a refusal.
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function grokRefusalLine() {
+  const m = E.GL_REFUSAL_MARKER;
+  return m ? new RegExp(`^(?:error|Error): ${reEsc(m)}\\b`) : null;
+}
+// Not-applied wording on ANY exit code (grok fails OPEN for built-in profiles: "Sandbox could not be
+// applied, continuing without sandbox", "Sandbox not supported on this platform, continuing without
+// sandbox", "continues without enforcement"), case-insensitive.
+const SANDBOX_NOT_APPLIED = new RegExp([
+  "could not apply the '[^'\\n]*' sandbox profile",
+  "sandbox[^\\n]{0,160}?(?:could ?n[o']t|cannot|can't|failed to|unable to)\\s+(?:be\\s+)?(?:appl|enforc)",
+  "sandbox[^\\n]{0,80}?\\bnot\\s+(?:supported|applied|enforced|available)",
+  "without\\s+(?:sandbox\\s+)?enforcement",
+  "continu\\w*\\s+without\\s+(?:(?:the|an?|os)\\s+)*sandbox",
+  "\\bApplyFailed\\b",
+].join("|"), "i");
+// grok's sandbox event log ($GROK_HOME/sandbox-events.jsonl): only the bytes appended during THIS
+// invocation (from GL_EVENTS_OFFSET), only events for THIS cwd stamped inside the invocation window.
+function sandboxEvent() {
+  const f = E.GL_EVENTS_FILE, cwd = E.GL_EV_CWD;
+  if (!f || !cwd) return { state: "no-event" };
+  let txt;
+  try {
+    const fd = fs.openSync(f, "r");
+    try {
+      const size = fs.fstatSync(fd).size;
+      let off = Number(E.GL_EVENTS_OFFSET) || 0;
+      if (off > size) off = 0; // truncated/rotated during the run: the time window still applies
+      const len = Math.min(size - off, 8 << 20);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      txt = buf.toString("utf8");
+    } finally { fs.closeSync(fd); }
+  } catch { return { state: "no-event" }; }
+  const from = Number(E.GL_EV_T0) * 1000 - 2000, to = Date.now() + 60000;
+  let hit = null, failed = false;
+  for (const line of txt.split("\n")) {
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (!o || typeof o !== "object" || o.workspace !== cwd) continue;
+    const ts = Date.parse(o.timestamp);
+    if (!Number.isFinite(ts) || ts < from || ts > to) continue;
+    if (o.event_type === "ApplyFailed") failed = true;
+    else if (o.event_type === "ProfileApplied" && o.profile === "read-only") {
+      if (o.enforced === true) hit = o; else failed = true;
+    }
+  }
+  if (failed) return { state: "apply-failed" };
+  return hit ? { state: "applied", event: hit } : { state: "no-event" };
+}
+function grokSandbox() { // → [refused 0|1, evidence]
+  const rc = Number(E.GL_RC);
+  const out = readAll(E.GL_STDOUT), err = readAll(E.GL_STDERR);
+  const head = err.split(/\r?\n/).filter((l) => l.trim()).slice(0, 5);
+  const refusal = grokRefusalLine();
+  // F2: a pre-start refusal only when unambiguous — no deadline, nothing structured on stdout.
+  if (refusal && rc !== 0 && rc !== 124 && topJson(out) === null && !out.includes("REVIEW_COMPLETE")
+      && head.some((l) => refusal.test(l))) return [1, "refused"];
+  const negative = SANDBOX_NOT_APPLIED.test(err);
+  const ev = sandboxEvent();
+  if (ev.state === "applied") {
+    if (negative) return [0, "contradicted"];
+    if (E.GL_EV_OUT) fs.writeFileSync(E.GL_EV_OUT, JSON.stringify(ev.event) + "\n", { mode: 0o600 });
+    return [0, "profile-applied"];
+  }
+  return [0, negative ? "stderr-not-applied" : ev.state];
 }
 function reviewBodyEmpty(body) {
   if (body === null) return true;
@@ -911,6 +1028,7 @@ function finalize() {
   if (E.GL_NOTE) s.note = E.GL_NOTE;
   if (E.GL_GROK_STRIPPED === "1") s.grok_project_config_stripped = true;
   if (E.GL_UNSANDBOXED_OPT_IN === "1") s.unsandboxed_opt_in = true;
+  if (E.GL_LANE === "l4") s.sandbox_evidence = E.GL_SANDBOX_EVIDENCE || null;
   if (E.GL_STATUS_FILE) writeAtomic(E.GL_STATUS_FILE, s);
   console.log(lineFor(s));
 }
@@ -994,6 +1112,13 @@ function adjudicate() {
   if (s.reviewed_sha !== E.GL_REVIEWED_SHA) return say("INVALID", "stale_sha", 0, rm);
   if (lane === "l4" && s.taint_checked !== true) return say("INVALID", "taint_unchecked", 0, rm);
   if (lane === "l4" && s.grok_project_config_stripped !== true) return say("INVALID", "grok_config_not_stripped", 0, rm);
+  // F3: L4 counts only inside its OS sandbox with POSITIVE enforcement evidence — or unsandboxed
+  // when the run recorded the opt-in AND grok_allow_unsandboxed is still exactly `true` now.
+  if (lane === "l4") {
+    if (s.sandbox === "none") {
+      if (s.unsandboxed_opt_in !== true || E.GL_UNSANDBOXED_OK !== "1") return say("INVALID", "unsandboxed_not_opted_in", 0, rm);
+    } else if (s.sandbox !== "read-only" || s.sandbox_evidence !== "profile-applied") return say("INVALID", "sandbox_unverified", 0, rm);
+  }
   let body = null;
   try { body = s.published === true ? fs.readFileSync(E.GL_OUT_REAL, "utf8") : null; } catch { body = null; }
   const text = body === null ? null : reviewText(lane, body);
@@ -1039,6 +1164,7 @@ function summary() {
 try {
   const fn = E.GL_FN;
   if (fn === "classify") { const r = classify(); console.log([r[0], r[1], classifiedThread].join("\t")); }
+  else if (fn === "grok-sandbox") console.log(grokSandbox().join("\t"));
   else if (fn === "adjudicate") adjudicate();
   else if (fn === "finalize") finalize();
   else if (fn === "lane-get") laneGet();
@@ -1144,19 +1270,52 @@ GL_REV_RE='^[A-Za-z0-9_][A-Za-z0-9._/@{}^~-]{0,254}$'
 _gl_valid_rev() { [[ "${1:-}" =~ $GL_REV_RE ]]; }
 # S5: a path is canonicalized THEN validated — a symlink can point at a target whose name
 # carries a newline (which would forge a stdout line), so a resolved path containing ANY
-# control character is treated as unresolvable (return 1, nothing printed).
+# control character is treated as unresolvable (return 1, nothing printed). The check runs
+# INSIDE the subshell on $PWD itself, and the result leaves it behind a '/' sentinel: a plain
+# `$(… pwd -P)` strips TRAILING newlines first, so a link to `X<newline>` would canonicalize to
+# its sibling `X`. The printed path is then control-char-free, so callers' `$(…)` strips exactly
+# the one '\n' printed here. Empty input or `-` (cd's OLDPWD) is refused.
+_gl_realdir_in() { # ONLY inside `$(…)`: cd, validate $PWD there, emit it + the '/' sentinel
+  cd -P -- "$1" 2>/dev/null || return 1
+  case "$PWD" in ''|*[[:cntrl:]]*) return 1 ;; esac
+  printf '%s/' "$PWD"
+}
 _gl_realdir() {
   local r
-  r="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
-  case "$r" in ''|*[[:cntrl:]]*) return 1 ;; esac
+  case "${1-}" in ''|-|*[[:cntrl:]]*) return 1 ;; esac
+  r="$(_gl_realdir_in "$1")" || return 1
+  r="${r%/}"; [ -n "$r" ] || r=/
+  case "$r" in /*) ;; *) return 1 ;; esac
+  case "$r" in *[[:cntrl:]]*) return 1 ;; esac
   printf '%s\n' "$r"
 }
 _gl_realfile() { # existing parent resolved; the leaf itself is kept as given
   local d b
+  case "${1-}" in ''|*[[:cntrl:]]*) return 1 ;; esac   # dirname/basename below are then exact
   d="$(_gl_realdir "$(dirname "$1")")" || return 1
   b="$(basename "$1")"
   case "$b" in *[[:cntrl:]]*) return 1 ;; esac
   printf '%s/%s\n' "$d" "$b"
+}
+# Canonical form of an ABSOLUTE path that may not exist yet: the nearest EXISTING ancestor (a
+# dangling link counts as existing) is canonicalized with _gl_realdir and the not-yet-existing tail
+# is appended. Returns 1 — never the lexical alias — when the path is relative, holds a control
+# character or a . / .. component, or anything that exists on the way cannot be canonicalized.
+_gl_canon_target() {
+  local p="${1-}" head tail="" r
+  case "$p" in /*) ;; *) return 1 ;; esac
+  case "$p" in *[[:cntrl:]]*) return 1 ;; esac
+  while [[ "$p" == *//* ]]; do p="${p%%//*}/${p#*//}"; done
+  while [ "$p" != / ] && [[ "$p" == */ ]]; do p="${p%/}"; done
+  case "$p/" in */./*|*/../*) return 1 ;; esac
+  head="$p"
+  while [ ! -e "$head" ] && [ ! -L "$head" ]; do
+    tail="/${head##*/}$tail"
+    head="${head%/*}"; [ -n "$head" ] || head=/
+  done
+  r="$(_gl_realdir "$head")" || return 1
+  [ "$r" = / ] && [ -n "$tail" ] && r=""
+  printf '%s%s\n' "$r" "$tail"
 }
 _gl_ms_to_s() { printf '%d.%03d' $(( $1 / 1000 )) $(( $1 % 1000 )); }
 
@@ -1416,20 +1575,64 @@ GL_GROK_ENV=(-u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BAS
 _gl_grok_unsandboxed_ok() { # gstack-config grok_allow_unsandboxed must be exactly "true"
   [ "$("$GL_BIN_DIR/gstack-config" get grok_allow_unsandboxed 2>/dev/null || true)" = true ]
 }
+# F1: grok appends {"event_type":"ProfileApplied","profile":…,"workspace":<cwd>,"enforced":true}
+# (or ApplyFailed) to $GROK_HOME/sandbox-events.jsonl when it applies a --sandbox profile. A
+# GROK_HOME that is not absolute resolves against grok's cwd, not ours: no evidence (fail closed).
+_gl_grok_events_file() {
+  local gh="${GROK_HOME:-$HOME/.grok}"
+  case "$gh" in /*) ;; *) return 1 ;; esac
+  case "$gh" in *[[:cntrl:]]*) return 1 ;; esac
+  printf '%s/sandbox-events.jsonl' "${gh%/}"
+}
 _gl_grok_enabled() { # gstack-config grok_reviews must be exactly "enabled" (fail closed)
   local v
   v="$("$GL_BIN_DIR/gstack-config" get grok_reviews 2>/dev/null || true)"
   [ "$v" = enabled ]
 }
-_gl_claude_dir() { # → resolved claude dir (from --claude-dir or gstack-config)
+_gl_claude_dir() { # → the claude dir as given (--claude-dir or gstack-config), a LITERAL leading
+  # ~ / $HOME / ${HOME} expanded (gstack-config returns the raw string; its own header documents
+  # `claude_overflow_dir: $HOME/.claude-overflow`). Not yet validated: see _gl_claude_dir_check.
   local d="${GL_CLAUDE_DIR_ARG:-}"
   if [ -z "$d" ]; then
     d="$("$GL_BIN_DIR/gstack-config" get claude_overflow_dir 2>/dev/null || true)"
   fi
   [ -z "$d" ] && d="$HOME/.claude-overflow"
-  # shellcheck disable=SC2088  # matching a LITERAL leading ~ from config on purpose
-  case "$d" in "~") d="$HOME" ;; "~/"*) d="$HOME/${d#\~/}" ;; esac
+  # shellcheck disable=SC2088,SC2016  # matching a LITERAL leading ~ / $HOME / ${HOME} on purpose
+  case "$d" in
+    "~"|'$HOME'|'${HOME}') d="$HOME" ;;
+    "~/"*) d="$HOME/${d:2}" ;;
+    '$HOME/'*) d="$HOME/${d:6}" ;;
+    '${HOME}/'*) d="$HOME/${d:8}" ;;
+  esac
   printf '%s' "$d"
+}
+# F4: the l2 claude dir must be ABSOLUTE (claude runs in the task worktree, so a relative one would
+# resolve somewhere other than where it was vetted), is canonicalized ONCE, and that same path is
+# what the account/credential checks see and what CLAUDE_CONFIG_DIR gets. Never inside the run dir
+# or the task cwd (worker-writable). Sets GL_CLAUDE_DIR (canonical when it exists); on refusal
+# returns 1 with the reason in GL_CLAUDE_DIR_WHY.
+GL_CLAUDE_DIR_WHY=""
+_gl_claude_dir_check() {
+  local r
+  GL_CLAUDE_DIR_WHY=""
+  # shellcheck disable=SC2016  # literal text
+  case "$GL_CLAUDE_DIR" in
+    /*) ;;
+    *) GL_CLAUDE_DIR_WHY='claude dir must be an absolute path (~, $HOME and ${HOME} are expanded)'; return 1 ;;
+  esac
+  if ! r="$(_gl_realdir "$GL_CLAUDE_DIR")"; then
+    # Genuinely absent (nothing at the path, not even a link) → the credential check reports it.
+    [ ! -e "$GL_CLAUDE_DIR" ] && [ ! -L "$GL_CLAUDE_DIR" ] && return 0
+    # Exists but unresolvable/unsafe (not a directory, dangling link, or a target whose canonical
+    # path holds a control character): the containment check cannot run, so refuse.
+    GL_CLAUDE_DIR_WHY="claude dir exists but cannot be safely resolved"; return 1
+  fi
+  GL_CLAUDE_DIR="$r"
+  case "$r" in
+    "$GL_RUN_DIR"|"$GL_RUN_DIR"/*) GL_CLAUDE_DIR_WHY="claude dir is inside the run dir"; return 1 ;;
+    "$GL_CWD"|"$GL_CWD"/*) GL_CLAUDE_DIR_WHY="claude dir is inside the task cwd"; return 1 ;;
+  esac
+  return 0
 }
 _gl_claude_has_creds() {
   local d="$1"
@@ -1440,10 +1643,11 @@ _gl_claude_has_creds() {
 }
 _gl_claude_is_root_account() { # <claude dir> → 0 when it is (or logs into) the root session's own account
   local d="$1" dr r rr ov rt
-  dr="$(_gl_realdir "$d" || printf '%s' "$d")"
+  # Canonical paths only (never the lexical alias); anything uncomparable fails CLOSED (= root).
+  dr="$(_gl_canon_target "$d")" || return 0
   for r in "$HOME" "$HOME/.claude" "${CLAUDE_CONFIG_DIR:-}"; do
-    [ -n "$r" ] || continue
-    rr="$(_gl_realdir "$r" || printf '%s' "$r")"
+    case "$r" in /*) ;; *) continue ;; esac   # unset / relative: names no dir to compare
+    rr="$(_gl_canon_target "$r")" || return 0
     [ "$dr" = "$rr" ] && return 0
   done
   ov="$(GL_FILE="$(_gl_abs "$d/.claude.json")" _gl_js account-uuid 2>/dev/null)"
@@ -1463,18 +1667,19 @@ _gl_claude_env_unsets() { # → GL_ENV_UNSETS array of `-u NAME` for account-ove
   done
 }
 
-# Hermetic CODEX_HOME (D6): outside the run tree, keyed by the run id.
+# Hermetic CODEX_HOME (D6): outside the run tree, keyed by the run id. The WHOLE path
+# (<base>/lane-codex-home/<run-id>) is canonicalized — base, every existing ancestor and a linked
+# lane-codex-home included; returns 1 (prints nothing) when anything that exists on the way cannot
+# be safely canonicalized: callers refuse, never fall back to the lexical alias.
 _gl_codex_home_path() {
-  local base="${GSTACK_HOME:-$HOME/.gstack}" rid real
+  local base="${GSTACK_HOME:-$HOME/.gstack}" rid
   rid="$(basename "$GL_RUN_DIR")"
   _gl_valid_id "$rid" || rid="run-$(printf '%s' "$GL_RUN_DIR" | cksum | cut -d' ' -f1)"
-  real="$(_gl_realdir "$base" || true)"
-  [ -n "$real" ] && base="$real"
-  printf '%s/lane-codex-home/%s' "$base" "$rid"
+  _gl_canon_target "$base/lane-codex-home/$rid"
 }
-_gl_cwd_conflicts_codex_home() { # <real cwd> → 0 when cwd is, contains, or is inside the home
+_gl_cwd_conflicts_codex_home() { # <real cwd> → 0 conflict · 1 none · 2 home not safely canonicalizable
   local cw="$1" ch
-  ch="$(_gl_codex_home_path)"
+  ch="$(_gl_codex_home_path)" || return 2
   [ "$cw" = / ] && return 0
   case "$cw" in "$ch"|"$ch"/*) return 0 ;; esac
   case "$ch" in "$cw"/*) return 0 ;; esac
@@ -1488,14 +1693,20 @@ _gl_cwd_conflicts_codex_home() { # <real cwd> → 0 when cwd is, contains, or is
 # there is no shared mutable config at all. Any failure refuses the launch. Returns 0 on
 # success.
 GL_CODEX_HOME_LIVE=0
+GL_CODEX_BASE=""   # the canonical base of the live per-invocation home (cleanup uses only this)
 _gl_codex_inv_home() { # <n>
   local n="$1" base home cfg tmp got
-  base="$(_gl_codex_home_path)"
+  base="$(_gl_codex_home_path)" || return 1
   home="$base/${GL_TASK:-task}+$GL_ATTEMPT_ID-inv$n"
   GL_CODEX_HOME="$home"
   GL_AUTH_SRC="${CODEX_HOME:-$HOME/.codex}/auth.json"
   GL_AUTH_INITIAL=""
   ( umask 077; mkdir -p "$base" ) 2>/dev/null || return 1
+  # Re-verify AFTER creation: the created base must canonicalize to exactly the vetted path and
+  # still sit outside the task cwd (a link planted in between makes it resolve elsewhere).
+  [ "$(_gl_realdir "$base" || true)" = "$base" ] || return 1
+  _gl_cwd_conflicts_codex_home "$GL_CWD"; [ $? -eq 1 ] || return 1
+  GL_CODEX_BASE="$base"
   chmod 700 "$base" "$(dirname "$base")" 2>/dev/null
   ( umask 077; mkdir "$home" ) 2>/dev/null || return 1      # must be FRESH
   GL_CODEX_HOME_LIVE=1                                      # from here a signal cleans it up (H17)
@@ -1527,10 +1738,10 @@ _gl_codex_inv_cleanup() { # <inv dir> [<thread id>]
     [ -n "$f" ] && cp "$f" "$inv/rollout.jsonl" 2>/dev/null
   fi
   if [ -n "$GL_AUTH_INITIAL" ] && [ -f "$GL_CODEX_HOME/auth.json" ]; then
-    _gl_locked_at "$(dirname "$(_gl_codex_home_path)")/auth.lock" "$GL_LOCK_WAIT_S" \
+    [ -n "$GL_CODEX_BASE" ] && _gl_locked_at "$(dirname "$GL_CODEX_BASE")/auth.lock" "$GL_LOCK_WAIT_S" \
       "$GL_SELF" _codex-auth-writeback "$GL_CODEX_HOME/auth.json" "$GL_AUTH_SRC" "$GL_AUTH_INITIAL" >/dev/null 2>&1
   fi
-  case "$GL_CODEX_HOME" in "$(_gl_codex_home_path)"/*-inv[0-9]*) rm -rf "$GL_CODEX_HOME" ;; esac
+  [ -n "$GL_CODEX_BASE" ] && case "$GL_CODEX_HOME" in "$GL_CODEX_BASE"/*-inv[0-9]*) rm -rf "$GL_CODEX_HOME" ;; esac
   GL_CODEX_HOME_LIVE=0
 }
 # Internal (under the global auth flock): if the invocation rotated its token, the
@@ -1560,26 +1771,32 @@ _gl_registered_wt() { # <real dir>
   _gl_valid_id "$id" || return 1
   top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$top" ] && [ "$(_gl_realdir "$top" || true)" = "$d" ] || return 1
-  while IFS= read -r line; do
+  while IFS= read -r -d '' line; do   # -z: a newline-named path stays ONE record
     case "$line" in
       "worktree "*)
         p="${line#worktree }"
-        rp="$(_gl_realdir "$p" || printf '%s' "$p")"
+        rp="$(_gl_realdir "$p")" || rp=""   # unresolvable/control-char path: matches nothing
         if [ "$first" = 1 ]; then
           first=0
+          [ -n "$rp" ] || return 1           # primary unknown → cannot prove d is not it
           [ "$rp" = "$d" ] && return 1
-        elif [ "$rp" = "$d" ]; then
+        elif [ -n "$rp" ] && [ "$rp" = "$d" ]; then
           found=1
         fi
         ;;
     esac
-  done < <(git -C "$d" worktree list --porcelain 2>/dev/null)
+  done < <(git -C "$d" worktree list --porcelain -z 2>/dev/null)
   [ "$found" = 1 ]
 }
 _gl_primary_wt() { # <dir> → realpath of the repo's primary (main) worktree
-  local p
-  p="$(git -C "$1" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
-  [ -n "$p" ] && _gl_realdir "$p"
+  # -z: a newline-named path stays one record (a `$(…)` / line read would cut it to a sibling);
+  # a path holding a control character then fails _gl_realdir (callers fail closed on it).
+  # → 1 no worktree listed; 2 listed but not safely resolvable (callers fail closed).
+  local line
+  while IFS= read -r -d '' line; do
+    case "$line" in "worktree "*) _gl_realdir "${line#worktree }" || return 2; return 0 ;; esac
+  done < <(git -C "$1" worktree list --porcelain -z 2>/dev/null)
+  return 1
 }
 
 # ── inert, bounded taint snapshots (E5/E6) ────────────────────────────────────
@@ -1691,7 +1908,11 @@ _gl_tree_digest() {
     return 0
   fi
   r="$d"
-  [ -d "$d" ] && r="$(_gl_realdir "$d" || printf '%s' "$d")"
+  if [ -d "$d" ]; then
+    # Unresolvable (control characters after links): its contents cannot be fingerprinted, so emit
+    # a per-call nonce — before/after never match and the snapshot fails CLOSED (taint).
+    r="$(_gl_realdir "$d")" || { echo "unresolvable $d $$-$RANDOM$RANDOM-$(_gl_now)"; return 0; }
+  fi
   echo "resolved $r"
   _gl_stat_init
   find "$r" -exec stat "${GL_STAT_FMT[@]}" {} + 2>/dev/null | LC_ALL=C sort -k2
@@ -1888,13 +2109,15 @@ GL_CUR_INV=""
 GL_LAST_SO=""; GL_LAST_SE=""; GL_LAST_RC=""; GL_LAST_DETAIL=""; GL_LAST_INV_DIR=""
 GL_SANDBOX=""
 GL_SANDBOX_REFUSED=0
-GL_SANDBOX_UNAVAILABLE=0
+GL_SANDBOX_UNAVAILABLE=""      # refused | unverified — why L4 went ABSENT for its sandbox
+GL_SANDBOX_EVIDENCE=""         # l4: the final invocation's enforcement evidence (status sandbox_evidence)
 GL_UNSANDBOXED_OPT_IN=0
 GL_THROTTLE_INV=0
 _gl_record_cmd() { : > "$GL_CMD_FILE"; local a; for a in "${GL_RED[@]}"; do printf '%s\n' "$a" >> "$GL_CMD_FILE"; done; }
 
 _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
   local effort="$1" to="$2" deadline now remaining n_thr=0 so se inv t0 dur cls res detail backoff_ms first=1
+  local ev_file ev_off sbres refused
   now=$(_gl_now)
   deadline=$(( now + to ))
   GL_SANDBOX="$(_gl_initial_sandbox)"
@@ -1923,23 +2146,41 @@ _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
     _gl_build_cmd "$effort" "$GL_SANDBOX"
     _gl_record_cmd
     so="$inv/stdout"; se="$inv/stderr"
+    ev_file=""; ev_off=0; refused=0; GL_SANDBOX_EVIDENCE=""
+    if [ "$GL_LANE" = l4 ] && [ "$GL_SANDBOX" = read-only ]; then
+      # F1: grok's own event log is the positive evidence; remember where this invocation starts.
+      ev_file="$(_gl_grok_events_file || true)"
+      if [ -n "$ev_file" ] && [ -f "$ev_file" ]; then ev_off=$(( $(wc -c 2>/dev/null < "$ev_file" || echo 0) )); fi
+    fi
     t0=$(_gl_now)
     _gl_bounded "$remaining" "$GL_STDIN" "$so" "$se" "$GL_CWD" "${GL_CMD[@]}"
     dur=$(( $(_gl_now) - t0 ))
+    if [ "$GL_LANE" = l4 ]; then
+      if [ "$GL_SANDBOX" != read-only ]; then GL_SANDBOX_EVIDENCE=not-requested
+      elif [ "$GL_RC" -eq 124 ]; then GL_SANDBOX_EVIDENCE=unverified-timeout   # a timeout is never a review
+      else
+        sbres="$(GL_RC="$GL_RC" GL_STDOUT="$so" GL_STDERR="$se" GL_EVENTS_FILE="$ev_file" GL_EVENTS_OFFSET="$ev_off" \
+                 GL_EV_CWD="$GL_CWD" GL_EV_T0="$t0" GL_EV_OUT="$inv/sandbox-event.json" \
+                 GL_REFUSAL_MARKER="$GL_SANDBOX_REFUSAL" _gl_js grok-sandbox 2>/dev/null)" || sbres=""
+        case "$sbres" in
+          [01]"$GL_TAB"?*) refused="${sbres%%"$GL_TAB"*}"; GL_SANDBOX_EVIDENCE="${sbres#*"$GL_TAB"}" ;;
+          *) GL_SANDBOX_EVIDENCE=unverifiable ;;   # the evidence reader failed: fail closed below
+        esac
+      fi
+    fi
     GL_LAST_SO="$so"; GL_LAST_SE="$se"; GL_LAST_RC="$GL_RC"; GL_LAST_INV_DIR="$inv"
     if [ "$GL_LANE" = l3 ]; then
       # Classify FIRST: its JSON parse yields the thread id that locates the rollout (H10).
       res="$(_gl_classify "$GL_RC" "$so" "$inv/out")"
       _gl_codex_inv_cleanup "$inv" "$(printf '%s' "$res" | cut -f3)"
     fi
-    if [ "$GL_LANE" = l4 ] && [ "$GL_SANDBOX" = read-only ] && [ "$GL_RC" -ne 0 ] \
-       && LC_ALL=C grep -qiF "$GL_SANDBOX_REFUSAL" "$se" 2>/dev/null; then
+    if [ "$refused" = 1 ]; then   # F2: only grok's unambiguous pre-start refusal (anchored, empty stdout)
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" sandbox-refused "$dur" read-only "$inv" "sandbox refused to start" >> "$GL_ATTEMPTS_FILE"
       if ! _gl_grok_unsandboxed_ok; then
         # G1: no plan-only fallback by default — L4 is ABSENT on a host without its sandbox.
         GL_TRY_CLASS=auth
         GL_LAST_DETAIL="grok OS sandbox unavailable on this host"
-        GL_SANDBOX_UNAVAILABLE=1
+        GL_SANDBOX_UNAVAILABLE=refused
         break
       fi
       GL_SANDBOX=none                 # opted in (grok_allow_unsandboxed=true): plan-only fallback, recorded
@@ -1953,6 +2194,27 @@ _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
     cls="$(printf '%s' "$res" | cut -f1)"
     detail="$(printf '%s' "$res" | cut -f2)"
     [ -n "$cls" ] || { cls=error; detail="classifier failed"; }
+    # F1: a usable L4 result needs POSITIVE evidence that its OS sandbox was enforced.
+    if [ "$cls" = ok ] && [ "$GL_LANE" = l4 ] && [ "$GL_SANDBOX" = read-only ] && [ "$GL_SANDBOX_EVIDENCE" != profile-applied ]; then
+      if [ "$GL_SANDBOX_EVIDENCE" = contradicted ]; then
+        # The sandbox demonstrably applied, yet stderr says otherwise: unusable, never a rerun.
+        cls=error; detail="grok sandbox evidence contradicted (ProfileApplied event, but a not-applied warning on stderr)"
+      else
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" sandbox-unverified "$dur" read-only "$inv" "sandbox enforcement not verified ($GL_SANDBOX_EVIDENCE)" >> "$GL_ATTEMPTS_FILE"
+        if ! _gl_grok_unsandboxed_ok; then
+          GL_TRY_CLASS=auth   # same as a refusal: ABSENT, nothing published
+          GL_LAST_DETAIL="grok OS sandbox enforcement not verified ($GL_SANDBOX_EVIDENCE)"
+          GL_SANDBOX_UNAVAILABLE=unverified
+          break
+        fi
+        GL_SANDBOX=none                 # opted in: rerun unsandboxed, recorded (exactly as after a refusal)
+        GL_SANDBOX_REFUSED=1
+        GL_UNSANDBOXED_OPT_IN=1
+        GL_TRY_CLASS=error
+        GL_LAST_DETAIL="sandbox enforcement not verified"
+        continue
+      fi
+    fi
     GL_LAST_DETAIL="$detail"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" "$cls" "$dur" "$GL_SANDBOX" "$inv" "$detail" >> "$GL_ATTEMPTS_FILE"
     GL_TRY_CLASS="$cls"
@@ -1992,7 +2254,8 @@ _gl_finalize() {
     GL_TAINT_CHECKED="${GL_TAINT_CHECKED:-0}" GL_TAINTED="${GL_TAINTED:-0}" GL_TAINT_DETAIL="${GL_TAINT_DETAIL:-}" \
     GL_LANE_UPDATE="$2" GL_LANE_UPDATE_KIND="${GL_LANE_UPDATE_KIND:-}" \
     GL_REJECTED="${GL_REJECTED:-}" GL_SKIPPED="${GL_SKIPPED:-}" GL_NOTE="${GL_NOTE:-}" \
-    GL_GROK_STRIPPED="${GL_GROK_STRIPPED:-0}" GL_UNSANDBOXED_OPT_IN="$GL_UNSANDBOXED_OPT_IN" GL_FN=finalize \
+    GL_GROK_STRIPPED="${GL_GROK_STRIPPED:-0}" GL_UNSANDBOXED_OPT_IN="$GL_UNSANDBOXED_OPT_IN" \
+    GL_SANDBOX_EVIDENCE="${GL_SANDBOX_EVIDENCE:-}" GL_FN=finalize \
     _gl_finalize_exec "$3"
   }
   _gl_finalize_exec() { # [lock wait] — the JS runs under the kernel lock when a wait is given
@@ -2142,7 +2405,7 @@ _gl_claim_out() {
 }
 
 _gl_run_main() {
-  local lane_line lstatus lactive lnext cls code kind reason retry_effort bin p primary=""
+  local lane_line lstatus lactive lnext cls code kind reason retry_effort bin p rp primary=""
   local snap_dirs lanes_before="" lanes_after
   umask 077
   _gl_validate_run_args
@@ -2188,9 +2451,11 @@ _gl_run_main() {
   if [ "$GL_LANE" = l2 ] && [ "$GL_ALLOW_CREDIT" != 1 ] && [[ "$GL_MODEL" =~ ^([Cc][Ll][Aa][Uu][Dd][Ee]-)?[Ff][Aa][Bb][Ll][Ee]([^A-Za-z0-9]|$) ]]; then
     _gl_reject "l2 model '$GL_MODEL' bills Fable to usage credits under claude -p without prompting; pass --allow-credit-billing to accept"
   fi
-  if _gl_cwd_conflicts_codex_home "$GL_CWD"; then
-    _gl_reject "--cwd must not be, contain, or lie inside the hermetic CODEX_HOME ($(_gl_codex_home_path))"
-  fi
+  _gl_cwd_conflicts_codex_home "$GL_CWD"
+  case $? in
+    0) _gl_reject "--cwd must not be, contain, or lie inside the hermetic CODEX_HOME ($(_gl_codex_home_path))" ;;
+    2) [ "$GL_LANE" = l3 ] && _gl_reject "the hermetic CODEX_HOME base (\$GSTACK_HOME or ~/.gstack, or its lane-codex-home) exists but cannot be safely canonicalized (dangling link, non-directory, control characters after symlinks?) — no auth copy made" ;;
+  esac
   if [ "$GL_LANE" = l4 ] && [ "$GL_MODE" = review ]; then
     if ! _gl_registered_wt "$GL_CWD" || git -C "$GL_CWD" symbolic-ref -q HEAD >/dev/null 2>&1; then
       _gl_reject "l4 review needs --cwd to be a registered DETACHED linked worktree directly under <run-dir>/wt/ (gstack-lane worktree add --detach), one per forum member"
@@ -2234,6 +2499,12 @@ _gl_run_main() {
   if [ "$GL_LANE" = l2 ]; then
     GL_CLAUDE_DIR="$(_gl_claude_dir)"
     _gl_no_ctl --claude-dir "$GL_CLAUDE_DIR"
+    if ! _gl_claude_dir_check; then
+      GL_NOTE="claude-dir-invalid"; GL_CLASS_DETAIL="$GL_CLAUDE_DIR_WHY"
+      _gl_finalize auth absent "auth: $GL_CLAUDE_DIR_WHY: $GL_CLAUDE_DIR" "$EX_AUTH" || true
+      echo "gstack-lane: $GL_CLAUDE_DIR_WHY: $GL_CLAUDE_DIR — l2 marked absent" >&2
+      exit "$EX_AUTH"
+    fi
     # L2 must be a DIFFERENT account from the root session, or it adds no quota while
     # pretending to be overflow: refuse the root's own config dirs, and refuse when the
     # overflow login's oauthAccount.accountUuid equals the root's (env
@@ -2293,13 +2564,18 @@ _gl_run_main() {
       _gl_reject "could not strip grok project configuration (.grok/ …) from the review worktree"
     fi
     GL_GROK_STRIPPED=1
-    primary="$(_gl_primary_wt "$GL_CWD" || true)"
+    primary="$(_gl_primary_wt "$GL_CWD")"
+    [ $? -eq 2 ] && _gl_reject "the primary worktree path cannot be safely resolved (control characters?) — cannot snapshot it"
     snap_dirs=("$GL_CWD")
     [ -n "$primary" ] && [ "$primary" != "$GL_CWD" ] && snap_dirs+=("$primary")
-    while IFS= read -r p; do   # every OTHER linked worktree of this run (sibling tasks, the other member)
-      p="$(_gl_realdir "$p" || true)"
-      case "$p" in "$GL_RUN_DIR/wt/"*) [ "$p" != "$GL_CWD" ] && snap_dirs+=("$p") ;; esac
-    done < <(git -C "$GL_CWD" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+    while IFS= read -r -d '' p; do   # every OTHER linked worktree of this run (sibling tasks, the other member)
+      case "$p" in "worktree "*) p="${p#worktree }" ;; *) continue ;; esac
+      if ! rp="$(_gl_realdir "$p")"; then   # -z: a newline-named path is one record, refused here
+        { [ -e "$p" ] || [ -L "$p" ]; } && _gl_reject "a linked worktree path cannot be safely resolved (control characters?) — cannot snapshot it"
+        continue                             # gone (prunable): nothing to snapshot
+      fi
+      case "$rp" in "$GL_RUN_DIR/wt/"*) [ "$rp" != "$GL_CWD" ] && snap_dirs+=("$rp") ;; esac
+    done < <(git -C "$GL_CWD" worktree list --porcelain -z 2>/dev/null)
     lanes_before="$(printf '%s' "$lane_line" | cut -f6)"
     if ! _gl_snap - "$GL_LOG_DIR/snapshot.before" "${snap_dirs[@]}"; then
       GL_TAINTED=1; GL_TAINT_DETAIL="pre-review snapshot failed or timed out"; GL_CLASS_DETAIL="tainted: $GL_TAINT_DETAIL"
@@ -2365,8 +2641,10 @@ _gl_run_main() {
     quota) kind=quota; reason="quota" ;;
     auth)
       kind=absent; reason="auth: CLI reported an authentication failure"
-      [ "$GL_SANDBOX_UNAVAILABLE" = 1 ] \
-        && reason="grok OS sandbox unavailable on this host; opt in with gstack-config set grok_allow_unsandboxed true" ;;
+      case "$GL_SANDBOX_UNAVAILABLE" in
+        refused) reason="grok OS sandbox unavailable on this host; opt in with gstack-config set grok_allow_unsandboxed true" ;;
+        unverified) reason="grok OS sandbox enforcement not verified (${GL_SANDBOX_EVIDENCE:-no evidence}: no ProfileApplied read-only event for this run in grok's sandbox-events.jsonl); opt in with gstack-config set grok_allow_unsandboxed true" ;;
+      esac ;;
     throttle)
       if [ "$GL_MODE" = probe ]; then kind=ok; reason="probe: throttled (reachable, rate-limited)"; else kind=keep; reason="throttle (backoff retries exhausted within the deadline)"; fi ;;
     timeout)
@@ -2487,7 +2765,7 @@ cmd_summary() {
 
 # ── adjudicate (D4/H9) ────────────────────────────────────────────────────────
 cmd_adjudicate() {
-  local out="" seat="" gate="" req="" sha="" real seg line rc
+  local out="" seat="" gate="" req="" sha="" real seg line rc uok
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --out|--seat|--gate-class|--requested-model|--reviewed-sha)
@@ -2511,15 +2789,22 @@ cmd_adjudicate() {
     _gl_usage_err "adjudicate: --requested-model contains unsupported characters"
   fi
   out="$(_gl_abs "$out")"
-  real="$(_gl_realfile "$out" 2>/dev/null)" || real="$out"
+  if ! real="$(_gl_realfile "$out" 2>/dev/null)"; then
+    # Never the lexical alias: a parent that EXISTS but cannot be canonicalized is INVALID; a missing
+    # one has no status to read (the adjudicator reports it absent/invalid from the canonical form).
+    real="$(_gl_canon_target "$out")" || { echo "VERDICT=INVALID reason=out_unresolvable p1_count=0 runtime_model=null"; exit 11; }
+  fi
   _gl_no_ctl --out "$real"
   seg="$(basename "$(dirname "$out")")"
   _gl_valid_id "$seg" || seg=""
   if ! command -v bun >/dev/null 2>&1; then
     echo "VERDICT=INVALID reason=adjudicator_unavailable p1_count=0 runtime_model=null"; exit 11
   fi
+  # F3: an unsandboxed L4 review needs the opt-in to hold NOW too (same resolution as the run path).
+  uok=0
+  if [ "$seat" = grok ] && _gl_grok_unsandboxed_ok; then uok=1; fi
   line="$(GL_STATUS_FILE="$real.status.json" GL_OUT_REAL="$real" GL_OUT_ATTEMPT="$seg" GL_SEAT="$seat" \
-          GL_GATE_CLASS="$gate" GL_REQ_MODEL="$req" GL_REVIEWED_SHA="$sha" _gl_js adjudicate 2>/dev/null)"
+          GL_GATE_CLASS="$gate" GL_REQ_MODEL="$req" GL_REVIEWED_SHA="$sha" GL_UNSANDBOXED_OK="$uok" _gl_js adjudicate 2>/dev/null)"
   rc=$?
   case "$rc:$line" in
     0:VERDICT=PRESENT_CLEAN\ *|10:VERDICT=PRESENT_P1\ *|11:VERDICT=INVALID\ *|12:VERDICT=ABSENT\ *) printf '%s\n' "$line"; exit "$rc" ;;
@@ -2680,7 +2965,8 @@ cmd_commit() {
       echo "gstack-lane: --cwd must be the top level of a git worktree" >&2; exit "$EX_ERROR"
     fi
     if [ -n "$GL_WT_RUN" ]; then
-      GL_RUN_DIR="$(_gl_realdir "$GL_WT_RUN" || printf '%s' "$GL_WT_RUN")"
+      GL_RUN_DIR="$(_gl_canon_target "$(_gl_abs "$GL_WT_RUN")")" \
+        || { echo "gstack-lane: --run-dir cannot be safely canonicalized (control characters after symlinks?) — refusing" >&2; exit "$EX_ERROR"; }
       case "$GL_WT_PATH/" in "$GL_RUN_DIR/wt/"*) echo "gstack-lane: --cwd is a task worktree of this run — use --task" >&2; exit "$EX_ERROR" ;; esac
     fi
   else

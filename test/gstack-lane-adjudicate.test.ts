@@ -10,7 +10,8 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
-import { codexStep, makeLaneHarness } from './helpers/gstack-lane-harness';
+import { spawnSync } from 'child_process';
+import { CONFIG, codexStep, makeLaneHarness } from './helpers/gstack-lane-harness';
 
 const H = makeLaneHarness('gstack-lane-adj');
 const { mkSandbox, step, lane, freshOut, run, wtAdd, sh, repo } = H;
@@ -35,7 +36,7 @@ function mk(sb: ReturnType<typeof mkSandbox>, seat: Seat, over: Record<string, u
     attempt_id: aid, task, lane: seat === 'codex' ? 'l3' : 'l4', mode: 'review',
     requested_model: seat === 'codex' ? 'gpt-6.1-sol' : 'grok-4.7-build', runtime_model: seat === 'codex' ? 'gpt-6.1-sol' : 'grok-4.7-build',
     model_mismatch: false, exit: 0, class: 'ok', class_detail: null, exit_code: 0, out, published: body !== null,
-    reviewed_sha: SHA, tainted: false, taint_checked: seat === 'grok', ...(seat === 'grok' ? { grok_project_config_stripped: true } : {}),
+    reviewed_sha: SHA, tainted: false, taint_checked: seat === 'grok', ...(seat === 'grok' ? { grok_project_config_stripped: true, sandbox: 'read-only', sandbox_evidence: 'profile-applied' } : {}),
     attempts: [{ n: 1, class: 'ok' }], ...over,
   };
   if (o.raw !== undefined) fs.writeFileSync(`${out}.status.json`, o.raw);
@@ -159,6 +160,31 @@ describe('bin/gstack-lane adjudicate: the completion marker (V4)', () => {
     // a miscounted marker is a NOTE, never a verdict change
     expect(verdict('- [P2] a\n- [P3] b\nREVIEW_COMPLETE: findings=0\n').line).toBe(V('PRESENT_CLEAN', 'no_p1,findings_count_mismatch', 0, 'gpt-6.1-sol'));
   });
+});
+
+describe('bin/gstack-lane adjudicate: the L4 sandbox (F3)', () => {
+  test('an L4 review counts only with POSITIVE sandbox evidence, or unsandboxed with BOTH the run-time and the CURRENT opt-in', () => {
+    const sb = mkSandbox();
+    const g = (over: Record<string, unknown>) => adj(sb, mk(sb, 'grok', over), 'grok', 'critical').line;
+    const setOptIn = (v: string) => expect(spawnSync(CONFIG, ['set', 'grok_allow_unsandboxed', v], { env: sb.env, encoding: 'utf8', timeout: 20_000 }).status).toBe(0);
+    const RM = 'grok-4.7-build';
+    expect(g({})).toBe(V('PRESENT_CLEAN', 'no_p1', 0, RM));
+    for (const over of [{ sandbox_evidence: undefined }, { sandbox_evidence: 'no-event' }, { sandbox_evidence: 'stderr-not-applied' }, { sandbox_evidence: true },
+      { sandbox: undefined, sandbox_evidence: undefined }, { sandbox: null }, { sandbox: 'workspace' }, { sandbox: 'off' }]) {
+      expect({ over, line: g(over) }).toEqual({ over, line: V('INVALID', 'sandbox_unverified', 0, RM) });
+    }
+    // unsandboxed: never clean without the recorded opt-in AND the opt-in still being exactly `true` now
+    expect(g({ sandbox: 'none', sandbox_evidence: 'not-requested' })).toBe(V('INVALID', 'unsandboxed_not_opted_in', 0, RM));
+    expect(g({ sandbox: 'none', sandbox_evidence: 'not-requested', unsandboxed_opt_in: true })).toBe(V('INVALID', 'unsandboxed_not_opted_in', 0, RM)); // default config
+    setOptIn('true');
+    expect(g({ sandbox: 'none', sandbox_evidence: 'not-requested', unsandboxed_opt_in: true })).toBe(V('PRESENT_CLEAN', 'no_p1,unsandboxed', 0, RM));
+    expect(g({ sandbox: 'none', sandbox_evidence: 'not-requested', unsandboxed_opt_in: 'true' })).toBe(V('INVALID', 'unsandboxed_not_opted_in', 0, RM));
+    expect(g({ sandbox: 'none', sandbox_evidence: 'not-requested' })).toBe(V('INVALID', 'unsandboxed_not_opted_in', 0, RM));
+    setOptIn('false'); // reverted after the run: the old unsandboxed review no longer counts
+    expect(g({ sandbox: 'none', sandbox_evidence: 'not-requested', unsandboxed_opt_in: true })).toBe(V('INVALID', 'unsandboxed_not_opted_in', 0, RM));
+    // ordering: an unusable class still reports its own reason first
+    expect(g({ class: 'auth', exit_code: 5, sandbox_evidence: 'no-event' })).toBe(V('ABSENT', 'auth', 0, RM));
+  }, 30_000);
 });
 
 describe('bin/gstack-lane adjudicate: end to end over helper-written status files', () => {
