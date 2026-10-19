@@ -59,6 +59,10 @@ Machine facts that shaped the design:
 
 ## Routing table (tier → lanes, ordered; first available lane under its cap wins)
 
+> **Superseded in part (v1.8.0):** the T0/T1 Haiku-max rows, Luna's dev role, the "T3 needs two other
+> vendors / step-0 waiver" diversity rule and every Grok (L4) review role are v1.7 text. See "v1.8.0 amendments" at the end of this doc; where they
+> disagree, the amendments and the template win.
+
 | Work type | Primary | Spillover (in order) | Effort |
 |---|---|---|---|
 | **R** rote / no-reasoning (deterministic, exact success check, no judgment) | L1 Haiku 5.5 (`model: haiku`, `effort: "low"`; read-only search may use `subagent_type: Explore`) | L2 `claude-haiku-5-5 --effort low` → L3 gpt-6-luna low; Sonnet-low only on a host with no Haiku; never Sonnet/Opus/Fable/Sol/Astra, never L4 | low |
@@ -319,6 +323,11 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
 
 ## Gate forum changes (template Quick reference)
 
+> **Superseded in part (v1.8.0):** the Sol-for-ordinary-gates Codex member, the Grok member, the step-0
+> vendor-diversity question and every "waive" option on a critical gate are v1.7 text; v1.8 runs
+> Seat C (Fable) + Seat X (Astra) and has no Seat X waiver. See "v1.8.0 amendments" at the end of this doc; where they
+> disagree, the amendments and the template win.
+
 - **Gate start (one top-level Bash call per gate round):** re-probe lanes that were absent/cooling in the
   last roster (`gstack-lane probe --lanes …`; only `*_reviews=disabled` persists across gates — also done at
   each milestone start before dispatch); set `GATE_CLASS`; resolve BOTH diff endpoints ONCE as immutable
@@ -406,3 +415,50 @@ Keep routing POLICY in the skill; put MECHANICS in the helper.
   reported INVALID/BLOCKED, never ABSENT/DEGRADED.
 - **Embedded JS → `lib/gstack-lane/*.ts` (D1):** move the ~400-line classifier/state-machine heredoc out of
   `bin/gstack-lane` into type-checked, unit-testable modules run via `bun`; bash keeps process control.
+
+## v1.8.0 amendments (2026-10-19)
+
+Operator decisions from the Beneficii M1 retro (`<!-- v1.8 decision D-A..D-E -->` in the template).
+Routing policy only: the helper contract above, including every L4 security rule, is unchanged.
+
+- **Grok out of every forum (D-A).** `/autobuilder-loop` no longer probes, dispatches or counts L4
+  (its probe passes `--lanes l2,l3`). `bin/gstack-lane` keeps L4 support and its security contract as
+  documented; the skill simply never calls it. Reviewer diversity is ONE other-vendor assessment per
+  T1+ task and per gate; the unit gate satisfies the per-task one (both seats review the whole unit
+  diff, so the opposite-vendor seat is each task's assessment; no separate per-task pass in v1.8).
+  T3-containing and FINAL gates require Astra; there is no Seat X waiver.
+- **Gate forum = two model seats (D-B).** Seat C: ONE in-session Fable `high` subagent running the
+  eng-review methodology and the /review checklist in one pass (fallback L1 → L2 `claude-opus-5-5`
+  high; never Fable via `claude -p`). Seat X: L3 `gpt-6-astra` high via `run --mode review`, adjudicated
+  as `--seat codex`. **Substitution rule:** on an ordinary gate, ONE `gpt-6.1-sol` high attempt runs only
+  when Astra's attempt ended `timeout` (after its medium retry) or `error` (recorded `substituted:
+  astra->sol (<class>)`); never on `auth`, never when `codex_reviews` is disabled/off, never on
+  `quota`/cooling. On an Astra `quota`/cooling Seat X is ABSENT: the loop schedules the auto-resume at
+  the reset (+2 min) and the gate waits (the resume passes `gateAttempt: <n+1>` so the cached ABSENT does not replay), unless the step-0 policy packet lets ordinary gates close
+  `DEGRADED` on a cooling Codex lane (the unit script's `acceptDegraded`). Critical gates always wait
+  (adjudicate also rejects Sol there). Verdicts count KEPT `[P1]`s after consolidation; INVALID
+  evidence is re-run clean before any round-cap, ship-with-open-P1 or DEGRADED acceptance. Ship and
+  PATCH fail closed: a missing, incomplete or non-PASS review, fact-check, inventory or push blocks
+  publication. Every commit goes through `gstack-lane commit` or gets its guard scan before any push.
+  Non-model members: Docker and the mutation probe, path-scoped.
+- **Haiku 5.5 max for T0/T1 (D-C).** L1 Haiku `effort: max` (spill L2 Haiku max) implements T0/T1,
+  P2 fix-now passes and the CHANGELOG fact-check; a failed or missing named check escalates once to L3
+  Sol medium → L2 Sonnet → L1 Sonnet. Rule 1 stands: Haiku never implements T2/T3. Rule 2's L1-reserve
+  exemption covers R, T0 and T1 on L1 Haiku. Luna is the R lane's last spillover only.
+- **Planning (D-D).** One internal synthesis round, then one Astra high review of the final artifact
+  set per milestone; no best-of-N, no dual-vendor option sets; LITE units skip it.
+- **Flow sizes (D-E).** FULL (T2/T3, the FINAL unit, sensitive path, or >400 production LOC), LITE (≤400
+  production LOC, T0/T1 only, never FINAL, one gate round; Docker only on a trigger glob; the FINAL gate
+  always runs Docker), PATCH (fix to an open PR: delta review, push to the same PR), plus
+  one `HARDEN-<milestone>` unit per milestone fed by `$RUN_DIR/hardening.json`.
+- **Known helper limitation (follow-up, out of scope for v1.8):** `run` refuses a cooling lane
+  (`bin/gstack-lane` lane-state refusal) and L3 cools lane-wide (E9 above), so Sol can never run after an
+  Astra `quota` — which is why the substitution rule above excludes `quota`. A per-model cooldown in
+  `lanes.json` would let Sol substitute on an Astra quota; that is a helper follow-up. The step-0 probe
+  reads L3's status (Luna) as Astra's and never spends an Astra message.
+- **Round-2 additions (S1-S3).** The sensitive-path classifier over-matches: case-insensitive tokens at a
+  path-segment or camelCase start (o?auth/authn/authz/authori[sz]/authenticat, security, session, permission, rbac,
+  acl, payment, billing, checkout, stripe, secret, crypto, migration, pii, gdpr, erasure); only `author*`
+  is excluded; `sensitiveGlobs`, when given, REPLACES both this classifier and the structural sensitive globs. A false positive only upgrades LITE to FULL. Prose is
+  `.md`/`.txt`/`.rst` only (`.mdx` is code). Seat C counts only an exact allowlisted model id
+  (`claude-fable-5-1`/`fable`, `claude-opus-5-5`, `claude-opus-4-8`), checked identically on L1 and L2.

@@ -93,10 +93,13 @@ describe('autobuilder-loop/SKILL.md.tmpl — recipe invariants', () => {
     expect(AUTOBUILDER_TMPL).toContain('= "disabled" ] || [ "$_CODEX_ENABLED" = "off"');
   });
 
-  test('Grok forum-member config gate rejects absent/disabled/off explicitly', () => {
-    expect(AUTOBUILDER_TMPL).toContain(
-      '[ "$_GROK_ENABLED" = "absent" ] || [ "$_GROK_ENABLED" = "disabled" ] || [ "$_GROK_ENABLED" = "off" ]',
-    );
+  // v1.8 decision D-A (operator, 2026-10-19): Grok left every review forum, so the old
+  // Grok config-gate pin is retired. Pin the removal instead: the skill must never
+  // launch an L4 review or gate on grok_reviews again (bin/gstack-lane keeps L4 support).
+  test('no Grok forum member: the skill never gates on grok_reviews or launches an L4 review', () => {
+    expect(AUTOBUILDER_TMPL).not.toContain('_GROK_ENABLED');
+    expect(AUTOBUILDER_TMPL).not.toContain('--lane l4');
+    expect(AUTOBUILDER_TMPL).not.toContain('--seat grok');
   });
 
   test('error-class retry: quota is its own class, and timeout steps down to medium effort', () => {
@@ -119,6 +122,36 @@ describe('autobuilder-loop/SKILL.md.tmpl — recipe invariants', () => {
   test('the adversarial-forum gate verdict is fail-closed', () => {
     // Absence of a positive success signal is a FAIL, not a pass-by-default.
     expect(AUTOBUILDER_TMPL).toContain('fail-closed');
+  });
+});
+
+// v1.8 review round 1 (Fable) / round 2 (orchestrator): cheap static safety pins over the
+// reference unit script. They only forbid; none of them can be satisfied by weakening a check.
+describe('autobuilder-loop/autobuilder-unit.js — static safety pins', () => {
+  const UNIT = fs.readFileSync(path.join(ROOT, 'autobuilder-loop', 'autobuilder-unit.js'), 'utf-8');
+
+  test('never merges a PR (no gh pr merge, no merge API call)', () => {
+    expect(UNIT).not.toMatch(/gh\s+pr\s+merge/);
+    expect(UNIT).not.toMatch(/pulls\/[^\s'"`]*\/merge\b/);
+  });
+
+  test('never passes --allow-credit-billing (only a "never --allow-credit-billing" instruction may name it)', () => {
+    expect(UNIT.replace(/never --allow-credit-billing/g, '')).not.toContain('--allow-credit-billing');
+  });
+
+  test('never runs Fable through claude -p', () => {
+    expect(UNIT).not.toMatch(/claude\s+-p\b[^\n]*\bfable/i);
+    expect(UNIT).not.toMatch(/--model[ =]['"]?(claude-)?fable/i);
+  });
+
+  test('no Grok anywhere (v1.8 decision D-A)', () => {
+    expect(UNIT.toLowerCase()).not.toContain('grok');
+  });
+
+  test('PROSE_RE treats .mdx as code (spec S2: prose is .md/.txt/.rst only)', () => {
+    const m = UNIT.match(/const PROSE_RE = (\/.*\/[a-z]*)/);
+    expect(m).not.toBeNull();
+    expect(m![1]).not.toContain('mdx');
   });
 });
 

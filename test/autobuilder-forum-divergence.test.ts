@@ -8,7 +8,8 @@
  * `bin/gstack-vote`) is an ADVISORY N-voice consensus mechanism — it
  * produces a recommendation, not a hard PASS/FAIL gate on its own.
  *
- * autobuilder-loop's per-milestone Codex+Grok forum is a STRICTER,
+ * autobuilder-loop's per-milestone two-seat forum (v1.8: Seat C Claude + Seat X
+ * Codex Astra; formerly Codex+Grok) is a STRICTER,
  * deliberately different mechanism: a UNION-FAIL gate where a single `[P1]`
  * from EITHER model fails the whole gate. M3 explicitly does NOT swap this
  * for the panel's advisory tally. This file pins both halves of that
@@ -30,11 +31,11 @@ const AUTOBUILDER_GENERATED = fs.readFileSync(GENERATED_PATH, 'utf-8');
 
 describe('autobuilder-loop forum vs outside-voices panel — divergence pin (M3 T5)', () => {
   describe('union-FAIL literals are present verbatim, in both the .tmpl source and the generated SKILL.md', () => {
-    // "a [P1] from EITHER model FAILs the gate" — the cross-model gate rule
-    // stated where the forum step is introduced (SKILL.md.tmpl:352 as of
-    // this writing).
-    test('cross-model gate statement: a [P1] from EITHER model FAILs the gate', () => {
-      const fragment = 'a `[P1]` from EITHER model FAILs the gate';
+    // "a kept [P1] from EITHER model FAILs the gate" — the cross-model gate rule
+    // stated where the forum step is introduced. v1.8 round-1 ruling R3: the
+    // gate verdict counts KEPT (post-consolidation) P1s, so the literal says "kept".
+    test('cross-model gate statement: a kept [P1] from EITHER model FAILs the gate', () => {
+      const fragment = 'a kept `[P1]` from EITHER model FAILs the gate';
       expect(AUTOBUILDER_TMPL).toContain(fragment);
       expect(AUTOBUILDER_GENERATED).toContain(fragment);
     });
@@ -42,9 +43,10 @@ describe('autobuilder-loop forum vs outside-voices panel — divergence pin (M3 
     // "The station's verdict is the UNION of both members: it FAILs if
     // EITHER reports a [P1]." — the Quick-reference restatement of the same
     // rule (SKILL.md.tmpl:641 as of this writing).
-    test('station verdict is explicitly the UNION of both members, failing if EITHER reports a [P1]', () => {
+    // v1.8 ruling R3: the [P1] must survive consolidation to fail the station.
+    test('station verdict is explicitly the UNION of both members, failing if EITHER reports a kept [P1]', () => {
       const fragment =
-        "The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]`.";
+        "The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]` that consolidation keeps.";
       expect(AUTOBUILDER_TMPL).toContain(fragment);
       expect(AUTOBUILDER_GENERATED).toContain(fragment);
     });
@@ -63,8 +65,8 @@ describe('autobuilder-loop forum vs outside-voices panel — divergence pin (M3 
     // test suite is pinning three separate statements of the rule, not the
     // same string three times.
     test('the three union-FAIL statements are textually distinct fragments', () => {
-      const a = 'a `[P1]` from EITHER model FAILs the gate';
-      const b = "The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]`.";
+      const a = 'a kept `[P1]` from EITHER model FAILs the gate';
+      const b = "The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]` that consolidation keeps.";
       const c = 'FAIL on any `[P1]`/P0 from EITHER model';
       expect(a).not.toBe(b);
       expect(a).not.toBe(c);
@@ -106,15 +108,23 @@ describe('autobuilder-loop forum vs outside-voices panel — divergence pin (M3 
       }
     });
 
-    // Only two files exist under autobuilder-loop/ today (SKILL.md.tmpl and
-    // the generated SKILL.md) — this pin fails loudly (rather than silently
-    // under-covering) if a future edit adds a third file (e.g. a section
-    // fragment or a helper script) under autobuilder-loop/ that this test
-    // doesn't also scan for tallyVoices/gstack-vote references.
-    test('autobuilder-loop/ contains only SKILL.md.tmpl and the generated SKILL.md (no untracked-by-this-test files)', () => {
+    // v1.8.0 (retro-2026-10-19 item 7) adds the reference unit workflow
+    // autobuilder-unit.js as the third file. This pin still fails loudly
+    // (rather than silently under-covering) if a future edit adds a fourth
+    // file under autobuilder-loop/ that this test doesn't also scan.
+    test('autobuilder-loop/ contains only SKILL.md.tmpl, the generated SKILL.md and autobuilder-unit.js (no untracked-by-this-test files)', () => {
       const dir = path.join(ROOT, 'autobuilder-loop');
       const entries = fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
-      expect(entries.sort()).toEqual(['SKILL.md', 'SKILL.md.tmpl']);
+      expect(entries.sort()).toEqual(['SKILL.md', 'SKILL.md.tmpl', 'autobuilder-unit.js']);
+    });
+
+    // The unit workflow computes the gate verdict in code, so it gets the same
+    // scan: it must never delegate to the panel's advisory tally.
+    test('autobuilder-unit.js never references tallyVoices, gstack-vote or the Outside Voices panel', () => {
+      const unit = fs.readFileSync(path.join(ROOT, 'autobuilder-loop', 'autobuilder-unit.js'), 'utf-8');
+      for (const needle of ['tallyVoices', 'gstack-vote', 'OUTSIDE_VOICES', 'outside-voices', 'outside voices panel']) {
+        expect(unit.toLowerCase()).not.toContain(needle.toLowerCase());
+      }
     });
   });
 });
