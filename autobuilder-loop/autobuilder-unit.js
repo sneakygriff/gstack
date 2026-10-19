@@ -171,7 +171,10 @@ const DOCKER_RES = DOCKER_GLOBS.map(globToRe)
 // FULL; a false negative skips review depth). Case-insensitive sensitive tokens at a path-segment start (/ _ - . or a
 // camelCase boundary); only author* is excluded. Plus structural globs (public APIs, routes, middleware, SQL, schema).
 // The sensitiveGlobs arg replaces BOTH defaults.
-const SENSITIVE_TOKEN_RE = /(^|[\/_.\-])(o?auth(?!or)[a-z]*|authn|authz|authori[sz]|authenticat|session|permissions?|rbac|acl|payments?|billing|checkout|stripe|secrets?|crypto|migrations?|pii|gdpr|erasure|security)/
+// (security review r8: identity / credential / access-control tokens added; prefix matching at a segment start, so
+// keyboard.ts and tokenizer.ts over-match as sensitive (acceptable), console.ts does not). sign+in|up and log+in match
+// across a separator, so the camel split of userSignIn / userSignUp / userLogIn (sign/in, log/in) still matches.
+const SENSITIVE_TOKEN_RE = /(^|[\/_.\-])(o?auth(?!or)[a-z]*|authn|authz|authori[sz]|authenticat|session|permissions?|rbac|acl|payments?|billing|checkout|stripe|secrets?|crypto|migrations?|pii|gdpr|erasure|security|log[\/_.\-]?in|sign[\/_.\-]?(?:in|up)|passwords?|passwd|credentials?|tokens?|jwt|oidc|saml|sso|cookies?|csrf|xsrf|cors|admin|roles?|privileg|keys?|certs?|tls|ssl)/
 const DEFAULT_SENSITIVE_GLOBS = ['**/*.sql', '**/prisma/schema.prisma', '**/api/**', '**/app/**/route.*', '**/middleware.*']
 const SENSITIVE_GLOBS = arr(A.sensitiveGlobs).length ? arr(A.sensitiveGlobs) : DEFAULT_SENSITIVE_GLOBS
 const SENSITIVE_RES = SENSITIVE_GLOBS.map(globToRe)
@@ -348,6 +351,7 @@ const DEFER_ITEM = { type: 'object', properties: { finding: STR, files: STRS, ow
 // retro-2026-10-19 item 9: CONS carries members_present and the CLEAN|DEGRADED|FAIL|BLOCKED verdict enum
 const CONS = { type: 'object', properties: { verdict: { type: 'string', enum: ['CLEAN', 'DEGRADED', 'FAIL', 'BLOCKED'] }, members_present: { type: 'object', properties: { seat_c: STR, seat_x: STR, docker: STR, mutation: STR }, required: ['seat_c', 'seat_x'] }, p1: STRS, fixes: { type: 'array', items: FIX_ITEM }, deferred_p2: { type: 'array', items: DEFER_ITEM }, invalidates: { type: 'array', items: { type: 'string', enum: ['seat_c', 'seat_x', 'docker', 'mutation'] } }, member_downgrades: { type: 'array', items: { type: 'object', properties: { member: { type: 'string', enum: ['docker', 'mutation'] }, reason: STR }, required: ['member', 'reason'] } }, new_p1: { type: 'boolean' }, re_raises: { type: 'number' }, rulings_written: { type: 'number' }, members: STR }, required: ['verdict', 'members_present', 'p1', 'fixes', 'deferred_p2', 'members'] }
 const PR = { type: 'object', properties: { pr: { type: 'number' }, head: STR, title: STR }, required: ['pr', 'head', 'title'] }
+const SHIPPR = { type: 'object', properties: { pr: { type: 'number' }, state: STR, cross_repo: { type: 'boolean' }, head_repo: STR, head_ref: STR, head: STR, title: STR, notes: STR }, required: ['pr', 'state', 'cross_repo', 'head_repo', 'head_ref', 'head'] }
 const RD = { type: 'object', properties: { status: { type: 'string', enum: ['READY', 'BLOCKED'] }, head: STR, title: STR, ci_run_id: STR, failing_check: STR, failure_class: STR, notes: STR }, required: ['status', 'notes'] }
 const DC = { type: 'object', properties: { verdict: { type: 'string', enum: ['CLEAN', 'FAIL'] }, p1: STRS, doc_fixes: STRS, members: STR, checks: CHECKS }, required: ['verdict', 'p1', 'doc_fixes', 'members'] }
 const DR = { type: 'object', properties: { verdict: { type: 'string', enum: ['PASS', 'FAIL'] }, reviewed_sha: STR, p1: STRS, p2: STRS, fixes: { type: 'array', items: FIX_ITEM }, mutants: { type: 'array', items: { type: 'object', properties: { name: STR, killed: { type: 'boolean' } }, required: ['name', 'killed'] } }, notes: STR }, required: ['verdict', 'p1'] }
@@ -358,7 +362,7 @@ const GS = { type: 'object', properties: { guard_exit: { type: 'number' }, guard
 const FILES = { type: 'object', properties: { head: STR, files: STRS, snap_tree: STR }, required: ['head', 'files'] }
 const METERS = { type: 'object', properties: { prod_loc: { type: 'number' }, test_loc: { type: 'number' }, line: STR }, required: ['prod_loc', 'test_loc'] }
 const GUARD = { type: 'object', properties: { exit_code: { type: 'number' }, lines: STRS, head: STR, files_since: STRS, tree_delta: STRS }, required: ['exit_code', 'lines', 'head', 'files_since'] }
-const PSETUP = { type: 'object', properties: { repo_slug: STR, lane_slug: STR, recorded_pr: { type: 'number' }, recorded_branch: STR, state: STR, head_ref: STR, cross_repo: { type: 'boolean' }, head_repo: STR, head: STR, remote_head: STR, notes: STR }, required: ['repo_slug', 'lane_slug', 'recorded_pr', 'recorded_branch', 'state', 'head_ref', 'cross_repo', 'head_repo', 'head', 'remote_head'] }
+const PSETUP = { type: 'object', properties: { recorded_pr: { type: 'number' }, recorded_branch: STR, state: STR, head_ref: STR, cross_repo: { type: 'boolean' }, head_repo: STR, head: STR, remote_head: STR, notes: STR }, required: ['recorded_pr', 'recorded_branch', 'state', 'head_ref', 'cross_repo', 'head_repo', 'head', 'remote_head'] }
 const PUSH = { type: 'object', properties: { exit_code: { type: 'number' }, local_head: STR, remote_head: STR, notes: STR }, required: ['exit_code', 'local_head', 'remote_head'] }
 const PUB = { type: 'object', properties: { status: { type: 'string', enum: ['PUBLISHED', 'BLOCKED'] }, pushed: { type: 'boolean' }, pr_number: { type: 'number' }, head: STR, notes: STR }, required: ['status', 'pushed', 'head'] }
 const SHIPPREP = { type: 'object', properties: { status: { type: 'string', enum: ['COMMITTED', 'BLOCKED'] }, head: STR, version: STR, reviewed_tree: STR, code_changed: { type: 'boolean' }, merge_conflict: { type: 'boolean' }, changed_files: STRS, decisions_auto_taken: STRS, failure_class: STR, notes: STR }, required: ['status'] }
@@ -809,13 +813,82 @@ async function factCheck(tag, fromSha, amend) {
 }
 
 // CI is bound to the EXACT pushed SHA (ruling R4): READY only for runs on that head with the PR head unchanged.
+// ---------- repository identity (ship + PATCH) ----------------------------------------------------------
+// The identity comes from the lane's OWN git remote, parsed here; GH_REPO / GH_HOST in the environment can redirect a
+// directory-scoped gh call, so every gh call runs as GHX with an explicit, single-quoted repository:
+//   gh pr / run / release / workflow ... --repo '<host/owner/repo>'    (host ALWAYS included, github.com too)
+//   gh repo view '<host/owner/repo>' ...                               (positional: repo view rejects --repo)
+//   gh api --hostname '<host>' repos/<owner>/<repo>/...                 (api rejects --repo)
+// Strict validation (security review / Astra r10): host ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ (lowercased, no port, no
+// userinfo in it), owner and repo ^[A-Za-z0-9_.-]+$ ('.' / '..' rejected, .git stripped); https/http/git:// URLs carrying
+// userinfo (credentials) are rejected; ssh:// and scp-form remotes may carry a plain user (git@) and ssh:// a numeric
+// port, neither of which is part of the identity. Anything else -> null -> BLOCKED. The quoting is defence in depth.
+const GHX = 'env -u GH_REPO -u GH_HOST gh'
+const HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/, NAME_RE = /^[A-Za-z0-9_.-]+$/
+function parseRemote(url) {
+  const u = String(url || '').trim()
+  let m = u.match(/^(https?|git):\/\/([^/@]+)\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/)
+  if (!m) { m = u.match(/^(ssh):\/\/(?:([A-Za-z0-9_.-]+)@)?([^/:@]+)(?::[0-9]{1,5})?\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/); if (m) m = [m[0], m[1], m[3], m[4], m[5]] }
+  if (!m) { m = u.match(/^(?:([A-Za-z0-9_.-]+)@)?([^:/@]+):([^/]+)\/([^/]+?)(?:\.git)?\/?$/); if (m) m = [m[0], 'scp', m[2], m[3], m[4]] }
+  if (!m) return null
+  const host = String(m[2]).toLowerCase(), owner = m[3], repo = m[4]
+  if (!HOST_RE.test(host) || !NAME_RE.test(owner) || !NAME_RE.test(repo) || ['.', '..'].includes(owner) || ['.', '..'].includes(repo)) return null
+  const slug = `${owner}/${repo}`
+  // the identity ALWAYS carries the host (github.com included): gh's saved default host is never relied on
+  return { host, owner, repo, slug, arg: `${host}/${slug}` }
+}
+// Why a remote URL was rejected, WITHOUT echoing any part of it (a password may contain '@' or ':'): only the scheme,
+// whether a host passed validation, and the reason.
+function remoteReason(url) {
+  const u = String(url || '').trim()
+  if (!u) return 'empty remote'
+  const sm = u.match(/^([a-z][a-z0-9+.-]*):\/\//i)
+  const scheme = sm ? sm[1].toLowerCase() : (/^[^/:]+:/.test(u) ? 'scp-form' : 'local path / unknown')
+  const rest = sm ? u.slice(sm[0].length) : u
+  const auth = sm ? rest.split('/')[0] : rest.split(':')[0]
+  const hostPart = auth.includes('@') ? auth.slice(auth.lastIndexOf('@') + 1) : auth
+  const hostOk = HOST_RE.test(hostPart.replace(/:[0-9]{1,5}$/, '').toLowerCase())
+  const why = !['http', 'https', 'git', 'ssh', 'scp-form'].includes(scheme) ? 'unsupported scheme or form'
+    : (/^(https?|git)$/.test(scheme) && auth.includes('@')) ? 'userinfo (possible credentials) in the URL'
+    : (/^(https?|git)$/.test(scheme) && /:[0-9]+$/.test(auth)) ? 'a port in the URL'
+    : !hostOk ? 'invalid host' : 'invalid owner/repo path'
+  return `scheme ${scheme}, host ${hostOk ? 'valid' : 'invalid'}: ${why}`
+}
+// the gh rule every dispatch on the ship / PATCH paths gets (no bare gh anywhere)
+const ghRule = rid => `Run every gh command as ${GHX} (never a bare gh): gh pr / run / release / workflow subcommands with --repo '${rid.arg}'; gh repo view with the repository positional ('${rid.arg}', never --repo); gh api with --hostname '${rid.host}' and repos/${rid.slug}/... paths (never --repo).`
+const REMOTES = { type: 'object', properties: { repo_url: STR, lane_url: STR, push_urls: STRS, notes: STR }, required: ['repo_url', 'lane_url', 'push_urls'] }
+const sameId = (x, y) => x.host === y.host && x.slug.toLowerCase() === y.slug.toLowerCase()
+// -> { arg, slug, host, push_urls } or { why } (BLOCK). The run repo's and the lane's fetch remotes must parse and name the
+// same repository, AND every effective push URL of the lane's origin (git remote get-url --push --all, which applies
+// pushurl and pushInsteadOf / insteadOf) must parse to exactly that host/owner/repo: the push target is validated too.
+async function repoIdentity(tag, ph) {
+  const r = await agent(`Rote repository identity for ${UNIT} (${tag}): repo_url = the output of git -C ${REPO} remote get-url origin; lane_url = the output of git -C ${LANE} remote get-url origin; push_urls = every output line of git -C ${LANE} remote get-url --push --all origin (verbatim; "" / [] on error). Run nothing else. Return the envelope.`, { label: `repo identity (${tag})`, phase: ph, model: 'haiku', effort: 'low', schema: REMOTES })
+  if (!r) return { why: 'repository identity did not report' }
+  const a = parseRemote(r.repo_url), b = parseRemote(r.lane_url)
+  if (!a) return { why: `the run repository's origin remote was rejected (${remoteReason(r.repo_url)})` }
+  if (!b) return { why: `the lane's origin remote was rejected (${remoteReason(r.lane_url)})` }
+  if (!sameId(a, b)) return { why: `the lane fetches from ${b.arg}, not the run repository ${a.arg}` }
+  const pushes = arr(r.push_urls).map(x => String(x).trim()).filter(Boolean)
+  if (!pushes.length) return { why: 'the lane origin has no resolvable push URL' }
+  for (const [i, pu] of pushes.entries()) {
+    const c = parseRemote(pu)
+    if (!c) return { why: `the lane's push URL #${i + 1} was rejected (${remoteReason(pu)})` }
+    if (!sameId(c, b)) return { why: `the lane's push URL #${i + 1} targets ${c.arg}, not ${b.arg} (pushurl / pushInsteadOf redirect)` }
+  }
+  return { arg: b.arg, slug: b.slug, host: b.host, push_urls: pushes }
+}
+// The push itself goes to the remote NAME origin only after repoIdentity validated its effective push URLs, and the
+// pushing step re-reads them immediately before pushing and refuses unless they are byte-identical to the validated list
+// (a config change in between, or a rewrite, cannot slip through).
+const pushGuard = rid => `Immediately before pushing, run git -C ${LANE} remote get-url --push --all origin: its output lines must be exactly ${J(rid.push_urls)} (same lines, same order); if not, push nothing.`
+
 // Bounded: runs for the SHA must appear within CI_APPEAR_MIN and finish within CI_TOTAL_MIN, else BLOCKED with the
-// missing / pending checks named (a path-filtered workflow never leaves the unit waiting forever). `repo` (owner/name)
-// scopes every gh call when known (PATCH).
+// missing / pending checks named (a path-filtered workflow never leaves the unit waiting forever). `repo`
+// (host/owner/repo) scopes every gh call.
 const CI_APPEAR_MIN = 20, CI_TOTAL_MIN = 120
 async function ciWait(prNumber, head, repo) {
-  const R_ = repo ? ` --repo ${repo}` : ''
-  const p = `PR #${prNumber} (branch ${BR}${repo ? `, repository ${repo}` : ''}), expected head ${head}. Do NOT merge. Record START=$(date +%s); every wait below is bounded from START. gh pr view ${prNumber}${R_} --json headRefOid,title: if headRefOid is not ${head}, wait up to 5 min for it (the push may still be propagating), else return BLOCKED with notes "PR head <sha> != ${head}". Wait for every CI workflow run whose headSha is exactly ${head} (gh run list${R_} --branch ${BR} --json databaseId,headSha,status,conclusion,name every 30 s until runs for that SHA appear; runs on any other SHA never count; if none appear within ${CI_APPEAR_MIN} min of START, run gh pr view ${prNumber}${R_} --json statusCheckRollup and, when it lists no required check pending, continue with that rollup, else return BLOCKED with failing_check "no CI run appeared" and the pending check names in notes; gh run watch <id>${R_} --exit-status with Bash timeout 600000, repeated; never end your turn while CI runs; once ${CI_TOTAL_MIN} min have passed since START, stop waiting and return BLOCKED with failing_check "CI timeout" and the still-pending run / check names in notes). Then gh pr view ${prNumber}${R_} --json mergeable,mergeStateStatus,statusCheckRollup,headRefOid: READY only if MERGEABLE, mergeStateStatus CLEAN or HAS_HOOKS, every check SUCCESS / SKIPPED / NEUTRAL and headRefOid still ${head}; else BLOCKED with failing_check and the last 60 lines of gh run view <id>${R_} --log-failed in notes. If gh itself fails, set failure_class to quota|throttle|auth|timeout|error. Return the envelope (title exact, head = the full headRefOid).`
+  const R_ = repo ? ` --repo '${repo}'` : ''
+  const p = `PR #${prNumber} (branch ${BR}${repo ? `, repository ${repo}` : ''}), expected head ${head}. Do NOT merge. Record START=$(date +%s); every wait below is bounded from START. ${GHX} pr view ${prNumber}${R_} --json headRefOid,title: if headRefOid is not ${head}, wait up to 5 min for it (the push may still be propagating), else return BLOCKED with notes "PR head <sha> != ${head}". Wait for every CI workflow run whose headSha is exactly ${head} (${GHX} run list${R_} --branch ${BR} --json databaseId,headSha,status,conclusion,name every 30 s until runs for that SHA appear; runs on any other SHA never count; if none appear within ${CI_APPEAR_MIN} min of START, run ${GHX} pr view ${prNumber}${R_} --json statusCheckRollup and, when it lists no required check pending, continue with that rollup, else return BLOCKED with failing_check "no CI run appeared" and the pending check names in notes; ${GHX} run watch <id>${R_} --exit-status with Bash timeout 600000, repeated; never end your turn while CI runs; once ${CI_TOTAL_MIN} min have passed since START, stop waiting and return BLOCKED with failing_check "CI timeout" and the still-pending run / check names in notes). Then ${GHX} pr view ${prNumber}${R_} --json mergeable,mergeStateStatus,statusCheckRollup,headRefOid: READY only if MERGEABLE, mergeStateStatus CLEAN or HAS_HOOKS, every check SUCCESS / SKIPPED / NEUTRAL and headRefOid still ${head}; else BLOCKED with failing_check and the last 60 lines of ${GHX} run view <id>${R_} --log-failed in notes. If gh itself fails, set failure_class to quota|throttle|auth|timeout|error. Return the envelope (title exact, head = the full headRefOid).`
   const c = await callChain(`PR #${prNumber} CI wait`, ['haiku', 'sonnet'], p, { label: `wait CI #${prNumber}`, phase: 'Ship', effort: 'low', schema: RD })
   if (!c.r) return { status: 'BLOCKED', notes: `CI watcher failed (${c.class})`, failure_class: c.class }
   if (c.r.status === 'READY' && String(c.r.head || '') !== head) return Object.assign({}, c.r, { status: 'BLOCKED', notes: `CI READY reported for head ${c.r.head || 'unknown'}, not the pushed ${head}` })
@@ -1140,7 +1213,11 @@ Return the ids you wrote, one per line (or "none").`
   const gateLine = shippedOpen
     ? `Gate NOT clean (latest ${R}/gate-${U}-r*-consolidated.md); the operator ships anyway: ${A.shipOpenP1}`
     : `Gate ${g.verdict} (latest ${R}/gate-${U}-r*-consolidated.md)${g.verdict === 'DEGRADED' ? `; DEGRADED accepted by the operator: ${A.acceptDegraded}` : ''}.`
-  const prepP = `Ship ship-unit ${UNIT} from ${LANE}, branch ${BR}, part 1 of 2 (prepare). ${gateLine} Read ${SK}/ship/SKILL.md from disk and execute its flow against the repository's default branch (the branch ${BASE} came from), taking the recommended option wherever it would ask and listing those choices.${skip ? ` ${SHIP_SKIP} Do ONLY: merge the base branch, save the reviewed-tree snapshot, version bump, CHANGELOG entry, commit.` : ''} STOP before any push: do not push, do not create the PR (part 2 does that after the CHANGELOG fact-check). If merging the base branch conflicts beyond VERSION / CHANGELOG ordering, run git -C ${LANE} merge --abort and return status BLOCKED with merge_conflict true (an Opus 5.5 dispatch resolves it). Commit trailers "${TRAILER}". CHANGELOG prose states only what the code does. code_changed = true only when, because of a conflict resolution or an edit YOU made, a path's content now differs from the gated head ${gatedHead} (VERSION, CHANGELOG and .md/.txt/.rst prose excepted; any package.json change, a version bump included, counts); code that arrived cleanly from the base branch does not count.${opt(A.shipExtra, x => ' ' + x)} Do not merge. Return the envelope (status COMMITTED or BLOCKED; head; version; code_changed; changed_files; decisions_auto_taken;${skip ? ' reviewed_tree = the gstack-wtree output you saved;' : ''} failure_class when BLOCKED).`
+  // the repository is resolved BEFORE /ship prepare (lane origin remote), so prepare's base-branch lookups, the push, the
+  // PR and every gh call target it (ghRule: no bare gh anywhere in the ship flow)
+  const rid = await repoIdentity('ship', 'Ship')
+  if (rid.why) return finish({ stopped: `BLOCKED: ${rid.why}`, final: cons, failure_class: 'error' })
+  const prepP = `Ship ship-unit ${UNIT} from ${LANE}, branch ${BR}, part 1 of 2 (prepare). ${gateLine} Read ${SK}/ship/SKILL.md from disk and execute its flow against the repository's default branch (the branch ${BASE} came from), taking the recommended option wherever it would ask and listing those choices. Repository: ${rid.arg}. ${ghRule(rid)}${skip ? ` ${SHIP_SKIP} Do ONLY: merge the base branch, save the reviewed-tree snapshot, version bump, CHANGELOG entry, commit.` : ''} STOP before any push: do not push, do not create the PR (part 2 does that after the CHANGELOG fact-check). If merging the base branch conflicts beyond VERSION / CHANGELOG ordering, run git -C ${LANE} merge --abort and return status BLOCKED with merge_conflict true (an Opus 5.5 dispatch resolves it). Commit trailers "${TRAILER}". CHANGELOG prose states only what the code does. code_changed = true only when, because of a conflict resolution or an edit YOU made, a path's content now differs from the gated head ${gatedHead} (VERSION, CHANGELOG and .md/.txt/.rst prose excepted; any package.json change, a version bump included, counts); code that arrived cleanly from the base branch does not count.${opt(A.shipExtra, x => ' ' + x)} Do not merge. Return the envelope (status COMMITTED or BLOCKED; head; version; code_changed; changed_files; decisions_auto_taken;${skip ? ' reviewed_tree = the gstack-wtree output you saved;' : ''} failure_class when BLOCKED).`
   let prep = await callChain(`${UNIT} /ship prepare`, uniq([shipModel, skip ? 'sonnet' : 'claude-opus-4-8']), prepP, { label: `${UNIT} /ship prepare`, phase: 'Ship', effort: shipEffort, schema: SHIPPREP })
   if (prep.r && prep.r.status === 'BLOCKED' && prep.r.merge_conflict && prep.model !== 'claude-opus-5-5') { // the skill: Opus 5.5 when /ship must resolve a merge conflict
     incidents.push({ step: `${UNIT} /ship prepare`, class: 'merge_conflict', note: 'base merge conflicted; re-dispatched on claude-opus-5-5' })
@@ -1187,17 +1264,28 @@ ${INV_SH}`
   const lateCode = gd.g.files_since.filter(f => !BOOKKEEP_RE.test(f))
   if (lateCode.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${fl.head}: ${lateCode.join(', ')}`, final: cons })
   const pushHead = gd.g.head
-  const pubP = `Ship ship-unit ${UNIT} from ${LANE}, branch ${BR}, part 2 of 2 (publish). Continue the /ship flow of ${SK}/ship/SKILL.md from its push step and do nothing else: first confirm git -C ${LANE} rev-parse HEAD is exactly ${pushHead} (else return BLOCKED and push nothing); push ${BR} (fast-forward; never force), create the PR against the default branch, bind CI. Make no new commit.${skip ? ' ' + SHIP_SKIP : ''} PR body ends with "${PR_FOOTER}" and names: ship-unit ${UNIT}, tasks ${IDS.join(', ') || '(prebuilt)'},${opt(A.shipNotes, x => ' ' + x)} the gate verdict ${g.verdict} with members_present ${J(cons.members_present)}, the full gate rounds ${J(rounds.filter(x => x.round).map(x => `r${x.round}:${x.verdict} ${x.members}`))} (delta reviews are not rounds; note every substitution and ABSENT member), and the deferred ledger ids: ${String(ledger.r).trim()}.${shippedOpen ? ' The PR body MUST carry a "Known issues (shipped open)" section naming each kept P1, its ledger id and its upgrade trigger.' : ''}${opt(A.shipExtra, x => ' ' + x)} Do NOT merge. Return the envelope: status PUBLISHED only when git push exited 0 AND the PR exists for ${BR} at head ${pushHead}; otherwise status BLOCKED with the failing command and its error in notes (a pre-existing PR never makes a failed push PUBLISHED); pushed = whether git push exited 0; pr_number; head = git -C ${LANE} rev-parse HEAD.`
+  const pubP = `Ship ship-unit ${UNIT} from ${LANE}, branch ${BR}, part 2 of 2 (publish). Continue the /ship flow of ${SK}/ship/SKILL.md from its push step and do nothing else: first confirm git -C ${LANE} rev-parse HEAD is exactly ${pushHead} (else return BLOCKED and push nothing); ${pushGuard(rid)} (else return BLOCKED with notes "push URL changed"); push ${BR} to origin (fast-forward; never force), create the PR against the default branch of ${rid.arg}, bind CI. ${ghRule(rid)} Make no new commit.${skip ? ' ' + SHIP_SKIP : ''} PR body ends with "${PR_FOOTER}" and names: ship-unit ${UNIT}, tasks ${IDS.join(', ') || '(prebuilt)'},${opt(A.shipNotes, x => ' ' + x)} the gate verdict ${g.verdict} with members_present ${J(cons.members_present)}, the full gate rounds ${J(rounds.filter(x => x.round).map(x => `r${x.round}:${x.verdict} ${x.members}`))} (delta reviews are not rounds; note every substitution and ABSENT member), and the deferred ledger ids: ${String(ledger.r).trim()}.${shippedOpen ? ' The PR body MUST carry a "Known issues (shipped open)" section naming each kept P1, its ledger id and its upgrade trigger.' : ''}${opt(A.shipExtra, x => ' ' + x)} Do NOT merge. Return the envelope: status PUBLISHED only when git push exited 0 AND the PR exists for ${BR} at head ${pushHead}; otherwise status BLOCKED with the failing command and its error in notes (a pre-existing PR never makes a failed push PUBLISHED); pushed = whether git push exited 0; pr_number; head = git -C ${LANE} rev-parse HEAD.`
   const pub = await callChain(`${UNIT} /ship publish`, uniq([shipModel, skip ? 'sonnet' : 'claude-opus-4-8']), pubP, { label: `${UNIT} /ship publish`, phase: 'Ship', effort: shipEffort, schema: PUB })
   if (!pub.r) return finish({ stopped: `BLOCKED: /ship publish failed (${pub.class})`, failure_class: pub.class, final: cons })
   // ruling R4: publication needs an explicit success token; a BLOCKED / failed push never counts, even if a PR exists
   if (pub.r.status !== 'PUBLISHED' || pub.r.pushed !== true || pub.r.head !== pushHead) return finish({ stopped: `BLOCKED: /ship publish not confirmed (status ${pub.r.status}, pushed ${pub.r.pushed}, head ${pub.r.head || '?'}, expected ${pushHead}): ${pub.r.notes || ''}`.slice(0, 400), ship: pub.r, final: cons, failure_class: 'error' })
-  const pr = await agent(`gh pr list --head ${BR} --state open --json number,headRefOid,title --limit 1 -> pr, head (full SHA), title (exact). Return pr 0 when none.${opt(A.shipAttempt, a => ` (ship attempt ${a})`)}`, { label: 'find PR', phase: 'Ship', model: 'haiku', effort: 'low', schema: PR })
-  if (!pr || !pr.pr) return finish({ stopped: 'no PR after /ship publish', ship: pub.r, final: cons })
-  if (pr.head !== pushHead) return finish({ stopped: `BLOCKED: PR #${pr.pr} head ${pr.head} is not the guarded head ${pushHead}`, ship: pub.r, final: cons, pr })
+  // PR identity (parity with PATCH): the PR number the publish step returned, verified in the run's repository by
+  // GHX pr view --repo <slug> (slug from the lane's origin remote via repoIdentity, exactly as patchFlow): OPEN, same-repo head, head branch == BR, head SHA == pushed
+  // head. Any mismatch or gh failure -> BLOCKED before the PR is recorded or its CI is awaited.
+  const prn = Number(pub.r.pr_number)
+  if (!(prn > 0)) return finish({ stopped: 'BLOCKED: /ship publish returned no PR number', ship: pub.r, final: cons, failure_class: 'error' })
+  const pr = await agent(`Rote PR identity check for ${UNIT} (run the command and copy its output; use no other gh call). ${GHX} pr view ${prn} --repo '${rid.arg}' --json number,state,isCrossRepository,headRepository,headRepositoryOwner,headRefName,headRefOid,title -> pr = number, state, cross_repo = isCrossRepository, head_repo = headRepositoryOwner.login + "/" + headRepository.name, head_ref = headRefName, head = headRefOid (full SHA), title (exact). If any gh call fails, return pr 0 and the error in notes.${opt(A.shipAttempt, a => ` (ship attempt ${a})`)}`, { label: 'find PR', phase: 'Ship', model: 'haiku', effort: 'low', schema: SHIPPR })
+  if (!pr) return finish({ stopped: `BLOCKED: PR #${prn} identity check did not report`, ship: pub.r, final: cons, failure_class: 'error' })
+  const slug = rid.slug
+  const prWhy = Number(pr.pr) !== prn ? `gh pr view returned #${pr.pr || 0}, not the published #${prn}${pr.notes ? ' (' + pr.notes + ')' : ''}`
+    : up1(pr.state) !== 'OPEN' ? `PR #${prn} is ${pr.state || 'unknown'}, not OPEN`
+    : pr.cross_repo !== false || String(pr.head_repo || '').toLowerCase() !== slug.toLowerCase() ? `PR #${prn} head lives in ${pr.head_repo || 'unknown'} (cross_repo ${pr.cross_repo}), not ${slug}`
+    : pr.head_ref !== BR ? `PR #${prn} head branch is ${pr.head_ref || 'unknown'}, not ${BR}`
+    : pr.head !== pushHead ? `PR #${prn} head ${pr.head || 'unknown'} is not the guarded head ${pushHead}` : ''
+  if (prWhy) return finish({ stopped: `BLOCKED: ${prWhy}`, ship: pub.r, final: cons, pr, failure_class: 'error' })
   // run ownership: record this unit's PR in state.json; a later PATCH proves the PR belongs to this run against it
-  if (!(await writeState(`Ship: PR #${pr.pr}`, [], { prs: { [UNIT_DIR]: { pr: pr.pr, branch: BR, head: pushHead } } }))) return finish({ stopped: `BLOCKED: PR #${pr.pr} published but not recorded in state.json prs (a later PATCH could not prove ownership); record it, then resume`, ship: pub.r, final: cons, pr, failure_class: 'error' })
-  const ready = await ciWait(pr.pr, pushHead)
+  if (!(await writeState(`Ship: PR #${pr.pr}`, [], { prs: { [UNIT_DIR]: { pr: pr.pr, branch: BR, head: pushHead, repo: rid.arg } } }))) return finish({ stopped: `BLOCKED: PR #${pr.pr} published but not recorded in state.json prs (a later PATCH could not prove ownership); record it, then resume`, ship: pub.r, final: cons, pr, failure_class: 'error' })
+  const ready = await ciWait(pr.pr, pushHead, rid.arg)
   return finish({ status: ready.status, stopped: ready.status === 'READY' ? undefined : `CI: ${ready.failing_check || ready.notes}`, failure_class: ready.failure_class, integ, final: cons, ship: prep.r, ship_delta: shipDelta, factcheck: fc.r, pr, ready, gated_head: gatedHead, pushed_head: pushHead })
 }
 
@@ -1313,12 +1401,14 @@ async function patchFlow() {
     if (!prevT || rankT(tier) > rankT(prevT.tier)) byId[id] = { id, tier, impl: f.impl === 'codex' ? 'codex' : 'claude', model: f.model, effort: f.effort } // several fixes: the highest tier wins
     if (!OWNERS.includes(id)) OWNERS.splice(OWNERS.length - 1, 0, id)
   }
-  // repository identity: every gh call is scoped with --repo <owner/name> of the run's repo, the lane must push to that
-  // same repository, and the PR's head must live in it (not a fork that happens to use the same branch name)
-  const st = await agent(`PATCH setup for PR #${N} (${UNIT}, rote: run the commands and copy their output). 0) repo_slug = (cd ${REPO} && gh repo view --json nameWithOwner -q .nameWithOwner); lane_slug = (cd ${LANE} && gh repo view --json nameWithOwner -q .nameWithOwner) (verbatim; "" on error); recorded_pr / recorded_branch = jq -r --arg k ${J(UNIT_DIR)} '.prs[$k].pr // 0', and '.prs[$k].branch // ""', of ${RUN}/state.json; when state.json is missing or has no prs entry for that key, read the same from the archived ${RUN}/state.final.json (0 / "" when neither has it). 1) gh pr view ${N} --repo <repo_slug> --json state,headRefName,isCrossRepository,headRepository,headRepositoryOwner -> state, head_ref (verbatim), cross_repo = isCrossRepository, head_repo = headRepositoryOwner.login + "/" + headRepository.name. 2) The lane ${LANE} must have ${BR} checked out (git -C ${LANE} rev-parse --abbrev-ref HEAD) with an empty git -C ${LANE} status --porcelain; else return head "DIRTY" and notes saying which. 3) git -C ${LANE} fetch origin ${BR}; git -C ${LANE} merge --ff-only origin/${BR} (on failure return head "NOT_FF"). 4) head = git -C ${LANE} rev-parse HEAD; remote_head = git -C ${LANE} rev-parse origin/${BR}. Return the envelope.`, { label: `PATCH #${N} setup`, phase: 'Fix', model: 'haiku', effort: 'low', schema: PSETUP })
+  // repository identity: the slug comes from the lane's origin remote (repoIdentity; never gh repo view, which GH_REPO /
+  // GH_HOST can redirect), the run repo's origin must name the same repository, every gh call is GHX ... --repo <slug>,
+  // and the PR's head must live in it (not a fork that happens to use the same branch name)
+  const rid = await repoIdentity(`PATCH #${N}`, 'Fix')
+  if (rid.why) return finish({ stopped: `BLOCKED: PATCH repository identity unverified: ${rid.why}`, failure_class: 'error' })
+  const st = await agent(`PATCH setup for PR #${N} (${UNIT}, rote: run the commands and copy their output). 0) recorded_pr / recorded_branch = jq -r --arg k ${J(UNIT_DIR)} '.prs[$k].pr // 0', and '.prs[$k].branch // ""', of ${RUN}/state.json; when state.json is missing or has no prs entry for that key, read the same from the archived ${RUN}/state.final.json (0 / "" when neither has it). 1) ${GHX} pr view ${N} --repo '${rid.arg}' --json state,headRefName,isCrossRepository,headRepository,headRepositoryOwner -> state, head_ref (verbatim), cross_repo = isCrossRepository, head_repo = headRepositoryOwner.login + "/" + headRepository.name. 2) The lane ${LANE} must have ${BR} checked out (git -C ${LANE} rev-parse --abbrev-ref HEAD) with an empty git -C ${LANE} status --porcelain; else return head "DIRTY" and notes saying which. 3) git -C ${LANE} fetch origin ${BR}; git -C ${LANE} merge --ff-only origin/${BR} (on failure return head "NOT_FF"). 4) head = git -C ${LANE} rev-parse HEAD; remote_head = git -C ${LANE} rev-parse origin/${BR}. Return the envelope.`, { label: `PATCH #${N} setup`, phase: 'Fix', model: 'haiku', effort: 'low', schema: PSETUP })
   if (!st) return finish({ stopped: 'BLOCKED: PATCH setup did not report', failure_class: 'error' })
-  const slug = String(st.repo_slug || '')
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slug) || st.lane_slug !== slug) return finish({ stopped: `BLOCKED: PATCH repository identity unverified (run repo ${slug || 'unknown'}, lane pushes to ${st.lane_slug || 'unknown'})` })
+  const slug = rid.slug
   // run ownership: the PR must be the one this run recorded for this unit when it shipped (state.json prs)
   if (Number(st.recorded_pr) !== Number(N) || st.recorded_branch !== BR) return finish({ stopped: `BLOCKED: PR #${N} is not recorded as ${UNIT}'s PR in ${RUN}/state.json (recorded: #${st.recorded_pr || 'none'} on ${st.recorded_branch || 'none'}); PATCH only fixes this run's own PRs` })
   if (st.cross_repo !== false || String(st.head_repo || '').toLowerCase() !== slug.toLowerCase()) return finish({ stopped: `BLOCKED: PR #${N} head lives in ${st.head_repo || 'unknown'} (cross_repo ${st.cross_repo}), not the run's repository ${slug}` })
@@ -1355,9 +1445,9 @@ async function patchFlow() {
   const late = gd.g.files_since.filter(f => !PROSE_RE.test(f))
   if (late.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${hf.head}: ${late.join(', ')}`, review })
   const want = gd.g.head
-  const ps = await agent(`Rote PATCH push for PR #${N}. 1) git -C ${LANE} rev-parse HEAD must be exactly ${want}; if not, push nothing and return exit_code 3. 2) git -C ${LANE} push origin HEAD:refs/heads/${BR} (fast-forward only: never --force, never a new branch, never a new PR, never a version bump); exit_code = its exit status. 3) local_head = git -C ${LANE} rev-parse HEAD; remote_head = the SHA from git -C ${LANE} ls-remote origin refs/heads/${BR}. Return the envelope.`, { label: `PATCH push #${N}`, phase: 'Ship', model: 'haiku', effort: 'low', schema: PUSH })
+  const ps = await agent(`Rote PATCH push for PR #${N}. 1) git -C ${LANE} rev-parse HEAD must be exactly ${want}; if not, push nothing and return exit_code 3. ${pushGuard(rid)} (else return exit_code 4). 2) git -C ${LANE} push origin HEAD:refs/heads/${BR} (fast-forward only: never --force, never a new branch, never a new PR, never a version bump); exit_code = its exit status. 3) local_head = git -C ${LANE} rev-parse HEAD; remote_head = the SHA from git -C ${LANE} ls-remote origin refs/heads/${BR}. Return the envelope.`, { label: `PATCH push #${N}`, phase: 'Ship', model: 'haiku', effort: 'low', schema: PUSH })
   if (!ps || Number(ps.exit_code) !== 0 || ps.local_head !== want || ps.remote_head !== want) return finish({ stopped: `BLOCKED: PATCH push not confirmed (exit ${ps ? ps.exit_code : 'none'}, local ${ps ? ps.local_head : '?'}, remote ${ps ? ps.remote_head : '?'}, expected ${want})`, review, push: ps, failure_class: 'error' })
-  const ready = await ciWait(N, want, slug)
+  const ready = await ciWait(N, want, rid.arg)
   return finish({ status: ready.status, stopped: ready.status === 'READY' ? undefined : `CI: ${ready.failing_check || ready.notes}`, failure_class: ready.failure_class, pr: N, head: want, review, ready })
 }
 const up1 = x => String(x || '').toUpperCase()

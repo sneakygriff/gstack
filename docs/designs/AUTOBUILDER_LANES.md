@@ -457,8 +457,8 @@ Routing policy only: the helper contract above, including every L4 security rule
   `lanes.json` would let Sol substitute on an Astra quota; that is a helper follow-up. The step-0 probe
   reads L3's status (Luna) as Astra's and never spends an Astra message.
 - **Round-2 additions (S1-S3).** The sensitive-path classifier over-matches: case-insensitive tokens at a
-  path-segment or camelCase start (o?auth/authn/authz/authori[sz]/authenticat, security, session, permission, rbac,
-  acl, payment, billing, checkout, stripe, secret, crypto, migration, pii, gdpr, erasure); only `author*`
+  path-segment or camelCase/acronym start, the single source being `SENSITIVE_TOKEN_RE` in `autobuilder-unit.js` (auth*,
+  login/password/credentials/tokens/sso, session/cookies/csrf, secrets, keys/certs, admin/roles, payments, migrations, PII); only `author*`
   is excluded; `sensitiveGlobs`, when given, REPLACES both this classifier and the structural sensitive globs. A false positive only upgrades LITE to FULL. Prose is
   `.md`/`.txt`/`.rst` only (`.mdx` is code). Seat C counts only an exact allowlisted model id
   (`claude-fable-5-1`/`fable`, `claude-opus-5-5`, `claude-opus-4-8`), checked identically on L1 and L2.

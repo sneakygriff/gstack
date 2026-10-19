@@ -489,7 +489,7 @@ Read/Write/Edit/Glob/Grep because you are physically not the worker. So:
   / `summary` / `adjudicate` / `commit` / `worktree` — the external-lane launcher; the forum recipes
   are built on it and only its one-line outputs enter your context, never a transcript),
   `gstack-review-log` / telemetry, step 0's run-workspace setup and preflight, `state.json` writes,
-  copying the unit script to the session scratchpad, a policy-approved `gh pr merge --squash`, and the
+  copying the unit script to the session scratchpad, a policy-approved merge (step 0, policy 1), and the
   SHIP_METER measurement (`git rev-parse` / `git diff --shortstat` / `git ls-files` — number-emitting
   commands that carry no file content).** Every repo read, build, and file mutation happens inside a
   subagent, a unit workflow, or an external lane. You do not `cat`, `grep`, content-level `git diff`,
@@ -776,7 +776,7 @@ record the shared test-DB port and the private-DB helper the briefs must use.
 questions up front so the loop never parks on them: decision-brief format, split across calls per the
 preamble's 5+ rule. Record the answers in the audit trail and `state.json`.
 1. **Merge-on-green** — after a CLEAN (or operator-accepted DEGRADED) gate plus green CI, YOU
-   squash-merge (`gh pr merge --squash`) and continue: yes / no (no recommended default; ask).
+   squash-merge (`env -u GH_REPO -u GH_HOST gh pr merge <n> --squash --repo '<prs[unit].repo>'`) and continue: yes / no (no default; ask).
 2. **Max full gate rounds before asking** — default 3, plus ONE automatic 4th round when round 3
    found a NEW `[P1]` whose fix is in scope.
 3. **Cut rule** — the pre-agreed ship-unit boundaries fire automatically at the meter: yes / ask.
@@ -809,8 +809,8 @@ any lane was absent/cooling in the last roster, run `gstack-lane probe --run-dir
 - **FULL** — any T2/T3 task, the FINAL unit, OR any sensitive path, OR more than 400 production LOC
   (default). Sensitive = auth, security boundary, migrations, public interfaces/APIs, payments,
   PII/erasure; the classifier OVER-matches (case-insensitive tokens at a path-segment or camelCase start:
-  o?auth/authn/authz/authori[sz]/authenticat, security, session, permission, rbac, acl, payment, billing, checkout,
-  stripe, secret, crypto, migration, pii, gdpr, erasure; only `author*` is excluded; `sensitiveGlobs`
+  the token set in `autobuilder-unit.js` SENSITIVE_TOKEN_RE: auth*, session, secrets, keys/certs, admin/roles, payments,
+  migrations, PII; only `author*` is excluded; `sensitiveGlobs`
   REPLACES it and the structural globs) — a false positive only upgrades LITE to FULL. Gate: Seat C + Seat X; Docker in round 1
   (then path-scoped); round-1 mutation probe; up to the packet's max rounds.
 - **LITE** — at most 400 production LOC, only T0/T1 tasks, no sensitive path, never the FINAL unit. Gate: ONE round of
