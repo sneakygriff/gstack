@@ -75,7 +75,21 @@ export interface Sandbox {
 }
 export interface Call { n: number; argv: string[]; env: Record<string, string>; envnames: string[]; cwd: string; stdin: string; rec: string }
 export type RunOpts = Record<string, string | undefined> & { out?: string; cwd?: string; prompt?: string };
-export interface CodexOpts { text?: string | null; model?: string | null; effort?: string; fail?: string; completed?: boolean; rc?: number; stderr?: string; pre?: string; transient?: string[] }
+export interface CodexOpts {
+  text?: string | null; model?: string | null; effort?: string; fail?: string; completed?: boolean; rc?: number; stderr?: string; pre?: string; transient?: string[];
+  /** v1.8.1: rollout `event_msg/token_count` records, each carrying this `rate_limits` object (a string = a raw rollout line). */
+  rateLimits?: (object | string)[];
+}
+/** A `rate_limits` snapshot shaped like codex 0.159.3's (limit_id "codex", one weekly primary window). */
+export function rateLimits(o: { used: number; resetsAt?: number | null; balance?: string | null; limitId?: string; reached?: string | null } ): object {
+  return {
+    limit_id: o.limitId ?? 'codex', limit_name: null,
+    primary: { used_percent: o.used, window_minutes: 10080, ...(o.resetsAt === null ? {} : { resets_at: o.resetsAt ?? Math.floor(Date.now() / 1000) + 3 * 86400 }) },
+    secondary: null,
+    ...(o.balance === null ? {} : { credits: { has_credits: true, unlimited: false, balance: o.balance ?? '60539.7584590000' } }),
+    individual_limit: null, spend_control_reached: null, plan_type: 'pro', rate_limit_reached_type: o.reached ?? null,
+  };
+}
 
 export const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 export const flagValue = (argv: string[], flag: string) => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : undefined; };
@@ -106,6 +120,10 @@ export function codexStep(o: CodexOpts = {}): string {
   if (o.model !== null) {
     const rollout = JSON.stringify({ timestamp: '2026-10-11T00:00:00.000Z', type: 'turn_context', payload: { model: o.model ?? 'gpt-6.1-sol', effort: o.effort ?? 'high' } });
     lines.push('mkdir -p "$CODEX_HOME/sessions/2026/10/11"', `printf '%s\\n' ${sq(rollout)} > "$CODEX_HOME/sessions/2026/10/11/rollout-2026-10-11T00-00-00-${thread}.jsonl"`);
+    (o.rateLimits ?? []).forEach((rl, i) => {
+      const rec = typeof rl === 'string' ? rl : JSON.stringify({ timestamp: new Date(Date.now() + i).toISOString(), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: rl } });
+      lines.push(`printf '%s\\n' ${sq(rec)} >> "$CODEX_HOME/sessions/2026/10/11/rollout-2026-10-11T00-00-00-${thread}.jsonl"`);
+    });
   }
   const ev: object[] = [{ type: 'thread.started', thread_id: thread }, { type: 'turn.started' }];
   for (const t of o.transient ?? []) ev.push({ type: 'error', message: t });

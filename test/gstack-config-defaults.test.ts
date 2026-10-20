@@ -311,6 +311,27 @@ describe('autobuilder lane keys (bin/gstack-lane, /autobuilder-loop v1.7.0)', ()
     }
   });
 
+  test('codex_allow_credit_spend (v1.8.1 credit guard) defaults to false, accepts exactly true/false, and REJECTS anything else', () => {
+    const { dir, run } = fresh();
+    try {
+      expect(run(['get', 'codex_allow_credit_spend'])).toMatchObject({ code: 0, out: 'false' });
+      for (const ok of ['true', 'false', 'true']) {
+        expect(run(['set', 'codex_allow_credit_spend', ok]).code).toBe(0);
+        expect(run(['get', 'codex_allow_credit_spend']).out).toBe(ok);
+      }
+      for (const bad of ['yes', '1', 'TRUE', 'on', ' true', 'true\nfalse', 'false\ntrue']) {
+        const r = run(['set', 'codex_allow_credit_spend', bad]);
+        expect({ bad, code: r.code }).toEqual({ bad, code: 1 });
+        expect(r.err).toContain('not recognized');
+      }
+      expect(run(['get', 'codex_allow_credit_spend']).out).toBe('true');
+      for (const verb of ['list', 'defaults']) expect(run([verb]).out).toMatch(/codex_allow_credit_spend:\s+(false|true)/);
+      expect(fs.readFileSync(path.join(dir, 'config.yaml'), 'utf-8')).toContain('# codex_allow_credit_spend: false');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('both keys are enumerated by list/defaults and documented in the annotated header', () => {
     const { dir, run } = fresh();
     try {

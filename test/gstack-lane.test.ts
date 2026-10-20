@@ -12,7 +12,7 @@ import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  LANE, CONFIG, OK_CLAUDE, OK_CODEX, FIX_OK, FIX_NOAUTH, codexStep, flagValue, real, mode, makeLaneHarness,
+  LANE, CONFIG, OK_CLAUDE, OK_CODEX, FIX_OK, FIX_NOAUTH, codexStep, flagValue, real, mode, makeLaneHarness, rateLimits, sq,
 } from './helpers/gstack-lane-harness';
 
 const H = makeLaneHarness('gstack-lane');
@@ -530,6 +530,754 @@ describe('probe', () => {
     expect(j.l4.status).toBe('cooling');
     expect(calls(sb, 'codex')).toEqual([]);
   });
+});
+
+describe('v1.8.1 Codex credit guard (shared `codex` bucket, codex_allow_credit_spend)', () => {
+  const GUARD = 'codex bucket exhausted (100%); credit spend not allowed — set codex_allow_credit_spend=true to allow';
+  const isoS = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const resetIn = (days: number) => Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const base = { lane: 'l3', mode: 'impl', model: 'gpt-6-astra', effort: 'high' };
+  const summaryOf = (sb: ReturnType<typeof mkSandbox>, out: string) => lane(sb, ['summary', '--out', out]).out.trim();
+  const setConfig = (sb: ReturnType<typeof mkSandbox>, line: string) => fs.appendFileSync(path.join(sb.dir, 'state', 'config.yaml'), `${line}\n`);
+
+  test('below 90%: the snapshot is recorded (status + lanes.json), shown on the summary line, no warning, no guard', () => {
+    const sb = mkSandbox();
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 40, resetsAt: reset }), rateLimits({ used: 85, resetsAt: reset })] }));
+    const r = run(sb, base);
+    expect(r.code).toBe(0);
+    const s = r.status();
+    expect(s.class).toBe('ok');
+    expect(s.bucket).toEqual({ limit_id: 'codex', used_percent: 85, resets_at: isoS(reset * 1000), credits_balance: 60539.758459,
+      rate_limit_reached_type: null, observed_at: expect.any(String) });
+    for (const k of ['bucket_warning', 'credit_guard', 'credits_spent']) expect(s).not.toHaveProperty(k);
+    expect(r.err).not.toContain('warning');
+    const l3 = lanesOf(sb).l3;
+    expect(l3).toMatchObject({ status: 'ok', bucket: { used_percent: 85, resets_at: isoS(reset * 1000) } });
+    expect(l3).not.toHaveProperty('bucket_warning');
+    const line = summaryOf(sb, r.outPath);
+    expect(line).toContain(`bucket=85% resets=${isoS(reset * 1000)}`);
+    expect(line).not.toContain('warning');
+    expect(r.out.trim()).toBe(line);
+  });
+
+  test('92%: ONE warning per bucket window (probe output first, then not again on the run); a new window warns again', () => {
+    const sb = mkSandbox();
+    const reset = resetIn(2);
+    const warn = `codex bucket at 92%; at 100% L3 cools until ${isoS(reset * 1000)} unless codex_allow_credit_spend=true`;
+    step(sb, 'codex', codexStep({ model: 'gpt-6-luna', effort: 'low', text: 'OK', rateLimits: [rateLimits({ used: 92, resetsAt: reset })] }), 1);
+    const p = lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3']);
+    expect(p.code).toBe(0);
+    expect(p.out).toContain(`l3: ok`);
+    expect(p.out).toContain(`bucket=92% resets=${isoS(reset * 1000)}`);
+    expect(p.out).toContain(`warning: ${warn}`);
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'ok', bucket_warning: warn, bucket_warned: `codex@${isoS(reset * 1000)}` });
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 93, resetsAt: reset })] }), 2);
+    const r = run(sb, base);
+    expect(r.code).toBe(0);
+    expect(r.status()).not.toHaveProperty('bucket_warning');
+    expect(r.err).not.toContain('warning');
+    expect(summaryOf(sb, r.outPath)).not.toContain('warning');
+    expect(lanesOf(sb).l3).not.toHaveProperty('bucket_warning'); // cleared by the next update: the probe line no longer repeats it
+    step(sb, 'codex', codexStep({ model: 'gpt-6-luna', effort: 'low', text: 'OK', rateLimits: [rateLimits({ used: 94, resetsAt: reset })] }), 3);
+    const p2 = lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3']);
+    expect(p2.out).toContain('bucket=94% resets=');
+    expect(p2.out).not.toContain('warning');
+    const reset2 = resetIn(6);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 90, resetsAt: reset2 })] }), 4);
+    const r2 = run(sb, base);
+    expect(r2.status().bucket_warning).toBe(`codex bucket at 90%; at 100% L3 cools until ${isoS(reset2 * 1000)} unless codex_allow_credit_spend=true`);
+    expect(r2.err).toContain('gstack-lane: warning: codex bucket at 90%');
+    expect(summaryOf(sb, r2.outPath)).toContain(`warning: codex bucket at 90%`);
+  }, 30_000);
+
+  test('100% without the opt-in: the observing run keeps its class; L3 cools until resets_at (quota); the NEXT run is refused cooling', () => {
+    const sb = mkSandbox();
+    const reset = resetIn(4);
+    step(sb, 'codex', codexStep({ text: 'REVIEW_COMPLETE: findings=0', model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 99, resetsAt: reset }), rateLimits({ used: 100, resetsAt: reset })] }));
+    const r = run(sb, { ...base, mode: 'review' });
+    expect(r.code).toBe(0); // it already ran (on credits): its own result stands
+    const s = r.status();
+    expect(s).toMatchObject({ class: 'ok', published: true, credit_guard: 'cooling', bucket: { used_percent: 100, resets_at: isoS(reset * 1000) } });
+    expect(s.lane_status).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), reason: GUARD, consecutive_quota: 1 });
+    expect(r.err).toContain(GUARD);
+    expect(summaryOf(sb, r.outPath)).toContain(`bucket=100% resets=${isoS(reset * 1000)} credit_guard=cooling`);
+    const l3 = lanesOf(sb).l3;
+    expect(l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), reason: GUARD });
+    expect(Date.parse(l3.last_event_at)).toBeGreaterThanOrEqual(Date.parse(s.attempt_started_at));
+    const n = calls(sb, 'codex').length;
+    const next = run(sb, base);
+    expect(next.code).toBe(4);
+    expect(next.status()).toMatchObject({ class: 'quota', skipped: 'cooling', exit: null });
+    expect(next.status()).not.toHaveProperty('bucket'); // nothing invoked → nothing read
+    expect(calls(sb, 'codex').length).toBe(n);
+    expect(lane(sb, ['adjudicate', '--out', next.outPath, '--seat', 'codex', '--gate-class', 'ordinary', '--reviewed-sha', 'a'.repeat(40), '--requested-model', 'gpt-6-astra']).out)
+      .toContain('VERDICT=ABSENT reason=quota_skipped_cooling');
+    // the probe sees it too and does not hammer the lane
+    const p = lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3']);
+    expect(p.out).toMatch(new RegExp(`l3: cooling until ${isoS(reset * 1000)} — still cooling.*bucket=100% resets=`));
+    expect(calls(sb, 'codex').length).toBe(n);
+    // a usage-limit reached type alone triggers it; a hand-edited non-literal opt-in does not count
+    const sb2 = mkSandbox();
+    setConfig(sb2, 'codex_allow_credit_spend: yes');
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-luna', effort: 'low', text: 'OK', rateLimits: [rateLimits({ used: 97, resetsAt: reset, reached: 'workspace_member_usage_limit_reached' })] }));
+    expect(lane(sb2, ['probe', '--run-dir', sb2.run, '--lanes', 'l3']).out).toContain(`l3: cooling until ${isoS(reset * 1000)}`);
+    expect(lanesOf(sb2).l3).toMatchObject({ status: 'cooling', reason: GUARD, next_probe_at: isoS(reset * 1000) });
+  }, 30_000);
+
+  test('100% WITH codex_allow_credit_spend=true: no cooling, the next run is invoked', () => {
+    const sb = mkSandbox();
+    setConfig(sb, 'codex_allow_credit_spend: true');
+    const reset = resetIn(4);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const r = run(sb, base);
+    expect(r.code).toBe(0);
+    expect(r.status()).toMatchObject({ class: 'ok', credit_guard: 'allowed' });
+    expect(r.err).toContain('codex_allow_credit_spend=true');
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'ok', next_probe_at: null, consecutive_quota: 0, bucket: { used_percent: 100 } });
+    const n = calls(sb, 'codex').length;
+    expect(run(sb, base).code).toBe(0);
+    expect(calls(sb, 'codex').length).toBe(n + 1);
+  }, 30_000);
+
+  test('missing or malformed rate_limits (older codex): recorded unknown, no guard, never a failure; a known record is not erased', () => {
+    const sb = mkSandbox();
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra' }), 1);
+    const r = run(sb, base);
+    expect(r.code).toBe(0);
+    const unknown = { limit_id: 'unknown', used_percent: 'unknown', resets_at: 'unknown', credits_balance: 'unknown', rate_limit_reached_type: 'unknown', observed_at: 'unknown' };
+    expect(r.status().bucket).toEqual(unknown);
+    expect(r.status()).not.toHaveProperty('credit_guard');
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'ok', bucket: unknown });
+    expect(summaryOf(sb, r.outPath)).not.toContain('bucket=');
+    // malformed: not JSON, rate_limits not an object, a non-numeric used_percent, no primary at all → all skipped
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: ['{"type":"event_msg","payload":{"rate_limits":', JSON.stringify({ type: 'event_msg', payload: { rate_limits: 'x' } }),
+      { limit_id: 'codex', primary: { used_percent: 'lots', resets_at: 'soon' } }, { limit_id: 'codex' }] }), 2);
+    const m = run(sb, base);
+    expect(m.code).toBe(0);
+    expect(m.status()).toMatchObject({ class: 'ok', bucket: unknown });
+    expect(m.err).toContain('credit guard is blind');
+    expect(m.status()).not.toHaveProperty('credit_guard');
+    expect(lanesOf(sb).l3.status).toBe('ok');
+    // a known snapshot, then a run without one: lanes.json keeps the known record; the status says unknown
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 30, resetsAt: reset })] }), 3);
+    expect(run(sb, base).code).toBe(0);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra' }), 4);
+    const k = run(sb, base);
+    expect(k.status().bucket).toEqual(unknown);
+    expect(lanesOf(sb).l3.bucket).toMatchObject({ used_percent: 30, resets_at: isoS(reset * 1000) });
+    // another bucket id (e.g. "premium") never triggers the codex guard
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset, limitId: 'premium' })] }), 5);
+    const o = run(sb, base);
+    expect(o.status()).toMatchObject({ bucket: { limit_id: 'premium', used_percent: 100 } });
+    expect(o.status()).not.toHaveProperty('credit_guard');
+    expect(lanesOf(sb).l3.status).toBe('ok');
+  }, 30_000);
+
+  test('event ordering: a later/active longer cooldown is never shortened, a newer event is kept, absent is never replaced', () => {
+    const reset = resetIn(3);
+    // (a) a concurrent attempt records a LONGER quota cooldown while this one runs (after it began)
+    const sb = mkSandbox();
+    const longer = isoS((reset + 2 * 86400) * 1000);
+    const newer = { l3: { status: 'cooling', reason: 'quota (reset parsed from CLI output)', next_probe_at: longer, runtime_model: null, updated_at: isoS(Date.now()),
+      status_since: new Date(Date.now() + 60_000).toISOString(), last_event_at: new Date(Date.now() + 60_000).toISOString(), consecutive_quota: 1, throttle_count: 0 } };
+    step(sb, 'codex', `printf '%s' ${sq(JSON.stringify(newer))} > ${sq(path.join(sb.run, 'lanes.json'))}\n${codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] })}`);
+    const r = run(sb, base);
+    expect(r.code).toBe(0);
+    expect(r.status().credit_guard).toBe('kept');
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'cooling', next_probe_at: longer, last_event_at: newer.l3.last_event_at });
+    // (b) this attempt's own quota parsed a LATER reset than the bucket's: the longer one stands
+    const sb2 = mkSandbox();
+    const far = new Date((reset + 86400) * 1000);
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-astra', fail: `You've hit your usage limit. Try again at ${far.toISOString()}.`, rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const q = run(sb2, base);
+    expect(q.code).toBe(4);
+    expect(q.status()).toMatchObject({ class: 'quota', credit_guard: 'kept' });
+    expect(lanesOf(sb2).l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(far.getTime()), consecutive_quota: 1 });
+    // (c) an earlier quota reset than the bucket's is EXTENDED to resets_at (counted once)
+    const sb3 = mkSandbox();
+    const soon = new Date(Date.now() + 3600e3);
+    step(sb3, 'codex', codexStep({ model: 'gpt-6-astra', fail: `You've hit your usage limit. Try again at ${soon.toISOString()}.`, rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    expect(run(sb3, base).code).toBe(4);
+    expect(lanesOf(sb3).l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), consecutive_quota: 1, reason: GUARD });
+    // (d) an auth failure in the same attempt: absent is never replaced by the guard's cooling
+    const sb4 = mkSandbox();
+    step(sb4, 'codex', codexStep({ model: 'gpt-6-astra', fail: '401 Unauthorized', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    expect(run(sb4, base).code).toBe(5);
+    expect(lanesOf(sb4).l3.status).toBe('absent');
+  }, 30_000);
+
+  test('credits spent: reported from the balance drop between two snapshots of the same window (across runs, and within one)', () => {
+    const sb = mkSandbox();
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 50, resetsAt: reset, balance: '60540.0000000000' })] }), 1);
+    const a = run(sb, base);
+    expect(a.status()).not.toHaveProperty('credits_spent');
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 51, resetsAt: reset, balance: '60536.7500000000' })] }), 2);
+    const b = run(sb, base);
+    expect(b.status().credits_spent).toBe(3.25);
+    expect(b.err).toContain('codex credits spent: 3.25');
+    expect(summaryOf(sb, b.outPath)).toContain('credits spent: 3.25');
+    expect(lanesOf(sb).l3.bucket).toMatchObject({ credits_balance: 60536.75, credits_spent: 3.25 });
+    // a new window is a new baseline: no delta even though the balance moved
+    const reset2 = resetIn(6);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 1, resetsAt: reset2, balance: '60530.0000000000' })] }), 3);
+    const c = run(sb, base);
+    expect(c.status()).not.toHaveProperty('credits_spent');
+    expect(lanesOf(sb).l3.bucket).not.toHaveProperty('credits_spent');
+    // within ONE invocation (no earlier record in this window), the first snapshot is the baseline
+    const sb2 = mkSandbox();
+    setConfig(sb2, 'codex_allow_credit_spend: true');
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset, balance: '100.5' }), rateLimits({ used: 100, resetsAt: reset, balance: '99.25' })] }));
+    const d = run(sb2, base);
+    expect(d.status()).toMatchObject({ credits_spent: 1.25, credit_guard: 'allowed' });
+    const line = summaryOf(sb2, d.outPath);
+    expect(line).toContain('bucket=100% resets=');
+    expect(line).toContain('credit_guard=allowed credits spent: 1.25');
+    expect(JSON.stringify(d.status()) + line + d.err).not.toContain('SECRET-TOKEN-123');
+  }, 30_000);
+});
+
+describe('v1.8.1 credit guard — fail-closed paths (review round c1)', () => {
+  const GUARD = 'codex bucket exhausted (100%); credit spend not allowed — set codex_allow_credit_spend=true to allow';
+  const isoS = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const resetIn = (days: number) => Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const base = { lane: 'l3', mode: 'impl', model: 'gpt-6-astra', effort: 'high' };
+  // A codex invocation that writes its rollout + thread.started, then hangs past the deadline.
+  const hang = (used: number, reset: number) => codexStep({ model: 'gpt-6-astra', completed: false, text: null, rateLimits: [rateLimits({ used, resetsAt: reset })] })
+    .replace(/exit 0\n$/, 'sleep 20\nexit 0\n');
+
+  test('a trailing malformed / partial snapshot never supersedes an earlier VALID exhausted one', () => {
+    const sb = mkSandbox();
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset }), { limit_id: 'codex' },
+      { limit_id: 'codex', primary: { used_percent: 'n/a' } }, '{"type":"event_msg","payload":{"rate_limits":{"limit_id":"codex","primary":{"used_percent":5',
+      JSON.stringify({ type: 'event_msg', payload: { rate_limits: null } })] }));
+    const r = run(sb, base);
+    expect(r.code).toBe(0);
+    expect(r.status()).toMatchObject({ credit_guard: 'cooling', bucket: { used_percent: 100, resets_at: isoS(reset * 1000) } });
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), reason: GUARD });
+  });
+
+  test('resets_at "0" / 0 / past / garbage / lenient-date / absent / > 8 days at 100%: FAIL CLOSED for the bounded fallback; strict s, ms and ISO are honoured', () => {
+    const past = Math.floor(Date.now() / 1000) - 3600;
+    for (const ra of ['0', 0, past, String(past), 'garbage', 'Oct 12', '2026-13-45T99:00:00Z', 1e15, null, resetIn(30)] as (string | number | null)[]) {
+      const sb = mkSandbox();
+      const rl = rateLimits({ used: 100, resetsAt: null }) as { primary: Record<string, unknown> };
+      if (ra !== null) rl.primary.resets_at = ra;
+      step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rl] }));
+      const r = run(sb, base, [], { GSTACK_LANE_BUCKET_FALLBACK_S: '7200' });
+      expect({ ra, code: r.code, guard: r.status().credit_guard }).toEqual({ ra, code: 0, guard: 'cooling' });
+      const l3 = lanesOf(sb).l3;
+      expect({ ra, status: l3.status }).toEqual({ ra, status: 'cooling' });
+      expect(Math.abs((Date.parse(l3.next_probe_at) - Date.now()) / 1000 - 7200)).toBeLessThan(60);
+      expect(l3.reason).toBe(`${GUARD} (resets_at unknown, past or implausible: bounded 7200 s cooldown)`);
+      expect(run(sb, base).code).toBe(4); // and the next run is refused
+    }
+    const reset = resetIn(2);
+    const micro = new Date(reset * 1000).toISOString().replace('.000Z', '.123456Z');
+    for (const ra of [reset * 1000, String(reset), String(reset * 1000), micro]) {
+      const sb = mkSandbox();
+      const rl = rateLimits({ used: 100, resetsAt: null }) as { primary: Record<string, unknown> };
+      rl.primary.resets_at = ra;
+      step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rl] }));
+      expect(run(sb, base).code).toBe(0);
+      expect({ ra, next: lanesOf(sb).l3.next_probe_at, reason: lanesOf(sb).l3.reason }).toEqual({ ra, next: isoS(reset * 1000), reason: GUARD });
+    }
+  }, 90_000);
+
+  test('mid-attempt exhaustion: no timeout step-down and no throttle retry once an invocation shows 100% (below 100% still retries)', () => {
+    const reset = resetIn(3);
+    const review = { ...base, mode: 'review', timeout: '2', 'retry-timeout': '2' };
+    const sb = mkSandbox();
+    step(sb, 'codex', hang(100, reset));
+    const r = run(sb, review);
+    expect(r.code).toBe(124);
+    expect(r.status()).toMatchObject({ class: 'timeout', timeout_retry: false, retry_suppressed: 'credit-guard', credit_guard: 'cooling' });
+    expect(calls(sb, 'codex').length).toBe(1);
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), reason: GUARD });
+    const ctl = mkSandbox();
+    step(ctl, 'codex', hang(50, reset));
+    const c = run(ctl, review);
+    expect(c.status()).toMatchObject({ class: 'timeout', timeout_retry: true });
+    expect(c.status()).not.toHaveProperty('retry_suppressed');
+    expect(calls(ctl, 'codex').length).toBe(2);
+    // throttle backoff retries
+    const env = { GSTACK_LANE_THROTTLE_RETRIES: '2' };
+    const sb2 = mkSandbox();
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-astra', fail: '429 Too Many Requests', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const t = run(sb2, base, [], env);
+    expect(t.code).toBe(3);
+    expect(t.status()).toMatchObject({ class: 'throttle', retry_suppressed: 'credit-guard', credit_guard: 'cooling' });
+    expect(calls(sb2, 'codex').length).toBe(1);
+    const ctl2 = mkSandbox();
+    step(ctl2, 'codex', codexStep({ model: 'gpt-6-astra', fail: '429 Too Many Requests', rateLimits: [rateLimits({ used: 50, resetsAt: reset })] }));
+    expect(run(ctl2, base, [], env).code).toBe(3);
+    expect(calls(ctl2, 'codex').length).toBe(3);
+  }, 60_000);
+
+  test('review P2s: rate_limit_reached counts; an "older" own snapshot still guards; a newer SHORTER cooling is extended; an unthreaded rollout is still read (bucket only)', () => {
+    const reset = resetIn(3);
+    const sb = mkSandbox();
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 99, resetsAt: reset, reached: 'rate_limit_reached' })] }));
+    expect(run(sb, base).status().credit_guard).toBe('cooling');
+    expect(lanesOf(sb).l3.status).toBe('cooling');
+    // a recorded bucket observed "later" keeps the record, but this attempt's own 100% still cools
+    const sb2 = mkSandbox();
+    writeLanes(sb2, { l3: { status: 'ok', reason: 'ok', next_probe_at: null, runtime_model: null, updated_at: '2020-01-01T00:00:00Z', status_since: '2020-01-01T00:00:00.000Z',
+      last_event_at: null, consecutive_quota: 0, throttle_count: 0,
+      bucket: { limit_id: 'codex', used_percent: 50, resets_at: isoS(reset * 1000), credits_balance: 1, rate_limit_reached_type: null, observed_at: isoS(Date.now() + 3600e3) } } });
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    expect(run(sb2, base).status().credit_guard).toBe('cooling');
+    expect(lanesOf(sb2).l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), bucket: { used_percent: 50 } });
+    // a concurrent, NEWER but SHORTER quota cooldown is extended to the bucket reset (never shortened, never cleared)
+    const sb3 = mkSandbox();
+    const newer = { l3: { status: 'cooling', reason: 'quota (reset unknown; backoff 15m)', next_probe_at: isoS(Date.now() + 15 * 60e3), runtime_model: null, updated_at: isoS(Date.now()),
+      status_since: new Date(Date.now() + 60_000).toISOString(), last_event_at: new Date(Date.now() + 60_000).toISOString(), consecutive_quota: 1, throttle_count: 0 } };
+    step(sb3, 'codex', `printf '%s' ${sq(JSON.stringify(newer))} > ${sq(path.join(sb3.run, 'lanes.json'))}\n${codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] })}`);
+    expect(run(sb3, base).status().credit_guard).toBe('cooling');
+    expect(lanesOf(sb3).l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), reason: GUARD, consecutive_quota: 1 });
+    // no thread.started: the fresh home's rollout is still read for the bucket, never for runtime_model
+    const sb4 = mkSandbox();
+    step(sb4, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }).split('\n').filter((l) => !l.includes('thread.started')).join('\n'));
+    const u = run(sb4, base);
+    expect(u.status()).toMatchObject({ runtime_model: null, runtime_model_source: 'none', credit_guard: 'cooling' });
+    expect(fs.existsSync(`${u.outPath}.logs/inv-1/rollout.unthreaded.jsonl`)).toBe(true);
+    expect(fs.existsSync(`${u.outPath}.logs/inv-1/rollout.jsonl`)).toBe(false);
+    expect(lanesOf(sb4).l3.status).toBe('cooling');
+  }, 60_000);
+});
+
+describe('v1.8.1 credit guard — lanes.json bucket_guard is the only state (review round c2)', () => {
+  const GUARD = 'codex bucket exhausted (100%); credit spend not allowed — set codex_allow_credit_spend=true to allow';
+  const isoS = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const resetIn = (days: number) => Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const base = { lane: 'l3', mode: 'impl', model: 'gpt-6-astra', effort: 'high' };
+  const guarded = (status: string, until: string, extra: Record<string, unknown> = {}) => ({ l3: { status, reason: status === 'absent' ? 'auth: x' : 'ok (impl)',
+    next_probe_at: null, runtime_model: null, updated_at: '2020-01-01T00:00:00Z', status_since: '2020-01-01T00:00:00.000Z', last_event_at: null, consecutive_quota: 0,
+    throttle_count: 0, bucket_guard: { exhausted_until: until, reason: GUARD, set_at: '2020-01-01T00:00:00.000Z' }, ...extra } });
+  const sideFiles = (sb: ReturnType<typeof mkSandbox>) => fs.readdirSync(sb.run).filter((f) => !['attempts', 'lanes.lock', 'lanes.json', 'lanes.json.hashes', 'probe-cwd'].includes(f));
+
+  test('probe, --json and _probe-lane refuse while a guard is enforced, whatever `status` says', () => {
+    const sb = mkSandbox();
+    const until = isoS(resetIn(2) * 1000);
+    writeLanes(sb, guarded('ok', until));
+    step(sb, 'codex', codexStep({ model: 'gpt-6-luna', effort: 'low', text: 'OK' }));
+    const p = lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3']);
+    expect(p.out).toContain(`l3: cooling until ${until} — still cooling (skipped, not probed)`);
+    expect(p.out).toContain(`credit guard: bucket exhausted until ${until} (status ok)`);
+    const j = JSON.parse(lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3', '--json']).out);
+    expect(j.l3).toMatchObject({ status: 'ok', effective: { status: 'cooling', cooling_active: true, next_probe_at: until, credit_guard: 'enforced', exhausted_until: until } });
+    const d = lane(sb, ['_probe-lane', '--run-dir', sb.run, '--lane', 'l3']);
+    expect(d.code).toBe(4);
+    expect(calls(sb, 'codex')).toEqual([]);
+    const r = run(sb, base);
+    expect(r.code).toBe(4);
+    expect(r.status()).toMatchObject({ class: 'quota', skipped: 'cooling', class_detail: `credit guard: codex bucket exhausted until ${until}` });
+    expect(calls(sb, 'codex')).toEqual([]);
+    expect(sideFiles(sb)).toEqual([]);
+  });
+
+  test('auth failure + exhausted bucket: the guard is still recorded, and absent never masks it', () => {
+    const sb = mkSandbox();
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', fail: '401 Unauthorized', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const r = run(sb, base);
+    expect(r.code).toBe(5);
+    expect(r.status()).toMatchObject({ class: 'auth', credit_guard: 'recorded' });
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'absent', bucket_guard: { exhausted_until: isoS(reset * 1000), reason: GUARD } });
+    const n = calls(sb, 'codex').length;
+    const next = run(sb, base);
+    expect(next.code).toBe(4); // refused as cooling (the guard), not merely absent
+    expect(next.status()).toMatchObject({ class: 'quota', skipped: 'cooling' });
+    expect(lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3']).out).toContain('still cooling (skipped, not probed)');
+    expect(calls(sb, 'codex').length).toBe(n);
+    expect(lanesOf(sb).l3.status).toBe('absent');
+    // an expired guard over absent: back to the plain absent refusal
+    writeLanes(sb, guarded('absent', isoS(Date.now() - 1000)));
+    expect(run(sb, base).code).toBe(5);
+  });
+
+  test('a retry is refused once ANOTHER attempt recorded exhaustion (shared lanes.json re-read before every invocation)', () => {
+    const sb = mkSandbox();
+    const until = isoS(resetIn(2) * 1000);
+    // invocation 1 (this attempt) sees 50% and is throttled; meanwhile "attempt B" records the guard (set AFTER that reading)
+    const later = (st: string) => { const j = guarded(st, until); j.l3.bucket_guard.set_at = new Date(Date.now() + 60_000).toISOString(); return j; };
+    step(sb, 'codex', `printf '%s' ${sq(JSON.stringify(later('ok')))} > ${sq(path.join(sb.run, 'lanes.json'))}\n${codexStep({ model: 'gpt-6-astra', fail: '429 Too Many Requests', rateLimits: [rateLimits({ used: 50, resetsAt: resetIn(2) })] })}`, 1);
+    step(sb, 'codex', OK_CODEX, 2);
+    const r = run(sb, base, [], { GSTACK_LANE_THROTTLE_RETRIES: '2' });
+    expect(calls(sb, 'codex').length).toBe(1);
+    expect(r.code).toBe(4);
+    expect(r.status()).toMatchObject({ class: 'quota', retry_suppressed: 'lane-cooling' });
+    expect(r.status().class_detail).toContain(`credit guard: codex bucket exhausted until ${until}`);
+    expect(lanesOf(sb).l3.bucket_guard.exhausted_until).toBe(until);
+    // a review timeout step-down is refused the same way
+    const sb2 = mkSandbox();
+    step(sb2, 'codex', `printf '%s' ${sq(JSON.stringify(later('ok')))} > ${sq(path.join(sb2.run, 'lanes.json'))}\n` +
+      codexStep({ model: 'gpt-6-astra', completed: false, text: null, rateLimits: [rateLimits({ used: 50, resetsAt: resetIn(2) })] }).replace(/exit 0\n$/, 'sleep 20\nexit 0\n'));
+    const t = run(sb2, { ...base, mode: 'review', timeout: '2', 'retry-timeout': '2' });
+    expect(calls(sb2, 'codex').length).toBe(1);
+    expect(t.code).toBe(4);
+    expect(t.status()).toMatchObject({ class: 'quota', retry_suppressed: 'lane-cooling' });
+  }, 30_000);
+
+  test('codex_allow_credit_spend=true lifts an existing guard and the guard\'s own cooldown; the record is kept and reported', () => {
+    const sb = mkSandbox();
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }), 1);
+    expect(run(sb, base).code).toBe(0);
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'cooling', reason: GUARD, bucket_guard: { exhausted_until: isoS(reset * 1000) } });
+    fs.appendFileSync(path.join(sb.dir, 'state', 'config.yaml'), 'codex_allow_credit_spend: true\n');
+    const p = lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3', '--json']);
+    expect(JSON.parse(p.out).l3.effective).toMatchObject({ credit_guard: 'lifted', cooling_active: false });
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const r = run(sb, base);
+    expect(r.code).toBe(0);
+    expect(r.status()).toMatchObject({ credit_guard_lifted: true, credit_guard: 'allowed' });
+    const line = lane(sb, ['summary', '--out', r.outPath]).out;
+    expect(line).toContain('credit_guard_lifted=codex_allow_credit_spend');
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'ok', bucket_guard: { exhausted_until: isoS(reset * 1000) } }); // record kept
+    expect(lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3']).out).toContain('credit guard LIFTED by codex_allow_credit_spend=true');
+    // opt-in off again: the kept record is enforced at once
+    fs.writeFileSync(path.join(sb.dir, 'state', 'config.yaml'), 'grok_reviews: enabled\n');
+    const n = calls(sb, 'codex').length;
+    expect(run(sb, base).code).toBe(4);
+    expect(calls(sb, 'codex').length).toBe(n);
+  }, 30_000);
+
+  test('the fallback deadline is persisted ONCE and never extended by reads; FALLBACK_S is floored at 60 s', async () => {
+    const sb = mkSandbox();
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: null })] }));
+    expect(run(sb, base, [], { GSTACK_LANE_BUCKET_FALLBACK_S: '7200' }).code).toBe(0);
+    const g = lanesOf(sb).l3.bucket_guard.exhausted_until;
+    expect(Math.abs((Date.parse(g) - Date.now()) / 1000 - 7200)).toBeLessThan(60);
+    for (let i = 0; i < 2; i++) {
+      await Bun.sleep(1100);
+      expect(run(sb, base, [], { GSTACK_LANE_BUCKET_FALLBACK_S: '7200' }).code).toBe(4);
+      lane(sb, ['probe', '--run-dir', sb.run, '--lanes', 'l3', '--json'], { GSTACK_LANE_BUCKET_FALLBACK_S: '7200' });
+      lane(sb, ['_probe-lane', '--run-dir', sb.run, '--lane', 'l3'], { GSTACK_LANE_BUCKET_FALLBACK_S: '7200' });
+    }
+    expect(lanesOf(sb).l3.bucket_guard.exhausted_until).toBe(g);
+    expect(lanesOf(sb).l3.next_probe_at).toBe(g);
+    const sb2 = mkSandbox();
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: null })] }));
+    expect(run(sb2, base, [], { GSTACK_LANE_BUCKET_FALLBACK_S: '5' }).code).toBe(0);
+    const s2 = (Date.parse(lanesOf(sb2).l3.bucket_guard.exhausted_until) - Date.now()) / 1000;
+    expect(s2).toBeGreaterThan(50);
+    expect(s2).toBeLessThan(70);
+  }, 60_000);
+
+  test('lock busy: the attempt keeps its own class (ok stays ok; an INVALID review stays INVALID), credit_guard=unpersisted, loudly, NO side file', async () => {
+    const sb = mkSandbox();
+    fs.mkdirSync(sb.run, { recursive: true });
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const holder = spawn('/usr/bin/perl', ['-MFcntl=:flock', '-e', 'open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; $| = 1; print "locked\n"; sleep $ARGV[1];',
+      path.join(sb.run, 'lanes.lock'), '25'], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 40_000 });
+    const gone = new Promise((res) => holder.on('exit', res));
+    await new Promise<void>((res, rej) => { holder.stdout!.once('data', () => res()); setTimeout(() => rej(new Error('lock holder never locked')), 5000); });
+    let r: ReturnType<typeof run>, bad: ReturnType<typeof run>;
+    // a completed-but-INVALID review (empty body → class error) in the same contention
+    const sbBad = mkSandbox();
+    step(sbBad, 'codex', codexStep({ model: 'gpt-6-astra', text: '   ', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    fs.mkdirSync(sbBad.run, { recursive: true });
+    const holder2 = spawn('/usr/bin/perl', ['-MFcntl=:flock', '-e', 'open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; $| = 1; print "locked\n"; sleep $ARGV[1];',
+      path.join(sbBad.run, 'lanes.lock'), '25'], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 40_000 });
+    const gone2 = new Promise((res) => holder2.on('exit', res));
+    await new Promise<void>((res, rej) => { holder2.stdout!.once('data', () => res()); setTimeout(() => rej(new Error('lock holder never locked')), 5000); });
+    try {
+      r = run(sb, base, [], { GSTACK_LANE_LOCK_WAIT_S: '1' });
+      bad = run(sbBad, { ...base, mode: 'review' }, [], { GSTACK_LANE_LOCK_WAIT_S: '1' });
+    } finally {
+      holder.kill('SIGKILL');
+      holder2.kill('SIGKILL');
+    }
+    await gone;
+    await gone2;
+    expect(r.code).toBe(0);
+    expect(r.status()).toMatchObject({ class: 'ok', exit_code: 0, lane_update: 'pending', credit_guard: 'unpersisted' });
+    expect(r.err).toContain('ERROR: Codex bucket exhausted but the credit guard could not persist');
+    expect(lane(sb, ['summary', '--out', r.outPath]).out).toContain('credit_guard=unpersisted');
+    expect(bad.code).toBe(1);
+    expect(bad.status()).toMatchObject({ class: 'error', class_detail: 'empty review body', credit_guard: 'unpersisted' });
+    expect(lane(sbBad, ['adjudicate', '--out', bad.outPath, '--seat', 'codex', '--gate-class', 'ordinary', '--reviewed-sha', 'a'.repeat(40), '--requested-model', 'gpt-6-astra']).out)
+      .toContain('VERDICT=INVALID reason=class_error');
+    expect(sideFiles(sbBad)).toEqual([]);
+    expect(sideFiles(sb)).toEqual([]);
+    expect(fs.existsSync(path.join(sb.run, 'lanes.json'))).toBe(false);
+    // the documented residual: with the lock free again, the next attempt runs ONE invocation and records the guard
+    expect(run(sb, base).code).toBe(0);
+    expect(lanesOf(sb).l3).toMatchObject({ status: 'cooling', bucket_guard: { exhausted_until: isoS(reset * 1000) } });
+    expect(run(sb, base).code).toBe(4);
+  }, 60_000);
+
+  test('a SIGTERM\'d attempt still persists its invocation\'s exhausted snapshot', async () => {
+    const sb = mkSandbox();
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', completed: false, text: null, rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }).replace(/exit 0\n$/, 'sleep 20\nexit 0\n'));
+    const a = runArgs(sb, base);
+    const p = spawn(LANE, a.args, { cwd: sb.dir, env: sb.env, stdio: 'ignore', timeout: 30_000 });
+    const done = new Promise((res) => p.on('exit', res));
+    const end = Date.now() + 8000;
+    while (Date.now() < end && calls(sb, 'codex').length < 1) await Bun.sleep(50);
+    await Bun.sleep(500);
+    p.kill('SIGTERM');
+    await done;
+    expect(lanesOf(sb).l3.bucket_guard).toMatchObject({ exhausted_until: isoS(reset * 1000), reason: GUARD });
+    expect(run(sb, base).code).toBe(4);
+    expect(calls(sb, 'codex').length).toBe(1);
+  }, 30_000);
+});
+
+describe('v1.8.1 credit guard — observation timestamps, cancel window, once-only deadline (review round c3)', () => {
+  const GUARD = 'codex bucket exhausted (100%); credit spend not allowed — set codex_allow_credit_spend=true to allow';
+  const isoS = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const resetIn = (days: number) => Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const base = { lane: 'l3', mode: 'impl', model: 'gpt-6-astra', effort: 'high' };
+  const rec = (rl: object, ts?: string) => JSON.stringify({ ...(ts ? { timestamp: ts } : {}), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: rl } });
+
+  test('a below-100% reading clears the guard ONLY with a real rollout timestamp strictly newer than the exhausting observation — any lane status', () => {
+    const sb = mkSandbox();
+    fs.appendFileSync(path.join(sb.dir, 'state', 'config.yaml'), 'codex_allow_credit_spend: true\n'); // runs allowed, so readings arrive
+    const until = isoS(resetIn(2) * 1000);
+    const T = new Date(Date.now() - 60_000).toISOString();
+    writeLanes(sb, { l3: { status: 'absent', reason: 'auth: x', next_probe_at: null, runtime_model: null, updated_at: '2020-01-01T00:00:00Z', status_since: '2020-01-01T00:00:00.000Z',
+      last_event_at: null, consecutive_quota: 0, throttle_count: 0, bucket_guard: { exhausted_until: until, reason: GUARD, set_at: T, observed_at: T } } });
+    const low = rateLimits({ used: 50, resetsAt: resetIn(2) });
+    // status absent: an OLDER dated reading (via the probe, which still probes an absent lane) never clears
+    step(sb, 'codex', codexStep({ model: 'gpt-6-luna', effort: 'low', text: 'OK', rateLimits: [rec(low, new Date(Date.now() - 3600e3).toISOString())] }), 1);
+    expect(lane(sb, ['_probe-lane', '--run-dir', sb.run, '--lane', 'l3']).code).toBe(0);
+    expect(lanesOf(sb).l3.bucket_guard).toMatchObject({ exhausted_until: until, observed_at: T });
+    // an UNDATED reading never clears (its observed_at is "unknown", never synthesized)
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(low)] }), 2);
+    const u = run(sb, base);
+    expect(u.status().bucket.observed_at).toBe('unknown');
+    expect(lanesOf(sb).l3.bucket_guard).toMatchObject({ exhausted_until: until });
+    // a reading at the SAME instant is not strictly newer
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(low, T)] }), 3);
+    run(sb, base);
+    expect(lanesOf(sb).l3.bucket_guard).toMatchObject({ exhausted_until: until });
+    // a real, strictly newer reading ends it
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(low, new Date().toISOString())] }), 4);
+    run(sb, base);
+    expect(lanesOf(sb).l3).not.toHaveProperty('bucket_guard');
+    // an undated EXHAUSTING observation makes the guard's observed_at "unknown": no reading can end it
+    const sb2 = mkSandbox();
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(rateLimits({ used: 100, resetsAt: resetIn(2) }))] }), 1);
+    run(sb2, base);
+    expect(lanesOf(sb2).l3.bucket_guard.observed_at).toBe('unknown');
+    fs.appendFileSync(path.join(sb2.dir, 'state', 'config.yaml'), 'codex_allow_credit_spend: true\n');
+    step(sb2, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(low, new Date(Date.now() + 5000).toISOString())] }), 2);
+    run(sb2, base);
+    expect(lanesOf(sb2).l3).toHaveProperty('bucket_guard');
+  }, 60_000);
+
+  test('a SIGTERM after the home cleanup but BEFORE the early record still persists the guard', async () => {
+    const sb = mkSandbox();
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const a = runArgs(sb, base);
+    const p = spawn(LANE, a.args, { cwd: sb.dir, env: { ...sb.env, GSTACK_LANE_TEST_PAUSE: 'before-record:4' }, stdio: 'ignore', timeout: 30_000 });
+    const done = new Promise((res) => p.on('exit', res));
+    const rollout = `${a.out}.logs/inv-1/rollout.jsonl`;
+    const end = Date.now() + 10_000;
+    while (Date.now() < end && !fs.existsSync(rollout)) await Bun.sleep(50);
+    await Bun.sleep(400); // the home is gone (GL_CODEX_HOME_LIVE=0); the helper is in the pause before recording
+    const homes = fs.existsSync(codexBase(sb)) ? fs.readdirSync(codexBase(sb)) : [];
+    expect(homes).toEqual([]);
+    expect(fs.existsSync(path.join(sb.run, 'lanes.json'))).toBe(false);
+    p.kill('SIGTERM');
+    await done;
+    expect(lanesOf(sb).l3.bucket_guard).toMatchObject({ exhausted_until: isoS(reset * 1000), reason: GUARD });
+    expect(run(sb, base).code).toBe(4);
+    expect(calls(sb, 'codex').length).toBe(1);
+  }, 30_000);
+
+  test('the fallback deadline of ONE observation is computed once: a delayed finalize never extends it (dated and undated)', () => {
+    for (const dated of [true, false]) {
+      const sb = mkSandbox();
+      const rl = rateLimits({ used: 100, resetsAt: null });
+      step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [dated ? rec(rl, new Date().toISOString()) : rec(rl)] }));
+      const r = run(sb, base, [], { GSTACK_LANE_BUCKET_FALLBACK_S: '7200', GSTACK_LANE_TEST_PAUSE: 'after-record:3' });
+      expect(r.code).toBe(0);
+      const g = lanesOf(sb).l3.bucket_guard;
+      const lag = Date.parse(r.status().finished_at) - (Date.parse(g.exhausted_until) - 7200e3);
+      expect({ dated, early: lag >= 2000 }).toEqual({ dated, early: true }); // computed at the early record, ≥ 3 s before finalize
+      expect(lanesOf(sb).l3.next_probe_at).toBe(g.exhausted_until);
+    }
+  }, 60_000);
+});
+
+describe('v1.8.1 credit guard — pending until persisted, one deadline per observation (review round c4)', () => {
+  const GUARD = 'codex bucket exhausted (100%); credit spend not allowed — set codex_allow_credit_spend=true to allow';
+  const isoS = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const resetIn = (days: number) => Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const base = { lane: 'l3', mode: 'impl', model: 'gpt-6-astra', effort: 'high' };
+  const rec = (rl: object, ts?: string) => JSON.stringify({ ...(ts ? { timestamp: ts } : {}), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: rl } });
+
+  test('the early write fails (lock busy), the lock frees, SIGTERM before finalize → the guard is still persisted', async () => {
+    const sb = mkSandbox();
+    fs.mkdirSync(sb.run, { recursive: true });
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: reset })] }));
+    const holder = spawn('/usr/bin/perl', ['-MFcntl=:flock', '-e', 'open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; $| = 1; print "locked\n"; sleep $ARGV[1];',
+      path.join(sb.run, 'lanes.lock'), '25'], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 40_000 });
+    const gone = new Promise((res) => holder.on('exit', res));
+    await new Promise<void>((res, rej) => { holder.stdout!.once('data', () => res()); setTimeout(() => rej(new Error('lock holder never locked')), 5000); });
+    const a = runArgs(sb, base);
+    const p = spawn(LANE, a.args, { cwd: sb.dir, env: { ...sb.env, GSTACK_LANE_LOCK_WAIT_S: '1', GSTACK_LANE_TEST_PAUSE: 'after-record:5' }, stdio: 'ignore', timeout: 30_000 });
+    const done = new Promise((res) => p.on('exit', res));
+    const rollout = `${a.out}.logs/inv-1/rollout.jsonl`;
+    const end = Date.now() + 10_000;
+    while (Date.now() < end && !fs.existsSync(rollout)) await Bun.sleep(50);
+    await Bun.sleep(2000); // bucket-check + the 1 s lock wait: the early write has FAILED; now in the pause
+    expect(fs.existsSync(path.join(sb.run, 'lanes.json'))).toBe(false);
+    holder.kill('SIGKILL');
+    await gone; // the lock is free again
+    p.kill('SIGTERM'); // before finalize
+    await done;
+    expect(fs.existsSync(`${a.out}.status.json`)).toBe(false); // finalize never ran
+    expect(lanesOf(sb).l3.bucket_guard).toMatchObject({ exhausted_until: isoS(reset * 1000), reason: GUARD });
+    expect(run(sb, base).code).toBe(4);
+    expect(calls(sb, 'codex').length).toBe(1);
+  }, 40_000);
+
+  test('an observation\'s deadline is fixed forever: finalized AFTER it expired, it neither restarts nor extends cooling (dated and undated)', () => {
+    for (const dated of [true, false]) {
+      const sb = mkSandbox();
+      const reset = Math.floor(Date.now() / 1000) + 3;
+      const rl = rateLimits({ used: 100, resetsAt: reset });
+      step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [dated ? rec(rl, new Date().toISOString()) : rec(rl)] }), 1);
+      step(sb, 'codex', OK_CODEX, 2);
+      const r = run(sb, base, [], { GSTACK_LANE_TEST_PAUSE: 'after-record:5', GSTACK_LANE_BUCKET_FALLBACK_S: '7200' });
+      expect(r.code).toBe(0);
+      expect({ dated, guard: r.status().credit_guard }).toEqual({ dated, guard: 'expired' });
+      const l3 = lanesOf(sb).l3;
+      expect({ dated, until: l3.bucket_guard.exhausted_until }).toEqual({ dated, until: isoS(reset * 1000) }); // not a fresh 7200 s fallback
+      expect(l3.status === 'cooling' && Date.parse(l3.next_probe_at) > Date.now()).toBe(false);
+      expect(run(sb, base).code).toBe(0); // the next attempt is invoked
+      expect(calls(sb, 'codex').length).toBe(2);
+    }
+  }, 60_000);
+});
+
+describe('v1.8.1 credit guard — globally unique observation keys, per-observation deadlines (review round c5)', () => {
+  const isoS = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const resetIn = (days: number) => Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const base = { lane: 'l3', mode: 'impl', model: 'gpt-6-astra', effort: 'high' };
+  const rec = (rl: object, ts?: string) => JSON.stringify({ ...(ts ? { timestamp: ts } : {}), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: rl } });
+
+  test('task-a/a1 and task-b/a1 (undated) get DISTINCT keys: the second run\'s fresh 100% reading cools after the first guard expired', async () => {
+    const sb = mkSandbox();
+    const outA = path.join(sb.run, 'attempts', 'task-a', 'a1', 'out.txt');
+    const outB = path.join(sb.run, 'attempts', 'task-b', 'a1', 'out.txt');
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(rateLimits({ used: 100, resetsAt: Math.floor(Date.now() / 1000) + 2 }))] }), 1);
+    expect(run(sb, { ...base, out: outA }).code).toBe(0);
+    expect(Object.values(lanesOf(sb).l3.bucket_obs).map((v: any) => v.id)).toEqual(['task-a/a1/out.txt/inv-1@#0']);
+    await Bun.sleep(3000); // A's guard (and its own deadline) expired
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(rateLimits({ used: 100, resetsAt: reset }))] }), 2);
+    const b = run(sb, { ...base, out: outB });
+    expect(b.code).toBe(0);
+    expect(b.status().credit_guard).toBe('cooling');
+    const l3 = lanesOf(sb).l3;
+    expect(Object.values(l3.bucket_obs).map((v: any) => v.id).sort()).toEqual(['task-a/a1/out.txt/inv-1@#0', 'task-b/a1/out.txt/inv-1@#0']);
+    for (const k of Object.keys(l3.bucket_obs)) expect(k).toMatch(/^[0-9a-f]{64}$/);
+    expect(l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000), bucket_guard: { exhausted_until: isoS(reset * 1000) } });
+    expect(run(sb, base).code).toBe(4);
+  }, 30_000);
+
+  test('concurrent A (long guard) / B (short, inside A, finalized after BOTH expired): B keeps its own deadline and never restarts cooling', () => {
+    const sb = mkSandbox();
+    const now = Date.now();
+    const aUntil = isoS(now + 9000);
+    // during B's invocation, "attempt A" records a guard that outlasts B's own reset
+    const lanesA = { l3: { status: 'ok', reason: 'ok (impl)', next_probe_at: null, runtime_model: null, updated_at: isoS(now), status_since: '2020-01-01T00:00:00.000Z',
+      last_event_at: null, consecutive_quota: 0, throttle_count: 0,
+      bucket_guard: { exhausted_until: aUntil, reason: 'codex bucket exhausted (100%); credit spend not allowed — set codex_allow_credit_spend=true to allow', set_at: new Date(now).toISOString(), observed_at: 'unknown' },
+      bucket_obs: { ['f'.repeat(64)]: { u: aUntil, f: 0, id: 'other/a9/out.txt/inv-1@#0' } } } };
+    const bReset = Math.floor(now / 1000) + 3;
+    step(sb, 'codex', `printf '%s' ${sq(JSON.stringify(lanesA))} > ${sq(path.join(sb.run, 'lanes.json'))}\n${codexStep({ model: 'gpt-6-astra', rateLimits: [rec(rateLimits({ used: 100, resetsAt: bReset }))] })}`, 1);
+    step(sb, 'codex', OK_CODEX, 2);
+    const r = run(sb, base, [], { GSTACK_LANE_TEST_PAUSE: 'after-record:11', GSTACK_LANE_BUCKET_FALLBACK_S: '7200' });
+    expect(r.code).toBe(0);
+    expect(r.status().credit_guard).toBe('expired');
+    const l3 = lanesOf(sb).l3;
+    const own = Object.values(l3.bucket_obs).find((v: any) => v.id.endsWith('/inv-1@#0') && !v.id.startsWith('other/')) as any;
+    expect(own).toMatchObject({ u: isoS(bReset * 1000), f: 0 }); // B's own deadline retained although it fit inside A's guard
+    expect(l3.bucket_guard.exhausted_until).toBe(aUntil);      // A's guard: not extended by a fresh 7200 s fallback
+    expect(l3.status === 'cooling' && Date.parse(l3.next_probe_at) > Date.now()).toBe(false);
+    expect(run(sb, base).code).toBe(0);                        // nothing restarted: the next attempt runs
+  }, 40_000);
+
+  test('bucket_obs stays bounded: expired entries past the 6 h replay window are pruned after 8 days and evicted oldest-deadline first beyond 64; live and recently expired never', () => {
+    const sb = mkSandbox();
+    const hex = (i: number) => i.toString(16).padStart(64, '0');
+    const obs: Record<string, { u: string; f: number; id: string }> = { [hex(999)]: { u: isoS(Date.now() - 9 * 86400e3), f: 1, id: 'old' },
+      [hex(998)]: { u: isoS(Date.now() - 3600e3), f: 1, id: 'recent' } };
+    for (let i = 0; i < 80; i++) obs[hex(i)] = { u: isoS(Date.now() - 7 * 3600e3 - i * 1000), f: 1, id: `expired-${i}` };
+    writeLanes(sb, { l3: { status: 'ok', reason: 'ok', next_probe_at: null, runtime_model: null, updated_at: '2020-01-01T00:00:00Z', status_since: '2020-01-01T00:00:00.000Z',
+      last_event_at: null, consecutive_quota: 0, throttle_count: 0, bucket_obs: obs } });
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rateLimits({ used: 100, resetsAt: resetIn(2) })] }));
+    expect(run(sb, base).code).toBe(0);
+    const m = lanesOf(sb).l3.bucket_obs;
+    const ids = Object.values(m).map((v: any) => v.id);
+    expect(ids.length).toBe(64);
+    expect(ids).not.toContain('old');                       // > 8 days: pruned
+    expect(ids).toContain('recent');                        // expired within the replay window: kept
+    expect(ids).toContain('expired-0');                     // the newest older-expired kept…
+    expect(ids).not.toContain('expired-79');                // …the oldest-deadline expired evicted first
+    expect(ids.some((id: string) => id.includes('/inv-1@'))).toBe(true); // this run's own live observation kept
+  });
+});
+
+describe('v1.8.1 credit guard — sha256 keys of the full identity, live observations never evicted (review round c6)', () => {
+  const isoS = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const resetIn = (days: number) => Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const base = { lane: 'l3', mode: 'impl', model: 'gpt-6-astra', effort: 'high' };
+  const rec = (rl: object, ts?: string) => JSON.stringify({ ...(ts ? { timestamp: ts } : {}), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: rl } });
+
+  test('two outputs sharing their first 400+ characters get DISTINCT keys; the fresh 100% reading cools', async () => {
+    const sb = mkSandbox();
+    const task = 'T'.repeat(250), att = 'a'.repeat(200);
+    const outA = path.join(sb.run, 'attempts', task, `${att}x1`, 'out.txt');
+    const outB = path.join(sb.run, 'attempts', task, `${att}x2`, 'out.txt');
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(rateLimits({ used: 100, resetsAt: Math.floor(Date.now() / 1000) + 2 }))] }), 1);
+    expect(run(sb, { ...base, out: outA }).code).toBe(0);
+    await Bun.sleep(3000); // A's own deadline expired
+    const reset = resetIn(3);
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(rateLimits({ used: 100, resetsAt: reset }))] }), 2);
+    const b = run(sb, { ...base, out: outB });
+    expect(b.code).toBe(0);
+    expect(b.status().credit_guard).toBe('cooling');
+    const l3 = lanesOf(sb).l3;
+    expect(Object.keys(l3.bucket_obs).length).toBe(2);
+    for (const k of Object.keys(l3.bucket_obs)) expect(k).toMatch(/^[0-9a-f]{64}$/);
+    expect(l3).toMatchObject({ status: 'cooling', next_probe_at: isoS(reset * 1000) });
+    expect(run(sb, base).code).toBe(4);
+  }, 30_000);
+
+  test('65 LIVE observations are all retained; a short one finalized after its reset neither restarts nor extends cooling', () => {
+    const sb = mkSandbox();
+    const hex = (i: number) => i.toString(16).padStart(64, '0');
+    const live: Record<string, { u: string; f: number; id: string }> = {};
+    for (let i = 0; i < 65; i++) live[hex(i)] = { u: isoS(Date.now() + 86400e3 + i * 1000), f: 0, id: `live-${i}` };
+    writeLanes(sb, { l3: { status: 'ok', reason: 'ok', next_probe_at: null, runtime_model: null, updated_at: '2020-01-01T00:00:00Z', status_since: '2020-01-01T00:00:00.000Z',
+      last_event_at: null, consecutive_quota: 0, throttle_count: 0, bucket_obs: live } });
+    const reset = Math.floor(Date.now() / 1000) + 3;
+    step(sb, 'codex', codexStep({ model: 'gpt-6-astra', rateLimits: [rec(rateLimits({ used: 100, resetsAt: reset }))] }), 1);
+    step(sb, 'codex', OK_CODEX, 2);
+    const r = run(sb, base, [], { GSTACK_LANE_TEST_PAUSE: 'after-record:5', GSTACK_LANE_BUCKET_FALLBACK_S: '7200' });
+    expect(r.code).toBe(0);
+    expect(r.status().credit_guard).toBe('expired');
+    const l3 = lanesOf(sb).l3;
+    const ids = Object.values(l3.bucket_obs).map((v: any) => v.id);
+    for (let i = 0; i < 65; i++) expect(ids).toContain(`live-${i}`);
+    expect(Date.parse(l3.bucket_guard.exhausted_until)).toBe(reset * 1000); // its own deadline: not a fresh 7200 s fallback
+    expect(l3.status === 'cooling' && Date.parse(l3.next_probe_at) > Date.now()).toBe(false);
+    expect(run(sb, base).code).toBe(0);
+  }, 30_000);
 });
 
 describe('invariants across every recorded invocation', () => {

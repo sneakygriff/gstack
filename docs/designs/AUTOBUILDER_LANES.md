@@ -43,9 +43,12 @@ Machine facts that shaped the design:
   Opus 5.5, escalate to Fable only when Opus at xhigh/max falls short. gpt-6.1-sol ≈ Astra on DeepSWE
   (75.2% vs 74.8%) at ~1/5 the API price. Grok 4.7: slow first token (~98 s, Artificial Analysis), weak on
   long terminal work → reviewer + bounded spillover only. Luna: T0 only.
-- Quotas: ChatGPT Plus allows ~5–45 Astra vs 15–160 gpt-6.1-sol vs 350–3,000 Luna messages / 5 h
-  (Pro: no 5-h limit, weekly limits apply) → Astra is reserved for T3, debugging escalation and the
-  T3/final gates. Codex "fast" tier burns 2.5× → the helper pins `service_tier="default"`.
+- Quotas: on ChatGPT Plus the vendor estimates ~5–45 Astra vs 15–160 gpt-6.1-sol vs 350–3,000 Luna
+  messages / 5 h. These are DRAIN RATES of ONE shared allowance, not separate per-model buckets (Pro:
+  no 5-h limit, one weekly bucket) — the 2026-10-20 evidence report (codex-quota-evidence.md) found
+  every model in 23,957 rollout snapshots on the same `limit_id: "codex"` bucket, with Astra and Sol
+  reaching 100% within 15 s of each other at the same `resets_at`. → Astra, the fastest drain, is
+  reserved for T3, debugging escalation and the T3/final gates. Codex "fast" tier burns 2.5× → the helper pins `service_tier="default"`.
 - `claude -p` bills Fable to usage credits WITHOUT a prompt (Claude Code model-config docs) → L2 never
   runs Fable unless the operator opts in (`--allow-credit-billing`). In `-p` mode `ANTHROPIC_API_KEY`
   overrides the subscription login → the helper unsets it for L2. `CLAUDE_CONFIG_DIR` multi-account is
@@ -462,3 +465,74 @@ Routing policy only: the helper contract above, including every L4 security rule
   is excluded; `sensitiveGlobs`, when given, REPLACES both this classifier and the structural sensitive globs. A false positive only upgrades LITE to FULL. Prose is
   `.md`/`.txt`/`.rst` only (`.mdx` is code). Seat C counts only an exact allowlisted model id
   (`claude-fable-5-1`/`fable`, `claude-opus-5-5`, `claude-opus-4-8`), checked identically on L1 and L2.
+
+## v1.8.1 amendments (2026-10-20): Codex credit guard
+
+Operator decision 2026-10-19 (decision ledger): spending purchased Codex credits is OPT-IN, mirroring
+the Fable rule (`--allow-credit-billing`). Evidence: the shared `codex` bucket above; on a Pro account
+with credits, reaching 100% raises NO error — Codex silently keeps running on credits (`credits.balance`
+63,554 → ~60,546 on 2026-10-14), so no error class ever showed it, while v1.8 runs Astra at every gate.
+
+- **Snapshot.** After every L3 invocation (probe, review, impl) `bin/gstack-lane` reads the
+  `rate_limits` snapshots (`event_msg/token_count`) of that attempt's own rollouts (`inv-<n>/rollout.jsonl`;
+  without a thread id, the fresh per-invocation home's newest rollout, used for the bucket only) and
+  records the LAST VALID one as `bucket: {limit_id, used_percent, resets_at (ISO), credits_balance,
+  rate_limit_reached_type, observed_at}` in `<out>.status.json` and the `l3` entry of `lanes.json`. A
+  snapshot without a numeric `used_percent` is skipped (never supersedes a valid one); times are strict
+  (epoch s/ms or ISO-8601); missing fields are `"unknown"`; no usable snapshot never fails a run (a
+  stderr warning says the guard is blind) and never erases the last known `lanes.json` bucket.
+- **Guard state.** The ONLY guard state is the `l3` entry's `bucket_guard: {exhausted_until, reason,
+  set_at, observed_at}`, `bucket_obs` (per-observation deadlines) and `bucket_cleared_at` in `lanes.json`, under its existing lock (no side file), kept apart from `status` so an
+  auth/absent status never masks or clears it. It is recorded whenever an exhausted snapshot is seen:
+  bucket `codex` (or no `limit_id`) at `used_percent >= 100`, or reached type `rate_limit_reached` /
+  `*usage_limit_reached`. `exhausted_until` is the bucket reset, or — when the reset is absent, malformed,
+  past or > 8 days out — `now + GSTACK_LANE_BUCKET_FALLBACK_S` (24 h, floor 60 s), computed ONCE per
+  exhausting observation and kept in `bucket_obs` under the sha256 of its full, never truncated identity
+  (the claimed `--out` path relative to `<run-dir>/attempts` — `<task>/<attempt_id>/<file>` — plus the
+  invocation and the rollout timestamp or record position), fixed forever for it: never on read, never again by the early record, a
+  signal or finalize of the same observation, even when it fit inside a longer guard and after it expired
+  (it never restarts cooling). `bucket_obs` never evicts a live observation nor one expired within the 6 h
+  replay window (longer than any attempt); older expired entries are pruned after 8 days and, beyond 64
+  entries, evicted oldest deadline first — live entries are bounded by concurrency. The guard's
+  `exhausted_until` is the max over observations and is never shortened; an observation not newer than
+  the reading that ended the guard never re-arms it. It ends on expiry, or on a below-100% reading whose ROLLOUT timestamp is real and
+  strictly newer than `observed_at` (the latest exhausting observation's rollout timestamp); an undated,
+  stale or older reading never ends it, whatever the lane status. Timestamps are never synthesized.
+- **Enforcement.** Unless `gstack-config get codex_allow_credit_spend` is exactly `true` (default
+  `false`, set-side accepts only `true|false`), an unexpired guard makes L3 cooling until
+  `max(status cooldown, exhausted_until)` for `run`, `_probe-lane` and `probe` alike, and the shared
+  `lanes.json` is re-read before EVERY L3 invocation (first try, throttle retry, timeout step-down), so a
+  guard or quota recorded by another attempt refuses the retry. The opt-in never refuses: it lifts the
+  guard and the guard's own cooldown, keeps the record, and the summary / probe say so. Without the
+  opt-in the guard also cools `status` until the reset, reason `codex bucket exhausted (100%); credit spend
+  not allowed — set codex_allow_credit_spend=true to allow`, as a quota event under the ordering rules
+  (E9/H16/V2: never over `absent` — the guard field still enforces — never shortening an active longer
+  cooldown; a newer *cooling* is extended, never cleared). The observing invocation keeps its own class
+  (it already ran); the NEXT attempt meets the cooling refusal: class `quota`, `skipped: cooling`, exit 4 —
+  ABSENT for adjudicate, and `next_probe_at` = the bucket reset. The autobuilder template and
+  `autobuilder-unit.js` already wait on `quota`/cooling until `next_probe_at` (Seat X waits for the reset;
+  implementation returns `LANE_UNAVAILABLE` with `reset_at`), so no consumer changes.
+- **No retry on credits; recorded early.** Each invocation's own snapshot is checked as soon as it ends:
+  exhausted without the opt-in → the guard is written to `lanes.json` at once (also on SIGTERM/INT/HUP
+  mid-invocation), and no throttle retry or review timeout step-down runs (`retry_suppressed:
+  credit-guard`).
+- **Lock.** A triggered guard takes the long lock wait whatever the attempt's own kind. If neither the
+  early record nor finalize can take the lock, the attempt's own class, exit and adjudication are left
+  untouched (a completed-but-INVALID review stays INVALID), status `credit_guard: unpersisted` and an ERROR
+  on stderr say so, and no side file is written. A SIGTERM/INT/HUP between an invocation's launch and
+  the successful persistence of its snapshot (a failed early write stays pending) still records the guard.
+- **Visibility.** The `summary` line and the `probe` l3 line add `bucket=<pct>% resets=<iso>` when known
+  (`credit_guard=<state>` on the summary line). At 90% ≤ used < 100% a warning `codex bucket at <pct>%;
+  at 100% L3 cools until <iso> unless codex_allow_credit_spend=true` is emitted once per bucket window.
+  A `credits_balance` drop between two snapshots of the same window is reported as `credits spent: <d>`.
+- **Per-model cooldown follow-up withdrawn.** The v1.8.0 "Known helper limitation" (a per-model L3
+  cooldown would let Sol substitute on an Astra quota) rests on separate buckets; with one shared bucket
+  Sol would hit the same exhausted bucket (or bill credits), so lane-wide cooling is correct.
+- **Residuals.** The guard binds from the NEXT invocation: the invocation that first sees 100% (and
+  any invocation already in flight in another attempt) has spent credits. Under sustained `lanes.json`
+  lock contention exactly at 100%, each concurrent attempt can spend at most ONE invocation of credits
+  (`credit_guard: unpersisted`); the next attempt that gets the lock records the guard. The bucket record is per run-dir while the bucket is per account:
+  each new run-dir (and each concurrent one) learns it with one invocation of its own — usually the
+  step-0 Luna probe; an account-level mirror would need its own lock and ordering rules (follow-up). A
+  `bucket_guard` that a foreign edit made unparseable is ignored, like a corrupt `lanes.json` (helper-owned
+  file, same trust model).

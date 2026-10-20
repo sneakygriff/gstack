@@ -34,6 +34,8 @@
 #       never shortens an active longer cooldown, never replaces an `absent` lane with
 #       cooling, and never overwrites a quota/auth event recorded after the attempt began
 #       (a late ok, quota OR auth result keeps the newer state).
+#       The l3 line adds `bucket=<pct>% resets=<iso>` (and `credits spent: <d>`, and the
+#       one-time `warning: …`) from lanes.json when known — see CREDIT GUARD under run.
 #       Probe evidence: <dir>/attempts/probe-<lane>/<generated id>/out.txt.
 #
 #   gstack-lane run --run-dir <dir> --lane l2|l3|l4 --mode impl|review   (l4: review only)
@@ -224,6 +226,78 @@
 #                    (attempt_started_at > last_event_at, ms precision); otherwise the
 #                    newer cooling/absent state is kept.
 #         review with an empty/whitespace body → class error.
+#       CREDIT GUARD (v1.8.1, l3 only; probe, review and impl alike): every Codex model on a
+#       ChatGPT account draws from ONE usage bucket (rate_limits.limit_id "codex"), and at 100%
+#       codex does NOT fail — it silently keeps running on purchased credits. Snapshots are the
+#       `rate_limits` of event_msg/token_count records in this attempt's OWN rollouts
+#       (inv-<n>/rollout.jsonl; when no thread id located it, the fresh per-invocation home's
+#       newest rollout is kept as inv-<n>/rollout.unthreaded.jsonl and read for the bucket ONLY,
+#       never for runtime_model). A snapshot without a numeric used_percent (and no reached type)
+#       is UNUSABLE and skipped — it never supersedes an earlier valid one. Times are STRICT:
+#       epoch seconds (10 digits) or ms (13 digits), number or digit string, or ISO-8601 with a
+#       zone; anything else is "unknown". The LAST VALID snapshot of the "codex" bucket (or one
+#       without a limit_id; else the last valid of any id) is recorded as status "bucket" and
+#       lanes.json l3 "bucket": {limit_id, used_percent, resets_at (ISO), credits_balance,
+#       rate_limit_reached_type, observed_at}; missing fields are "unknown"; no usable snapshot
+#       → all-"unknown" in the status, a stderr warning that the guard is blind for the attempt,
+#       never a failure (lanes.json keeps its last known bucket).
+#       STATE: lanes.json l3 "bucket_guard" {exhausted_until, reason, set_at, observed_at} plus
+#       "bucket_obs" {<sha256 of the observation identity>: {u: deadline, f: fallback 1|0, id: readable
+#       prefix}} and "bucket_cleared_at" — the
+#       ONLY guard state (no side file), kept APART from `status`: an auth/absent status never masks
+#       or clears it. Each exhausting observation's OWN deadline (the reset, else now +
+#       GSTACK_LANE_BUCKET_FALLBACK_S, floored at 60 s) is computed ONCE and kept in bucket_obs under
+#       the sha256 (hex) of its FULL, never truncated identity (<task>/<attempt_id>/<file> of the
+#       claimed --out relative to <run-dir>/attempts, + inv-<n> + the rollout timestamp or record
+#       position) — fixed FOREVER, even
+#       when it fits inside a longer guard and after it expired: the early record, a signal or
+#       finalize of the same observation never restarts or extends anything (status
+#       "credit_guard":"expired"). bucket_obs never evicts a LIVE observation nor one expired within
+#       the 6 h replay window; older expired entries are pruned after 8 days and, beyond 64 entries,
+#       evicted oldest deadline first. The guard's exhausted_until is the max over observations, never
+#       shortened; an observation not newer than the reading that ended the guard (bucket_cleared_at)
+#       never re-arms it ("credit_guard":"stale"). observed_at = the latest exhausting
+#       observation's ROLLOUT timestamp ("unknown" when undated — sticky). It ends on expiry, or on
+#       a below-100% reading whose rollout timestamp is real and strictly newer than observed_at
+#       (an undated, stale or older reading never ends it), whatever the lane status. Recorded
+#       whenever an exhausted snapshot is seen (opted in or not). Snapshot observed_at is the
+#       rollout record's own timestamp, never synthesized.
+#       ENFORCEMENT (the EFFECTIVE lane state): an unexpired guard without the opt-in makes l3
+#       cooling until max(status cooldown, exhausted_until) for `run`, `_probe-lane` and `probe`
+#       (status absent included), and the shared lanes.json is re-read before EVERY l3 invocation
+#       (first try, throttle retry, timeout step-down): another attempt's guard or quota cooldown
+#       refuses the retry (class quota; "retry_suppressed":"lane-cooling"; before the first
+#       invocation it is the plain cooling skip). `codex_allow_credit_spend=true` never refuses:
+#       it lifts the guard AND the guard's own status cooldown (record kept; status
+#       "credit_guard_lifted", summary/probe say LIFTED). `probe --json` adds l3 "effective".
+#       RETRY GATE: after EACH l3 invocation its own snapshot is checked; exhausted without the
+#       opt-in → the guard is recorded AT ONCE under the lanes lock (before any further work), and
+#       no throttle retry or timeout step-down runs ("retry_suppressed":"credit-guard"; the sandbox
+#       rerun is l4-only). From an invocation's launch until its snapshot is PERSISTED (the early
+#       record, else finalize's locked update; home cleanup included), SIGTERM/INT/HUP still records
+#       it (2 s lock wait) — a failed early write leaves it pending.
+#       GUARD (finalize): the codex bucket (or none) at used_percent >= 100, or a reached type
+#       rate_limit_reached / *usage_limit_reached → bucket_guard, and — without the opt-in — L3
+#       `cooling` until exhausted_until with reason "codex bucket exhausted (100%); credit spend not
+#       allowed — set codex_allow_credit_spend=true to allow" (an unusable reset appends " (resets_at
+#       unknown, past or implausible: bounded <s> s cooldown)"): a quota event (last_event_at
+#       re-stamped, consecutive_quota counted once per active cooldown) under the EVENT ORDERING —
+#       never over `absent` (the guard field still enforces), never shortening an active longer
+#       cooldown; a newer COOLING is extended, never cleared. The observing attempt keeps its own
+#       class and result. LOCK: a triggered guard takes the long lock wait whatever this attempt's
+#       kind; if neither the early record nor finalize could take the lock, the attempt's class,
+#       exit and adjudication are UNCHANGED (INVALID stays INVALID), status "credit_guard" is
+#       "unpersisted" and stderr carries an ERROR — no side file. Status "credit_guard": cooling |
+#       kept (an ordering rule kept the lane state) | recorded (guard field only: absent / newer
+#       auth, or early record + busy finalize) | allowed (opted in) | unpersisted (lock busy) |
+#       expired (this observation's own deadline passed) | stale (an older observation than the
+#       reading that ended the guard).
+#       At 90% <= used < 100% (reset known, in the future) a warning "codex bucket at <pct>%; at
+#       100% L3 cools until <iso> unless codex_allow_credit_spend=true" is emitted ONCE per
+#       bucket window (status "bucket_warning", lanes.json l3 "bucket_warning" on that update
+#       only, "bucket_warned" = the window). A credits_balance drop between two snapshots of the
+#       same window (the last recorded one, else this attempt's first) is "credits_spent". The
+#       snapshot holds no token: auth.json is never read for it.
 #       l3 hermetic home (E4, addendum b): EVERY codex invocation gets a FRESH
 #       ${GSTACK_HOME:-~/.gstack}/lane-codex-home/<run-id>/<task>+<attempt_id>-inv<n>/ (0700;
 #       the full attempt identity, H15 — `+` cannot occur in an id, so no two attempts share it): a
@@ -244,7 +318,9 @@
 #   gstack-lane summary --out <f>
 #       Prints ONE line from <f>.status.json — attempt_id lane model runtime_model class
 #       exit duration result_sha (+ reviewed_sha / tainted / model_mismatch /
-#       lane_update / skipped / rejected when present) — never the CLI transcript.
+#       lane_update / skipped / rejected when present; l3: `bucket=<pct>% resets=<iso>`,
+#       `credit_guard=<state>`, `credits spent: <d>`, `warning: <text>` when known) — never the
+#       CLI transcript.
 #       Exits with the recorded exit_code (1 when the status file is missing/invalid).
 #
 #   gstack-lane adjudicate --out <f> --seat codex|grok --gate-class ordinary|critical
@@ -383,7 +459,9 @@
 # FILES WRITTEN (run/probe create everything with umask 077: dirs 0700, files 0600)
 #   <run-dir>/lanes.json        {"l2"|"l3"|"l4": {status: ok|cooling|absent, reason,
 #                               next_probe_at, runtime_model, updated_at, status_since,
-#                               last_event_at, consecutive_quota, throttle_count}} —
+#                               last_event_at, consecutive_quota, throttle_count; l3 also
+#                               bucket{}, bucket_guard{}, bucket_warned, bucket_warning — CREDIT
+#                               GUARD)} —
 #                               temp file + rename while holding a KERNEL flock on
 #                               <run-dir>/lanes.lock (perl Fcntl, E8): released by the
 #                               kernel when the holder dies, so there is no stale-lock
@@ -403,7 +481,10 @@
 #                               `commit --out`), published (bool), lane_update
 #                               (applied|none|pending), cmd_redacted (stdin prompt →
 #                               <prompt-file>, schema → <schema-file>), attempts[] (each
-#                               with its inv-<n> dir), lane_status{}; l4 reviews also
+#                               with its inv-<n> dir), lane_status{};
+#                               l3 after an invocation: bucket{} (+ credit_guard, bucket_warning,
+#                               credits_spent, retry_suppressed, credit_guard_lifted when they
+#                               apply — CREDIT GUARD); l4 reviews also
 #                               grok_project_config_stripped (true), sandbox_evidence
 #                               (the final invocation's, see l4) and, when the opted-in
 #                               fallback ran, unsandboxed_opt_in (true).
@@ -549,7 +630,9 @@
 # Env tunables (mainly tests): GSTACK_LANE_KILL_GRACE_S (5), GSTACK_LANE_BACKOFF_MS
 # (4000; jitter adds up to one base), GSTACK_LANE_THROTTLE_RETRIES (3),
 # GSTACK_LANE_LOCK_WAIT_S (30), GSTACK_LANE_PROBE_RETRY_S (300),
-# GSTACK_LANE_GROK_MODELS_TIMEOUT_S (30), GSTACK_LANE_SNAPSHOT_TIMEOUT_S (30).
+# GSTACK_LANE_GROK_MODELS_TIMEOUT_S (30), GSTACK_LANE_SNAPSHOT_TIMEOUT_S (30),
+# GSTACK_LANE_BUCKET_FALLBACK_S (86400, floor 60: the credit guard's bounded cooldown when an
+# exhausted snapshot carries no usable resets_at), GSTACK_LANE_TEST_PAUSE (tests only, see above).
 # JSON/date handling uses `bun -e` (isolated, above); the lanes lock uses perl (Fcntl flock).
 #
 # Hygiene: bash 3.2 compatible; no `set -e` (many non-zero statuses are captured on
@@ -575,16 +658,24 @@ GL_LOCK_WAIT_S="${GSTACK_LANE_LOCK_WAIT_S:-30}"
 GL_PROBE_RETRY_S="${GSTACK_LANE_PROBE_RETRY_S:-300}"
 GL_GROK_MODELS_TIMEOUT_S="${GSTACK_LANE_GROK_MODELS_TIMEOUT_S:-30}"
 GL_SNAPSHOT_TIMEOUT_S="${GSTACK_LANE_SNAPSHOT_TIMEOUT_S:-30}"
+GL_BUCKET_FALLBACK_S="${GSTACK_LANE_BUCKET_FALLBACK_S:-86400}"
+# Tests only: GSTACK_LANE_TEST_PAUSE=<before-record|after-record>:<s> sleeps at that point of every l3
+# invocation (the credit guard's cancel window and delayed-finalize tests). Anything else: no pause.
+GL_TEST_PAUSE="${GSTACK_LANE_TEST_PAUSE:-}"
+case "$GL_TEST_PAUSE" in before-record:[0-9]|before-record:[0-9][0-9]|after-record:[0-9]|after-record:[0-9][0-9]) ;; *) GL_TEST_PAUSE="" ;; esac
+GL_GUARD_PENDING_INV=""
 
 EX_OK=0; EX_ERROR=1; EX_USAGE=2; EX_THROTTLE=3; EX_QUOTA=4; EX_AUTH=5; EX_TIMEOUT=124
 EX_LOCK=75   # internal: the kernel lock could not be acquired within the wait
 
-for _gl_v in "$GL_KILL_GRACE_S" "$GL_BACKOFF_MS" "$GL_THROTTLE_RETRIES" "$GL_LOCK_WAIT_S" "$GL_PROBE_RETRY_S" "$GL_GROK_MODELS_TIMEOUT_S" "$GL_SNAPSHOT_TIMEOUT_S"; do
+for _gl_v in "$GL_KILL_GRACE_S" "$GL_BACKOFF_MS" "$GL_THROTTLE_RETRIES" "$GL_LOCK_WAIT_S" "$GL_PROBE_RETRY_S" "$GL_GROK_MODELS_TIMEOUT_S" "$GL_SNAPSHOT_TIMEOUT_S" "$GL_BUCKET_FALLBACK_S"; do
   case "$_gl_v" in ''|*[!0-9]*) echo "gstack-lane: GSTACK_LANE_* tunables must be non-negative integers" >&2; exit 2 ;; esac
 done
 [ "$GL_BACKOFF_MS" -ge 1 ] || GL_BACKOFF_MS=1
 [ "$GL_GROK_MODELS_TIMEOUT_S" -ge 1 ] || GL_GROK_MODELS_TIMEOUT_S=1
 [ "$GL_SNAPSHOT_TIMEOUT_S" -ge 1 ] || GL_SNAPSHOT_TIMEOUT_S=1
+[ "$GL_BUCKET_FALLBACK_S" -ge 60 ] || GL_BUCKET_FALLBACK_S=60   # floor: the fail-closed fallback is never ~0
+export GL_BUCKET_FALLBACK_S   # every helper-side bun call (lane-get, summary, finalize) uses the same bound
 
 # Whole-string id grammar ([[ =~ ]] anchors the whole value; no newline can match).
 GL_ID_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
@@ -903,8 +994,293 @@ function family(id) {
   do { prev = s; s = s.replace(/-(?:build|fast|mini|latest|preview|beta)$/, ""); } while (s !== prev);
   return s;
 }
+// ── v1.8.1 Codex credit guard: the shared `codex` usage bucket ──
+// Every Codex model on a ChatGPT account draws from ONE bucket (rate_limits.limit_id "codex"). At
+// 100% codex does NOT fail: it keeps running on purchased credits, so no error class ever shows it.
+// The bucket is read from the rate_limits snapshots (event_msg/token_count payload) in THIS attempt's
+// own rollouts (inv-<n>/rollout.jsonl, copied from each per-invocation home). Missing or malformed
+// (older codex) → "unknown", never a failure.
+const U = "unknown";
+const GUARD_REASON = "codex bucket exhausted (100%); credit spend not allowed — set codex_allow_credit_spend=true to allow";
+// rate_limit_reached / *usage_limit_reached on the codex bucket = that bucket's limit was reached
+// (*_credits_depleted is not: nothing is left to spend, codex then fails with a quota error).
+const USAGE_REACHED_RE = /^(?:rate_limit_reached|(?:workspace_(?:owner|member)_)?usage_limit_reached)$/;
+// Exhausted with an unusable reset (absent, malformed, past, > 8 days out): fail CLOSED for a bounded time.
+const GUARD_FALLBACK_S = Math.max(60, Number(E.GL_BUCKET_FALLBACK_S) > 0 ? Number(E.GL_BUCKET_FALLBACK_S) : 86400); // floor 60 s
+const unknownBucket = () => ({ limit_id: U, used_percent: U, resets_at: U, credits_balance: U, rate_limit_reached_type: U, observed_at: U });
+// Strict time: epoch seconds (10 digits) / ms (13 digits) as number or digit string, or strict ISO-8601.
+// Anything else ("0", "soon", "Oct 12", 1e3) is NaN — never Date.parse's lenient guess.
+const STRICT_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
+function strictTime(v) {
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return NaN;
+    if (v >= 1e9 && v < 1e10) return Math.round(v * 1000);
+    if (v >= 1e12 && v < 1e13) return Math.round(v);
+    return NaN;
+  }
+  if (typeof v !== "string") return NaN;
+  if (/^\d{10}$/.test(v)) return +v * 1000;
+  if (/^\d{13}$/.test(v)) return +v;
+  const m = v.match(STRICT_ISO);
+  if (!m || +m[2] < 1 || +m[2] > 12 || +m[3] < 1 || +m[3] > 31 || +m[4] > 23 || +m[5] > 59 || +m[6] > 59) return NaN;
+  const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${m[7] ? "." + (m[7] + "00").slice(0, 3) : ""}${m[8]}`);
+  return Number.isFinite(t) ? t : NaN;
+}
+// → a normalized bucket, or null when the snapshot is UNUSABLE (no numeric used_percent and no
+// limit-reached type): an unusable record is skipped, never allowed to supersede a valid one.
+function normBucket(rl, ts) {
+  const prim = rl.primary && typeof rl.primary === "object" && !Array.isArray(rl.primary) ? rl.primary : {};
+  const b = unknownBucket();
+  if (typeof rl.limit_id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(rl.limit_id)) b.limit_id = rl.limit_id;
+  const up = typeof prim.used_percent === "string" && /^\d{1,4}(?:\.\d{1,6})?$/.test(prim.used_percent) ? Number(prim.used_percent) : prim.used_percent;
+  if (typeof up === "number" && Number.isFinite(up) && up >= 0) b.used_percent = up;
+  const raMs = strictTime(prim.resets_at);
+  if (Number.isFinite(raMs)) b.resets_at = iso(raMs);
+  const c = rl.credits && typeof rl.credits === "object" ? rl.credits : null;
+  if (c) {
+    const v = typeof c.balance === "number" ? c.balance : (typeof c.balance === "string" && /^-?\d{1,15}(?:\.\d{1,12})?$/.test(c.balance.trim()) ? Number(c.balance) : NaN);
+    if (Number.isFinite(v)) b.credits_balance = v;
+  }
+  const rt = rl.rate_limit_reached_type;
+  if (rt === null) b.rate_limit_reached_type = null; // present: nothing reached
+  else if (typeof rt === "string" && /^[a-z_]{1,64}$/.test(rt)) b.rate_limit_reached_type = rt;
+  if (typeof b.used_percent !== "number" && !(typeof b.rate_limit_reached_type === "string" && USAGE_REACHED_RE.test(b.rate_limit_reached_type))) return null;
+  const t = strictTime(ts);
+  b.observed_at = Number.isFinite(t) ? isoMs(t) : U; // the rollout's own timestamp, never synthesized
+  return b;
+}
+const isCodexBucket = (b) => b.limit_id === "codex" || b.limit_id === U; // pre-limit_id codex had one bucket
+const bucketExhausted = (b) => isCodexBucket(b) && ((typeof b.used_percent === "number" && b.used_percent >= 100)
+  || (typeof b.rate_limit_reached_type === "string" && USAGE_REACHED_RE.test(b.rate_limit_reached_type)));
+// Usable snapshots of the given rollout files, in order.
+function readBuckets(files) {
+  const all = [];
+  for (const f of files) {
+    for (const line of readAll(f).split("\n")) {
+      if (!line.includes("rate_limits")) continue;
+      try {
+        const o = JSON.parse(line);
+        const rl = o && o.payload && typeof o.payload === "object" ? o.payload.rate_limits : null;
+        const b = rl && typeof rl === "object" && !Array.isArray(rl) ? normBucket(rl, o.timestamp) : null;
+        if (b) all.push(b);
+      } catch {}
+    }
+  }
+  return all;
+}
+// An invocation dir's rollout: the thread-located copy, else the unthreaded fallback (bucket only — never
+// used for runtime_model).
+const invRollouts = (dir) => [`${dir}/rollout.jsonl`, `${dir}/rollout.unthreaded.jsonl`].filter((f) => fs.existsSync(f)).slice(0, 1);
+// → { snap, first, known } — the LAST VALID snapshot of the codex bucket (else the last valid of any id)
+// across this attempt's invocations in order, plus the FIRST valid snapshot of that bucket/window.
+// ONE observation's identity, globally unique: the attempt's claimed out path relative to
+// <run-dir>/attempts (<task>/<attempt_id>/<file>, claimed by mkdir — never shared) + the invocation +
+// the record's rollout timestamp (or its position when undated). Same key from the early record, a
+// signal and finalize.
+// The map key is sha256(hex) of the FULL identity string (never truncated); a short readable prefix is
+// kept apart (entry field "id", logs only).
+const obsIdent = (inv, b, i) => `${String(E.GL_OBS_ID || "-")}/${inv}@${b.observed_at !== U ? b.observed_at : `#${i}`}`;
+function keyed(inv, list) {
+  list.forEach((b, i) => {
+    const full = obsIdent(inv, b, i);
+    Object.defineProperty(b, "key", { value: sha256(full), enumerable: false });
+    Object.defineProperty(b, "keyId", { value: full.replace(/[\x00-\x1f]+/g, "?").slice(0, 120), enumerable: false });
+  });
+  return list;
+}
+function bucketSnapshot() {
+  if (E.GL_LANE !== "l3" || !E.GL_STDOUT || !E.GL_LOG_DIR) return null; // nothing was invoked
+  let dirs = [];
+  try { dirs = fs.readdirSync(E.GL_LOG_DIR).filter((d) => /^inv-\d{1,6}$/.test(d)).sort((a, b) => +a.slice(4) - +b.slice(4)); } catch {}
+  const all = dirs.flatMap((d) => keyed(d, readBuckets(invRollouts(`${E.GL_LOG_DIR}/${d}`))));
+  const codex = all.filter(isCodexBucket);
+  const snap = (codex.length ? codex : all).pop();
+  if (!snap) return { snap: unknownBucket(), first: null, known: false, key: null };
+  const first = all.find((b) => b.limit_id === snap.limit_id && b.resets_at === snap.resets_at) || null;
+  return { snap, first, known: true, key: snap.key, keyId: snap.keyId };
+}
+// One invocation, right after it ended (the retry gate): "exhausted" | "ok" | "unknown".
+function bucketCheck() {
+  const all = readBuckets(invRollouts(E.GL_INV_DIR || "/nonexistent"));
+  const codex = all.filter(isCodexBucket);
+  const b = codex.pop();
+  console.log(!b ? "unknown" : bucketExhausted(b) ? "exhausted" : "ok");
+}
+// → [until ms, fallback?]: the bucket reset when it is a plausible future instant, else a bounded fallback.
+function guardUntil(snap) {
+  const r = Date.parse(snap.resets_at);
+  if (Number.isFinite(r) && r > now && r <= now + 8 * 864e5) return [r, false];
+  return [now + GUARD_FALLBACK_S * 1e3, true];
+}
+const guardReason = (fb) => (fb ? `${GUARD_REASON} (resets_at unknown, past or implausible: bounded ${GUARD_FALLBACK_S} s cooldown)` : GUARD_REASON);
+const pctStr = (p) => (typeof p === "number" ? String(Math.round(p * 10) / 10) : U);
+const round4 = (x) => Math.round(x * 1e4) / 1e4;
+let bucketNote = { guard: null, warning: null, credits_spent: null }; // this update's credit-guard outcome
+// ── the bucket guard record: lanes.json l3 "bucket_guard" {exhausted_until, reason, set_at} ──
+// Kept APART from `status`: an auth/absent status never masks or clears it. exhausted_until is computed
+// ONCE when recorded (the bucket reset, or now + the bounded fallback) and never recomputed on read.
+const GUARD_PREFIX = "codex bucket exhausted (100%)";
+const optIn = () => E.GL_CREDIT_OK === "1";
+const isGuardReason = (r) => typeof r === "string" && r.startsWith(GUARD_PREFIX);
+function guardOf(e) {
+  const g = e && typeof e === "object" ? e.bucket_guard : null;
+  if (!g || typeof g !== "object" || Array.isArray(g)) return null;
+  const until = strictTime(g.exhausted_until);
+  if (!Number.isFinite(until)) return null; // a corrupt record is treated like a corrupt lanes.json (helper-owned file)
+  const obs = typeof g.observed_at === "string" && Number.isFinite(strictTime(g.observed_at)) ? g.observed_at : U;
+  return { until, reason: typeof g.reason === "string" ? g.reason.replace(/[\x00-\x1f]+/g, " ").slice(0, 300) : GUARD_REASON,
+           set_at: typeof g.set_at === "string" ? g.set_at : null, observed_at: obs };
+}
+// observed_at of a guard = the LATEST exhausting observation it retains; "unknown" (an undated one) is sticky.
+const laterObs = (a, b) => (a === U || b === U || !a || !b ? U : (Date.parse(a) >= Date.parse(b) ? a : b));
+// Per-observation deadlines: l3 "bucket_obs" {<obs key>: {u: <deadline ISO>, f: <1 = fallback>}} —
+// kept apart from the guard (it survives the guard's end), bounded: entries whose deadline is older than
+// the 8-day window are pruned and at most OBS_CAP (the latest deadlines) are kept.
+const OBS_CAP = 64;
+function obsMap(e) {
+  const m = e && e.bucket_obs && typeof e.bucket_obs === "object" && !Array.isArray(e.bucket_obs) ? e.bucket_obs : {};
+  const out = {};
+  for (const [k, v] of Object.entries(m)) {
+    if (!/^[0-9a-f]{64}$/.test(k) || !v || typeof v !== "object") continue;
+    const u = strictTime(v.u);
+    if (Number.isFinite(u)) out[k] = { u: iso(u), f: v.f === 1 ? 1 : 0, id: typeof v.id === "string" ? v.id.replace(/[\x00-\x1f]+/g, "?").slice(0, 120) : "" };
+  }
+  return out;
+}
+// A LIVE (unexpired) observation is never evicted, whatever the count (live entries are bounded by
+// concurrency) — nor one that expired within the REPLAY window (6 h, longer than any attempt: its own
+// finalize or cancel may still replay it, and must find its fixed deadline). Older expired entries are
+// pruned after the 8-day window, and beyond OBS_CAP the oldest-deadline ones go first.
+const OBS_REPLAY_MS = 6 * 36e5;
+function pruneObs(m) {
+  const keep = [], old = [];
+  for (const [k, v] of Object.entries(m)) {
+    const u = Date.parse(v.u);
+    if (u > now - OBS_REPLAY_MS) keep.push([k, v]);
+    else if (u >= now - 8 * 864e5) old.push([k, v]);
+  }
+  old.sort((x, y) => Date.parse(y[1].u) - Date.parse(x[1].u)); // newest first
+  return Object.fromEntries([...keep, ...old.slice(0, Math.max(0, OBS_CAP - keep.length))]);
+}
+// Record an exhausted observation. Its OWN deadline is computed once (keyed) and fixed forever — even when
+// it fits inside a longer guard, and after it expired (never restarted). The guard takes the max, never
+// shortened. An observation not newer than the reading that already ended the guard never re-arms it.
+// → { own: {until, fb}, expired?, stale?, guard? }
+function recordGuard(e, snap, key, keyId) {
+  const m = obsMap(e);
+  let own;
+  if (key && m[key]) own = { until: Date.parse(m[key].u), fb: m[key].f === 1 };
+  else {
+    const [u, fb] = guardUntil(snap);
+    own = { until: u, fb };
+    if (key) { m[key] = { u: iso(u), f: fb ? 1 : 0, id: keyId || "" }; }
+  }
+  e.bucket_obs = pruneObs(m);
+  if (own.until <= now) return { own, expired: true };
+  const cleared = strictTime(e.bucket_cleared_at);
+  if (Number.isFinite(cleared) && snap.observed_at !== U && Date.parse(snap.observed_at) <= cleared) return { own, stale: true };
+  const g = guardOf(e);
+  const obs = snap.observed_at;
+  if (g && g.until > now && g.until >= own.until) e.bucket_guard.observed_at = laterObs(g.observed_at, obs);
+  else e.bucket_guard = { exhausted_until: iso(own.until), reason: guardReason(own.fb), set_at: isoMs(now),
+                          observed_at: g && g.until > now ? laterObs(g.observed_at, obs) : obs };
+  return { own, guard: guardOf(e) };
+}
+// The EFFECTIVE lane state every launch decision uses (run, each retry, _probe-lane, probe):
+// an enforced guard means cooling until max(status cooldown, exhausted_until) — whatever `status` says;
+// codex_allow_credit_spend=true lifts the guard AND the guard's own status cooldown (record kept).
+function effective(e) {
+  const cur = e && typeof e === "object" ? e : {};
+  const g = guardOf(cur);
+  const guard = !g ? "none" : g.until <= now ? "expired" : optIn() ? "lifted" : "enforced";
+  const next = Date.parse(cur.next_probe_at || "");
+  let active = cur.status === "cooling" && next > now;
+  if (active && optIn() && isGuardReason(cur.reason)) active = false;
+  if (guard === "enforced") {
+    return { status: "cooling", active: 1, next: iso(Math.max(active ? next : 0, g.until)), guard, guard_until: iso(g.until), reason: g.reason };
+  }
+  return { status: cur.status || "none", active: active ? 1 : 0, next: cur.next_probe_at || "-", guard, guard_until: g ? iso(g.until) : "-", reason: g ? g.reason : null };
+}
+// Locked, right after an exhausted invocation (and on a cancel): persist the guard as early as possible.
+function guardRecord() {
+  const dir = E.GL_INV_DIR || "/nonexistent";
+  const b = keyed(require("path").basename(dir), readBuckets(invRollouts(dir))).filter(isCodexBucket).pop();
+  if (!b || !bucketExhausted(b)) { console.log("none"); return; }
+  const lanes = readLanes(E.GL_LANES_FILE, true);
+  const e = lanes.l3 && typeof lanes.l3 === "object" && !Array.isArray(lanes.l3) ? lanes.l3
+    : { status: "ok", reason: "credit guard recorded", next_probe_at: null, runtime_model: null, updated_at: iso(now), status_since: isoMs(now),
+        last_event_at: null, consecutive_quota: 0, throttle_count: 0 };
+  recordGuard(e, b, b.key, b.keyId);
+  lanes.l3 = e;
+  writeLanes(E.GL_LANES_FILE, lanes);
+  console.log("recorded");
+}
+// Cool `e` until `until` as a quota event — never over absent, never shortening a longer active cooldown
+// (a newer COOLING is extended, never cleared). Returns the guard outcome.
+function coolForBucket(e, until, reason, prevCoolingNext, eventAt) {
+  if (e.status === "absent") return "recorded"; // status stays absent; bucket_guard still enforces
+  const activeNext = Math.max(e.status === "cooling" ? (Date.parse(e.next_probe_at || "") || 0) : 0, prevCoolingNext || 0);
+  if (activeNext >= until) {
+    if (e.status !== "cooling" || e.next_probe_at !== iso(activeNext)) {
+      e.status = "cooling"; e.next_probe_at = iso(activeNext); e.reason = reason;
+      e.last_event_at = eventAt; e.consecutive_quota = Math.max(1, e.consecutive_quota);
+    }
+    return "kept";
+  }
+  e.consecutive_quota = activeNext > now ? Math.max(1, e.consecutive_quota) : e.consecutive_quota + 1;
+  e.status = "cooling"; e.next_probe_at = iso(until); e.last_event_at = eventAt; e.reason = reason;
+  return "cooling";
+}
+// Applies the guard to lane entry `e` (after this attempt's own transition). The observing invocation
+// keeps its own class; the guard binds the NEXT attempt through the cooling refusal.
+function bucketUpdate(e, prev, bk, newerEvent, prevCoolingNext) {
+  const prevB = prev.bucket && typeof prev.bucket === "object" && !Array.isArray(prev.bucket) ? prev.bucket : null;
+  if (!bk.known) { // a missing snapshot never erases a known one
+    e.bucket = prevB ? Object.assign({}, prevB) : unknownBucket();
+    delete e.bucket.credits_spent;
+    return;
+  }
+  const snap = Object.assign({}, bk.snap);
+  const prevObs = prevB ? Date.parse(prevB.observed_at) : NaN;
+  if (Number.isFinite(prevObs) && Date.parse(snap.observed_at) < prevObs) { // the record keeps the newer reading…
+    e.bucket = Object.assign({}, prevB); delete e.bucket.credits_spent;
+  } else {
+    // credits spent between two recorded snapshots of the SAME bucket window (else since this attempt's first one)
+    const sameWin = (b) => b && b.limit_id === snap.limit_id && b.resets_at === snap.resets_at && b.resets_at !== U && typeof b.credits_balance === "number";
+    const base = sameWin(prevB) ? prevB.credits_balance : (sameWin(bk.first) ? bk.first.credits_balance : null);
+    if (base !== null && typeof snap.credits_balance === "number" && round4(base - snap.credits_balance) > 0) {
+      snap.credits_spent = round4(base - snap.credits_balance);
+      bucketNote.credits_spent = snap.credits_spent;
+    }
+    e.bucket = snap;
+  }
+  // …but the warning and the guard always judge THIS attempt's own, fresh observation.
+  const win = `${snap.limit_id}@${snap.resets_at}`;
+  const resetMs = Date.parse(snap.resets_at);
+  if (isCodexBucket(snap) && typeof snap.used_percent === "number" && snap.used_percent >= 90 && !bucketExhausted(snap)
+      && Number.isFinite(resetMs) && resetMs > now && e.bucket_warned !== win) {
+    bucketNote.warning = `codex bucket at ${pctStr(snap.used_percent)}%; at 100% L3 cools until ${snap.resets_at} unless codex_allow_credit_spend=true`;
+    e.bucket_warning = bucketNote.warning;
+    e.bucket_warned = win;
+  }
+  if (!bucketExhausted(snap)) {
+    // a valid reading below 100% ends the guard ONLY when both timestamps are real (from the rollouts)
+    // and it is strictly newer than every retained exhausting observation — whatever the lane status.
+    const g = guardOf(e);
+    if (g && isCodexBucket(snap) && snap.observed_at !== U && g.observed_at !== U
+        && Date.parse(snap.observed_at) > Date.parse(g.observed_at)) { delete e.bucket_guard; e.bucket_cleared_at = snap.observed_at; }
+    return;
+  }
+  const r = recordGuard(e, snap, bk.key, bk.keyId); // recorded even when opted in (visibility) and over absent
+  if (r.expired) { bucketNote.guard = "expired"; return; } // this observation's own deadline already passed: no restart
+  if (r.stale) { bucketNote.guard = "stale"; return; }     // a newer below-100% reading already ended the guard
+  const g = r.guard;
+  if (optIn()) { bucketNote.guard = "allowed"; return; }
+  if (newerEvent && e.status !== "cooling") { bucketNote.guard = "recorded"; return; } // a newer auth failure stands; the guard field enforces
+  bucketNote.guard = coolForBucket(e, g.until, g.reason, prevCoolingNext, isoMs(now));
+}
 // ── lanes.json (always called while the kernel lock is held) ──
-function laneUpdate(rm, cls) {
+function laneUpdate(rm, cls, bk) {
   const f = E.GL_LANES_FILE, lane = E.GL_LANE, kind = E.GL_UPDATE;
   const lanes = readLanes(f, true);
   const prev = lanes[lane] && typeof lanes[lane] === "object" ? lanes[lane] : {};
@@ -923,6 +1299,13 @@ function laneUpdate(rm, cls) {
     consecutive_quota: Number.isInteger(prev.consecutive_quota) ? prev.consecutive_quota : 0,
     throttle_count: Number.isInteger(prev.throttle_count) ? prev.throttle_count : 0,
   };
+  if (prev.bucket && typeof prev.bucket === "object" && !Array.isArray(prev.bucket)) {
+    e.bucket = Object.assign({}, prev.bucket); delete e.bucket.credits_spent; // credits_spent belongs to the update that saw it
+  }
+  if (typeof prev.bucket_warned === "string") e.bucket_warned = prev.bucket_warned; // bucket_warning: only the update that warned
+  if (guardOf(prev)) e.bucket_guard = Object.assign({}, prev.bucket_guard);
+  if (prev.bucket_obs) e.bucket_obs = pruneObs(obsMap(prev));                    // per-observation deadlines
+  if (typeof prev.bucket_cleared_at === "string") e.bucket_cleared_at = prev.bucket_cleared_at;
   let reason = E.GL_REASON || null;
   if (rm && rm.model) e.runtime_model = rm.model;
   // H16 event ordering (every update, probe or run): a quota/auth event recorded AFTER this
@@ -960,6 +1343,7 @@ function laneUpdate(rm, cls) {
     e.throttle_count += 1;
   }
   if (reason) e.reason = reason;
+  if (bk) bucketUpdate(e, prev, bk, newerEvent, coolingActive ? prevNext : 0);
   if (e.status !== prev.status) e.status_since = isoMs(now);
   lanes[lane] = e;
   writeLanes(f, lanes);
@@ -969,7 +1353,8 @@ function shq(a) { return /^[A-Za-z0-9_@%+=:,.\/<>-]+$/.test(a) ? a : `'${a.repla
 function finalize() {
   const rm = E.GL_RM === "1" ? runtimeModel() : { model: null, effort: null, source: "none", all: [] };
   const cls = E.GL_CLASS;
-  const lane = E.GL_UPDATE && E.GL_UPDATE !== "none" ? laneUpdate(rm, cls) : null;
+  const bk = E.GL_RM === "1" ? bucketSnapshot() : null;
+  const lane = E.GL_UPDATE && E.GL_UPDATE !== "none" ? laneUpdate(rm, cls, bk) : null;
   const attempts = readAll(E.GL_ATTEMPTS_FILE).split("\n").filter(Boolean).map((l) => {
     const [n, effort, timeout_s, exit, c, duration_s, sandbox, dir, detail] = l.split("\t");
     return { n: +n, effort: effort || null, timeout_s: +timeout_s, exit: exit === "" ? null : +exit, class: c,
@@ -1029,6 +1414,25 @@ function finalize() {
   if (E.GL_GROK_STRIPPED === "1") s.grok_project_config_stripped = true;
   if (E.GL_UNSANDBOXED_OPT_IN === "1") s.unsandboxed_opt_in = true;
   if (E.GL_LANE === "l4") s.sandbox_evidence = E.GL_SANDBOX_EVIDENCE || null;
+  if (bk) { // v1.8.1: this attempt's own bucket snapshot + the guard's outcome (status keeps its own class)
+    s.bucket = bk.snap;
+    if (!lane && bk.known && bucketExhausted(bk.snap)) {
+      // No lane update ran (lanes lock busy even after the long wait). No side file: either the early
+      // per-invocation record already persisted the guard, or the attempt ended class quota (bash).
+      bucketNote.guard = optIn() ? "allowed" : E.GL_GUARD_PERSISTED === "1" ? "recorded" : "unpersisted";
+    }
+    if (E.GL_GUARD_LIFTED === "1") s.credit_guard_lifted = true;
+    if (!bk.known) process.stderr.write("gstack-lane: warning: no rate_limits snapshot in this attempt's rollout — the Codex credit guard is blind for this attempt\n");
+    if (E.GL_RETRY_SUPPRESSED) s.retry_suppressed = E.GL_RETRY_SUPPRESSED;
+    if (bucketNote.guard) s.credit_guard = bucketNote.guard;
+    if (bucketNote.warning) s.bucket_warning = bucketNote.warning;
+    if (bucketNote.credits_spent !== null) s.credits_spent = bucketNote.credits_spent;
+    if (bucketNote.warning) process.stderr.write(`gstack-lane: warning: ${bucketNote.warning}\n`);
+    if (bucketNote.credits_spent !== null) process.stderr.write(`gstack-lane: codex credits spent: ${bucketNote.credits_spent}\n`);
+    if (bucketNote.guard === "cooling") process.stderr.write(`gstack-lane: l3 ${GUARD_REASON}; cooling until ${lane.next_probe_at}\n`);
+    else if (bucketNote.guard === "recorded") process.stderr.write(`gstack-lane: l3 ${GUARD_REASON}; recorded in lanes.json bucket_guard\n`);
+    else if (bucketNote.guard === "allowed") process.stderr.write("gstack-lane: codex bucket at 100%: running on purchased credits (codex_allow_credit_spend=true)\n");
+  }
   if (E.GL_STATUS_FILE) writeAtomic(E.GL_STATUS_FILE, s);
   console.log(lineFor(s));
 }
@@ -1042,7 +1446,21 @@ function lineFor(s) {
   if (s.lane_update === "pending") parts.push("lane_update=pending");
   if (s.skipped) parts.push(`skipped=${v(s.skipped)}`);
   if (s.rejected) parts.push("rejected=true");
+  if (s.credit_guard_lifted) parts.push("credit_guard_lifted=codex_allow_credit_spend");
+  parts.push(...bucketParts(s.bucket, s.credit_guard ? `credit_guard=${v(s.credit_guard)}` : null, s.credits_spent, s.bucket_warning));
   return parts.join(" ");
+}
+// v1.8.1: `bucket=<pct>% resets=<iso>` when known, then the credits delta and the one-time warning.
+function bucketParts(b, extra, spent, warning) {
+  const p = [];
+  if (b && typeof b === "object" && typeof b.used_percent === "number") {
+    const r = typeof b.resets_at === "string" && b.resets_at !== U ? ` resets=${b.resets_at.replace(/\s+/g, "_")}` : "";
+    p.push(`bucket=${pctStr(b.used_percent)}%${r}`);
+  }
+  if (extra) p.push(extra);
+  if (typeof spent === "number") p.push(`credits spent: ${spent}`);
+  if (typeof warning === "string" && warning) p.push(`warning: ${warning.replace(/[\x00-\x1f]+/g, " ")}`);
+  return p;
 }
 function statusLine() {
   let s;
@@ -1062,13 +1480,14 @@ function stamp() {
   writeAtomic(E.GL_STATUS_FILE, s);
 }
 function laneGet() {
+  // status active next consecutive_quota now hash | guard-enforced(1/0) guard_until guard-state — EFFECTIVE values
   const e = readLanes(E.GL_LANES_FILE, false)[E.GL_LANE];
   let txt = null;
   try { txt = fs.readFileSync(E.GL_LANES_FILE, "utf8"); } catch {}
   const h = txt === null ? "absent" : sha256(txt);
-  if (!e || typeof e !== "object") { console.log(["none", 0, "-", 0, now, h].join("\t")); return; }
-  const active = e.status === "cooling" && Date.parse(e.next_probe_at || "") > now ? 1 : 0;
-  console.log([e.status || "none", active, e.next_probe_at || "-", e.consecutive_quota || 0, now, h].join("\t"));
+  const x = effective(E.GL_LANE === "l3" ? e : (e && typeof e === "object" ? Object.assign({}, e, { bucket_guard: undefined }) : e));
+  const cq = e && typeof e === "object" ? e.consecutive_quota || 0 : 0;
+  console.log([x.status, x.active, x.next, cq, now, h, x.guard === "enforced" ? 1 : 0, x.guard_until, x.guard].join("\t"));
 }
 // ── adjudicate (D4/H9): one forum member's review attempt → PRESENT_CLEAN|PRESENT_P1|INVALID|ABSENT ──
 // Order: INVALID before ABSENT (a completed-but-unusable review never counts as absent).
@@ -1149,15 +1568,27 @@ function adjudicate() {
 function summary() {
   const lanes = readLanes(E.GL_LANES_FILE, false);
   const skipped = (E.GL_SKIPPED_LANES || "").split(",").filter(Boolean);
-  if (E.GL_JSON === "1") { console.log(JSON.stringify(lanes, null, 2)); return; }
+  if (E.GL_JSON === "1") { // + the EFFECTIVE l3 state (bucket guard applied), never persisted
+    if (lanes.l3 && typeof lanes.l3 === "object") {
+      const x = effective(lanes.l3);
+      lanes.l3 = Object.assign({}, lanes.l3, { effective: { status: x.status, cooling_active: x.active === 1, next_probe_at: x.next === "-" ? null : x.next,
+        credit_guard: x.guard, exhausted_until: x.guard_until === "-" ? null : x.guard_until } });
+    }
+    console.log(JSON.stringify(lanes, null, 2)); return;
+  }
   for (const l of (E.GL_LANE_LIST || "").split(",").filter(Boolean)) {
     const e = lanes[l];
     if (!e) { console.log(`${l}: unknown (not probed)`); continue; }
-    let line = `${l}: ${e.status}`;
-    if (e.status === "cooling" && e.next_probe_at) line += ` until ${e.next_probe_at}`;
+    const x = l === "l3" ? effective(e) : { status: e.status, next: e.next_probe_at, guard: "none" };
+    let line = `${l}: ${x.status}`;
+    if (x.status === "cooling" && x.next && x.next !== "-") line += ` until ${x.next}`;
     if (skipped.includes(l)) line += " — still cooling (skipped, not probed)";
     if (e.runtime_model) line += ` — runtime_model=${e.runtime_model}`;
     if (e.reason) line += ` — ${e.reason}`;
+    if (x.guard === "enforced") line += ` — credit guard: bucket exhausted until ${x.guard_until} (status ${e.status})`;
+    else if (x.guard === "lifted") line += ` — credit guard LIFTED by codex_allow_credit_spend=true (bucket exhausted until ${x.guard_until})`;
+    const bp = bucketParts(e.bucket, null, e.bucket && e.bucket.credits_spent, skipped.includes(l) ? null : e.bucket_warning);
+    if (bp.length) line += ` — ${bp.join(" — ")}`;
     console.log(line);
   }
 }
@@ -1168,6 +1599,8 @@ try {
   else if (fn === "adjudicate") adjudicate();
   else if (fn === "finalize") finalize();
   else if (fn === "lane-get") laneGet();
+  else if (fn === "bucket-check") bucketCheck();
+  else if (fn === "guard-record") guardRecord();
   else if (fn === "summary") summary();
   else if (fn === "status-line") statusLine();
   else if (fn === "stamp") stamp();
@@ -1438,6 +1871,11 @@ _gl_on_signal() {
   if [ "${GL_CODEX_HOME_LIVE:-0}" = 1 ]; then
     GL_LOCK_WAIT_S=2 _gl_codex_inv_cleanup "${GL_CUR_INV:-}" "" 2>/dev/null
   fi
+  # v1.8.1: an l3 invocation whose snapshot is not yet recorded (from its launch until the early record
+  # is done — including AFTER its home was cleaned up) is still persisted on a cancel (bounded lock wait).
+  if [ -n "${GL_GUARD_PENDING_INV:-}" ] && [ -n "${GL_RUN_DIR:-}" ]; then
+    _gl_guard_record "$GL_GUARD_PENDING_INV" 2 >/dev/null 2>&1
+  fi
   for p in $GL_PROBE_PIDS; do kill -TERM "$p" 2>/dev/null; done
   exit "$code"
 }
@@ -1575,6 +2013,21 @@ GL_GROK_ENV=(-u GROK_FOLDER_TRUST -u GROK_SANDBOX -u GROK_SANDBOX_AUTO_ALLOW_BAS
 _gl_grok_unsandboxed_ok() { # gstack-config grok_allow_unsandboxed must be exactly "true"
   [ "$("$GL_BIN_DIR/gstack-config" get grok_allow_unsandboxed 2>/dev/null || true)" = true ]
 }
+# v1.8.1 credit guard: spending purchased Codex credits once the shared `codex` bucket is at 100%
+# is an explicit operator opt-in, like Fable's --allow-credit-billing (fail closed).
+_gl_test_pause() { [ -n "$GL_TEST_PAUSE" ] && [ "${GL_TEST_PAUSE%%:*}" = "$1" ] && sleep "${GL_TEST_PAUSE#*:}"; return 0; }
+_gl_codex_credit_ok() { # gstack-config codex_allow_credit_spend must be exactly "true"
+  [ "$("$GL_BIN_DIR/gstack-config" get codex_allow_credit_spend 2>/dev/null || true)" = true ]
+}
+# Persist an invocation's exhausted snapshot as lanes.json l3 bucket_guard NOW (under the lanes lock,
+# <wait_s>), before any further work — so a cancel, a later crash or a busy finalize cannot lose it.
+_gl_guard_record() { # <inv dir> <wait_s> → 0 recorded
+  local r
+  r="$(GL_LANES_FILE="$GL_RUN_DIR/lanes.json" GL_INV_DIR="$1" GL_OBS_ID="${GL_OBS_ID:-}" GL_FN=guard-record _gl_bun_js_locked "$2" 2>/dev/null)" || return 1
+  [ "$r" = recorded ]
+}
+# The EFFECTIVE lane state right now (lanes.json is shared: another attempt's quota or guard counts).
+_gl_lane_get() { GL_LANES_FILE="$GL_RUN_DIR/lanes.json" GL_LANE="$GL_LANE" GL_CREDIT_OK="${GL_CREDIT_OK:-0}" _gl_js lane-get; }
 # F1: grok appends {"event_type":"ProfileApplied","profile":…,"workspace":<cwd>,"enforced":true}
 # (or ApplyFailed) to $GROK_HOME/sandbox-events.jsonl when it applies a --sandbox profile. A
 # GROK_HOME that is not absolute resolves against grok's cwd, not ours: no evidence (fail closed).
@@ -1736,6 +2189,12 @@ _gl_codex_inv_cleanup() { # <inv dir> [<thread id>]
   if [ -n "$thread" ] && [ -n "$inv" ]; then
     f="$(find "$GL_CODEX_HOME/sessions" -type f -name "rollout-*-$thread.jsonl" 2>/dev/null | head -1)"
     [ -n "$f" ] && cp "$f" "$inv/rollout.jsonl" 2>/dev/null
+  fi
+  if [ ! -f "$inv/rollout.jsonl" ] && [ -n "$inv" ] && [ -n "$GL_CODEX_HOME" ]; then
+    # No thread id: the home is FRESH per invocation, so its newest rollout is this invocation's own.
+    # Kept apart (rollout.unthreaded.jsonl): read for the credit guard's bucket only, never for runtime_model.
+    f="$(find "$GL_CODEX_HOME/sessions" -type f -name 'rollout-*.jsonl' 2>/dev/null | LC_ALL=C sort | tail -1)"
+    [ -n "$f" ] && cp "$f" "$inv/rollout.unthreaded.jsonl" 2>/dev/null
   fi
   if [ -n "$GL_AUTH_INITIAL" ] && [ -f "$GL_CODEX_HOME/auth.json" ]; then
     [ -n "$GL_CODEX_BASE" ] && _gl_locked_at "$(dirname "$GL_CODEX_BASE")/auth.lock" "$GL_LOCK_WAIT_S" \
@@ -2117,7 +2576,7 @@ _gl_record_cmd() { : > "$GL_CMD_FILE"; local a; for a in "${GL_RED[@]}"; do prin
 
 _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
   local effort="$1" to="$2" deadline now remaining n_thr=0 so se inv t0 dur cls res detail backoff_ms first=1
-  local ev_file ev_off sbres refused
+  local ev_file ev_off sbres refused pre
   now=$(_gl_now)
   deadline=$(( now + to ))
   GL_SANDBOX="$(_gl_initial_sandbox)"
@@ -2130,6 +2589,20 @@ _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
     if [ "$remaining" -lt 1 ]; then
       [ -z "$GL_TRY_CLASS" ] && GL_TRY_CLASS=timeout
       break
+    fi
+    if [ "$GL_LANE" = l3 ]; then
+      # v1.8.1: re-check the SHARED lane state before EVERY codex invocation (first try, throttle retry,
+      # step-down; probes too) — another attempt's quota cooldown or bucket guard counts.
+      # (fast path: a lanes.json holding neither a cooling status nor a bucket_guard cannot refuse)
+      pre=""
+      if grep -q -e '"cooling"' -e '"bucket_guard"' "$GL_RUN_DIR/lanes.json" 2>/dev/null; then pre="$(_gl_lane_get 2>/dev/null)"; fi
+      if [ "$(printf '%s' "$pre" | cut -f1)" = cooling ] && [ "$(printf '%s' "$pre" | cut -f2)" = 1 ]; then
+        GL_PRE_REFUSED="$(printf '%s' "$pre" | cut -f3)"
+        GL_TRY_CLASS=quota
+        GL_LAST_DETAIL="lane cooling until $GL_PRE_REFUSED (re-checked before invocation $(( GL_INV + 1 )))"
+        [ "$(printf '%s' "$pre" | cut -f7)" = 1 ] && GL_LAST_DETAIL="credit guard: codex bucket exhausted until $(printf '%s' "$pre" | cut -f8) (re-checked before invocation $(( GL_INV + 1 )))"
+        break
+      fi
     fi
     GL_INV=$(( GL_INV + 1 ))
     inv="$GL_LOG_DIR/inv-$GL_INV"
@@ -2153,6 +2626,8 @@ _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
       if [ -n "$ev_file" ] && [ -f "$ev_file" ]; then ev_off=$(( $(wc -c 2>/dev/null < "$ev_file" || echo 0) )); fi
     fi
     t0=$(_gl_now)
+    # v1.8.1: from launch until its snapshot is recorded, a cancel persists it (signal handler).
+    [ "$GL_LANE" = l3 ] && [ "${GL_CREDIT_OK:-0}" != 1 ] && GL_GUARD_PENDING_INV="$inv"
     _gl_bounded "$remaining" "$GL_STDIN" "$so" "$se" "$GL_CWD" "${GL_CMD[@]}"
     dur=$(( $(_gl_now) - t0 ))
     if [ "$GL_LANE" = l4 ]; then
@@ -2173,6 +2648,19 @@ _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
       # Classify FIRST: its JSON parse yields the thread id that locates the rollout (H10).
       res="$(_gl_classify "$GL_RC" "$so" "$inv/out")"
       _gl_codex_inv_cleanup "$inv" "$(printf '%s' "$res" | cut -f3)"
+      _gl_test_pause before-record
+      # v1.8.1 retry gate: this invocation's own snapshot at 100% (no opt-in) ends the attempt here —
+      # no throttle retry and no timeout step-down may spend credits.
+      # (fast path: a rollout without any rate_limits record cannot be exhausted)
+      if [ "${GL_CREDIT_OK:-0}" != 1 ] && grep -qs 'rate_limits' "$inv/rollout.jsonl" "$inv/rollout.unthreaded.jsonl" \
+         && [ "$(GL_INV_DIR="$inv" _gl_js bucket-check 2>/dev/null)" = exhausted ]; then
+        GL_BUCKET_EXHAUSTED=1
+        # as early as possible; pending stays set until a write SUCCEEDS (a later signal or finalize retries)
+        if _gl_guard_record "$inv" "$GL_LOCK_WAIT_S"; then GL_GUARD_PERSISTED=1; GL_GUARD_PENDING_INV=""; fi
+      else
+        GL_GUARD_PENDING_INV=""   # below 100% / unknown: nothing for a cancel to persist
+      fi
+      _gl_test_pause after-record
     fi
     if [ "$refused" = 1 ]; then   # F2: only grok's unambiguous pre-start refusal (anchored, empty stdout)
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" sandbox-refused "$dur" read-only "$inv" "sandbox refused to start" >> "$GL_ATTEMPTS_FILE"
@@ -2218,6 +2706,10 @@ _gl_try() { # <effort> <timeout_s> → GL_TRY_CLASS
     GL_LAST_DETAIL="$detail"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$GL_INV" "$effort" "$remaining" "$GL_RC" "$cls" "$dur" "$GL_SANDBOX" "$inv" "$detail" >> "$GL_ATTEMPTS_FILE"
     GL_TRY_CLASS="$cls"
+    if [ "$cls" = throttle ] && [ "${GL_BUCKET_EXHAUSTED:-0}" = 1 ]; then
+      GL_RETRY_SUPPRESSED=credit-guard   # the bucket is exhausted: retrying would bill credits
+      break
+    fi
     if [ "$cls" = throttle ]; then
       GL_THROTTLE_INV=$(( GL_THROTTLE_INV + 1 ))
       if [ "$n_thr" -lt "$GL_THROTTLE_RETRIES" ]; then
@@ -2255,7 +2747,8 @@ _gl_finalize() {
     GL_LANE_UPDATE="$2" GL_LANE_UPDATE_KIND="${GL_LANE_UPDATE_KIND:-}" \
     GL_REJECTED="${GL_REJECTED:-}" GL_SKIPPED="${GL_SKIPPED:-}" GL_NOTE="${GL_NOTE:-}" \
     GL_GROK_STRIPPED="${GL_GROK_STRIPPED:-0}" GL_UNSANDBOXED_OPT_IN="$GL_UNSANDBOXED_OPT_IN" \
-    GL_SANDBOX_EVIDENCE="${GL_SANDBOX_EVIDENCE:-}" GL_FN=finalize \
+    GL_SANDBOX_EVIDENCE="${GL_SANDBOX_EVIDENCE:-}" GL_LOG_DIR="${GL_LOG_DIR:-}" GL_CREDIT_OK="${GL_CREDIT_OK:-0}" GL_RETRY_SUPPRESSED="${GL_RETRY_SUPPRESSED:-}" \
+    GL_GUARD_PERSISTED="${GL_GUARD_PERSISTED:-0}" GL_GUARD_LIFTED="${GL_GUARD_LIFTED:-0}" GL_OBS_ID="${GL_OBS_ID:-}" GL_FN=finalize \
     _gl_finalize_exec "$3"
   }
   _gl_finalize_exec() { # [lock wait] — the JS runs under the kernel lock when a wait is given
@@ -2265,12 +2758,19 @@ _gl_finalize() {
     res="$(_gl_finalize_js none "" "")"; js_rc=$?
   else
     res="$(_gl_finalize_js "$kind" "" "$GL_LOCK_WAIT_S")"; js_rc=$?
-    if [ "$js_rc" -eq "$EX_LOCK" ] && { [ "$kind" = quota ] || [ "$kind" = absent ]; }; then
-      # A settled quota/auth must never be dropped silently: wait longer first.
+    if [ "$js_rc" -eq "$EX_LOCK" ] && { [ "$kind" = quota ] || [ "$kind" = absent ] || [ "${GL_BUCKET_EXHAUSTED:-0}" = 1 ]; }; then
+      # A settled quota/auth — or an exhausted Codex bucket, whatever this attempt's own kind (ok/keep
+      # included) — must never be dropped silently: wait longer first.
       wait_s=$(( GL_LOCK_WAIT_S * 3 + 1 ))
       res="$(_gl_finalize_js "$kind" "" "$wait_s")"; js_rc=$?
     fi
+    [ "$js_rc" -eq 0 ] && GL_GUARD_PENDING_INV=""   # the locked update persisted this attempt's snapshot
     if [ "$js_rc" -eq "$EX_LOCK" ]; then
+      if [ "${GL_BUCKET_EXHAUSTED:-0}" = 1 ] && [ "${GL_GUARD_PERSISTED:-0}" != 1 ]; then
+        # v1.8.1: an exhausted bucket that reached NO durable state (never a side file). The attempt's own
+        # class and adjudication are untouched (INVALID stays INVALID); status "credit_guard":"unpersisted".
+        echo "gstack-lane: ERROR: Codex bucket exhausted but the credit guard could not persist (lanes lock busy) — status credit_guard=unpersisted; re-run probe before the next l3 dispatch" >&2
+      fi
       echo "gstack-lane: lanes.json NOT updated (lock unavailable) — status records lane_update=pending ($kind)" >&2
       GL_LANE_UPDATE_KIND="$kind"
       lane_update=pending
@@ -2414,6 +2914,7 @@ _gl_run_main() {
   mkdir -p "$GL_RUN_DIR" || { echo "gstack-lane: cannot create run dir $GL_RUN_DIR" >&2; exit "$EX_ERROR"; }
   GL_RUN_DIR="$(_gl_realdir "$GL_RUN_DIR")" || _gl_usage_err "run: --run-dir does not resolve to a plain directory path (control characters after symlinks?)"
   _gl_claim_out
+  GL_OBS_ID="${GL_OUT#"$GL_RUN_DIR"/attempts/}"   # <task>/<attempt_id>/<file>: the credit guard's observation identity
   GL_CWD="$(_gl_realdir "$GL_CWD")" || _gl_usage_err "run: --cwd does not resolve to a plain directory path"
   GL_PROMPT_FILE="$(_gl_realfile "$GL_PROMPT_FILE")" || _gl_usage_err "run: --prompt-file does not resolve to a plain path"
   if [ -n "$GL_SCHEMA" ]; then GL_SCHEMA="$(_gl_realfile "$GL_SCHEMA")" || _gl_usage_err "run: --schema does not resolve to a plain path"; fi
@@ -2425,7 +2926,10 @@ _gl_run_main() {
 
   GL_STARTED="$(_gl_iso_now)"
   GL_T_START=$(_gl_now)
-  lane_line="$(GL_LANES_FILE="$GL_RUN_DIR/lanes.json" GL_LANE="$GL_LANE" _gl_js lane-get)"
+  GL_CREDIT_OK=0; GL_BUCKET_EXHAUSTED=0; GL_RETRY_SUPPRESSED=""; GL_GUARD_PERSISTED=0; GL_PRE_REFUSED=""
+  if [ "$GL_LANE" = l3 ] && _gl_codex_credit_ok; then GL_CREDIT_OK=1; fi   # read once, before any lane decision
+  lane_line="$(_gl_lane_get)"
+  GL_GUARD_LIFTED=0; [ "$(printf '%s' "$lane_line" | cut -f9)" = lifted ] && GL_GUARD_LIFTED=1
   GL_STARTED_MS="$(printf '%s' "$lane_line" | cut -f5)"
   GL_STATUS_FILE="$GL_OUT.status.json"
   GL_LOG_DIR="$GL_OUT.logs"
@@ -2469,17 +2973,19 @@ _gl_run_main() {
     exit "$EX_AUTH"
   fi
 
-  # Lane-state refusals: never hammer a cooling account; absent until re-probed.
+  # Lane-state refusals: never hammer a cooling account; absent until re-probed. The cooling refusal
+  # (EFFECTIVE state: an enforced credit guard counts whatever `status` says) applies to probes too.
+  lstatus="$(printf '%s' "$lane_line" | cut -f1)"
+  lactive="$(printf '%s' "$lane_line" | cut -f2)"
+  lnext="$(printf '%s' "$lane_line" | cut -f3)"
+  if [ "$lstatus" = cooling ] && [ "$lactive" = 1 ]; then
+    GL_SKIPPED=cooling; GL_CLASS_DETAIL="lane cooling until $lnext"
+    [ "$(printf '%s' "$lane_line" | cut -f7)" = 1 ] && GL_CLASS_DETAIL="credit guard: codex bucket exhausted until $(printf '%s' "$lane_line" | cut -f8)"
+    echo "gstack-lane: $GL_LANE is cooling until $lnext — not invoked ($GL_CLASS_DETAIL)" >&2
+    _gl_finalize quota none "" "$EX_QUOTA" || true
+    exit "$EX_QUOTA"
+  fi
   if [ "$GL_MODE" != probe ]; then
-    lstatus="$(printf '%s' "$lane_line" | cut -f1)"
-    lactive="$(printf '%s' "$lane_line" | cut -f2)"
-    lnext="$(printf '%s' "$lane_line" | cut -f3)"
-    if [ "$lstatus" = cooling ] && [ "$lactive" = 1 ]; then
-      GL_SKIPPED=cooling; GL_CLASS_DETAIL="lane cooling until $lnext"
-      echo "gstack-lane: $GL_LANE is cooling until $lnext — not invoked" >&2
-      _gl_finalize quota none "" "$EX_QUOTA" || true
-      exit "$EX_QUOTA"
-    fi
     if [ "$lstatus" = absent ]; then
       GL_SKIPPED=absent; GL_CLASS_DETAIL="lane absent"
       echo "gstack-lane: $GL_LANE is absent (see lanes.json reason; re-run probe after repair) — not invoked" >&2
@@ -2589,7 +3095,9 @@ _gl_run_main() {
   # An impl timeout is final: a silent drop below the tier's routing floor is never taken.
   _gl_try "$GL_EFFORT" "$GL_TIMEOUT"
   cls="$GL_TRY_CLASS"
-  if [ "$cls" = timeout ] && [ "$GL_MODE" = review ]; then
+  if [ "$cls" = timeout ] && [ "$GL_MODE" = review ] && [ "$GL_BUCKET_EXHAUSTED" = 1 ]; then
+    GL_RETRY_SUPPRESSED=credit-guard   # no effort step-down on an exhausted bucket (it would bill credits)
+  elif [ "$cls" = timeout ] && [ "$GL_MODE" = review ]; then
     retry_effort="$(_gl_step_down "$GL_EFFORT")"
     GL_RETRIED=1
     GL_EFFORT_FINAL="$retry_effort"
@@ -2597,6 +3105,14 @@ _gl_run_main() {
     cls="$GL_TRY_CLASS"
   fi
   GL_CLASS_DETAIL="$GL_LAST_DETAIL"
+  if [ -n "$GL_PRE_REFUSED" ] && [ "$GL_INV" = 0 ]; then
+    # refused before its first invocation (the lane cooled between the launch check and the launch)
+    GL_SKIPPED=cooling
+    echo "gstack-lane: $GL_LANE is cooling until $GL_PRE_REFUSED — not invoked ($GL_CLASS_DETAIL)" >&2
+    _gl_finalize quota none "" "$EX_QUOTA" || true
+    exit "$EX_QUOTA"
+  fi
+  [ -n "$GL_PRE_REFUSED" ] && GL_RETRY_SUPPRESSED=lane-cooling   # a retry refused by the shared lane state
 
   if [ "$GL_TAINT_CHECKED" = 1 ]; then
     GL_TAINT_DETAIL=""
@@ -2638,7 +3154,9 @@ _gl_run_main() {
   code="$(_gl_class_exit "$cls")"
   case "$cls" in
     ok) kind=ok; reason="ok ($GL_MODE)" ;;
-    quota) kind=quota; reason="quota" ;;
+    quota)
+      if [ -n "$GL_PRE_REFUSED" ]; then kind=keep; reason="quota: retry refused (${GL_CLASS_DETAIL})"   # the lane already holds the event
+      else kind=quota; reason="quota"; fi ;;
     auth)
       kind=absent; reason="auth: CLI reported an authentication failure"
       case "$GL_SANDBOX_UNAVAILABLE" in
@@ -2726,8 +3244,10 @@ cmd_probe() {
   mkdir -p "$run_dir" || exit "$EX_ERROR"
   run_dir="$(_gl_realdir "$run_dir")" || _gl_usage_err "probe: --run-dir does not resolve to a plain directory path (control characters after symlinks?)"
   GL_RUN_DIR="$run_dir"
+  GL_CREDIT_OK=0
+  case ",$lanes," in *,l3,*) _gl_codex_credit_ok && GL_CREDIT_OK=1 ;; esac
   for l in $(printf '%s' "$lanes" | tr ',' ' '); do
-    line="$(GL_LANES_FILE="$run_dir/lanes.json" GL_LANE="$l" _gl_js lane-get)"
+    line="$(GL_LANES_FILE="$run_dir/lanes.json" GL_LANE="$l" GL_CREDIT_OK="$GL_CREDIT_OK" _gl_js lane-get)"
     if [ "$(printf '%s' "$line" | cut -f1)" = cooling ] && [ "$(printf '%s' "$line" | cut -f2)" = 1 ]; then
       skipped="$skipped$l,"
       continue
@@ -2742,7 +3262,7 @@ cmd_probe() {
   GL_PROBE_PIDS="$pids"
   for l in $pids; do wait "$l" 2>/dev/null; done
   GL_PROBE_PIDS=""
-  GL_LANES_FILE="$run_dir/lanes.json" GL_LANE_LIST="$lanes" GL_SKIPPED_LANES="$skipped" GL_JSON="$json" _gl_js summary
+  GL_LANES_FILE="$run_dir/lanes.json" GL_LANE_LIST="$lanes" GL_SKIPPED_LANES="$skipped" GL_JSON="$json" GL_CREDIT_OK="$GL_CREDIT_OK" _gl_js summary
   exit 0
 }
 

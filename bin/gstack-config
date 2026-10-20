@@ -200,6 +200,12 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #   same user — see bin/gstack-lane RESIDUAL RISKS). Default
 #                           #   false: no sandbox → L4 is ABSENT. true|false only;
 #                           #   anything else is REJECTED (existing value preserved).
+# codex_allow_credit_spend: false
+#                           # true = let L3 (Codex) keep running once the shared
+#                           #   `codex` usage bucket is at 100% (Codex then bills
+#                           #   purchased credits silently). Default false: at 100%
+#                           #   L3 cools until the bucket resets. true|false only;
+#                           #   anything else is REJECTED (existing value preserved).
 #
 # ─── Workspace-aware ship ────────────────────────────────────────────
 # workspace_root: $HOME/conductor/workspaces  # Where /ship looks for sibling
@@ -244,6 +250,7 @@ lookup_default() {
     claude_overflow_dir) echo "$HOME/.claude-overflow" ;; # L2 lane: CLAUDE_CONFIG_DIR of the second Claude account (bin/gstack-lane)
     autobuilder_max_parallel) echo "6" ;; # global /autobuilder-loop worker cap — see set-side reject-on-invalid below
     grok_allow_unsandboxed) echo "false" ;; # L4 grok outside its OS sandbox: explicit opt-in only (bin/gstack-lane)
+    codex_allow_credit_spend) echo "false" ;; # L3 codex past 100% of its bucket (credit spend): explicit opt-in only (bin/gstack-lane)
     cross_project_learnings) echo "" ;; # intentionally empty → unset triggers first-time prompt
     artifacts_sync_mode) echo "off" ;;
     artifacts_sync_mode_prompted) echo "false" ;;
@@ -610,6 +617,13 @@ case "${1:-}" in
       echo "Error: grok_allow_unsandboxed '$VALUE' not recognized. Valid values: true, false. Existing value left unchanged." >&2
       exit 1
     fi
+    # codex_allow_credit_spend lets L3 spend purchased Codex credits past 100% of the shared
+    # bucket. Like grok_allow_unsandboxed, a typo must never silently grant spend: only the
+    # exact values true/false are accepted.
+    if [ "$KEY" = "codex_allow_credit_spend" ] && [ "$VALUE" != "true" ] && [ "$VALUE" != "false" ]; then
+      echo "Error: codex_allow_credit_spend '$VALUE' not recognized. Valid values: true, false. Existing value left unchanged." >&2
+      exit 1
+    fi
     # design_detector_install_prompted records "never ask again" for the one-time
     # engine install offer. Rejecting a typo keeps the offer from silently coming
     # back (or never coming back) because of a mistyped value.
@@ -683,7 +697,7 @@ case "${1:-}" in
                gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted plan_tune_hooks \
                timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
-               claude_overflow_dir autobuilder_max_parallel grok_allow_unsandboxed; do
+               claude_overflow_dir autobuilder_max_parallel grok_allow_unsandboxed codex_allow_credit_spend; do
       VALUE=$(read_config_value "$KEY" || true)
       SOURCE="default"
       if [ -n "$VALUE" ]; then
@@ -703,7 +717,7 @@ case "${1:-}" in
                gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted plan_tune_hooks \
                timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
-               claude_overflow_dir autobuilder_max_parallel grok_allow_unsandboxed; do
+               claude_overflow_dir autobuilder_max_parallel grok_allow_unsandboxed codex_allow_credit_spend; do
       printf '  %-24s %s\n' "$KEY:" "$(lookup_default "$KEY")"
     done
     ;;
