@@ -102,6 +102,9 @@ export const meta = {
 //   before any push, by the same guard scan (ruling R9). INVALID is sticky within a gate: only a PRESENT result for that
 //   seat clears it, and it is re-run at the same SHA before any fix, cap or DEGRADED path (R3). Ship and PATCH fail closed: a missing/incomplete review,
 //   delta review, fact-check, inventory, state write or push blocks publication (ruling R4).
+// REPO PATHS: every path an agent reports is validated (PATH_OK; [ ] ( ) and spaces allowed). LIMIT: a NON-ASCII file
+//   name BLOCKs the unit (invalid_path:<field> (...; <path:ID>: non_ascii; ...)); rename the file
+//   to ASCII. Credential-shaped names are sensitive and are shown only as <path:ID>.
 //
 // Markers: "retro-2026-10-19 item N" = brief item N; "v1.8 decision D-X" = spec decision D-X.
 // This script runs inside the Workflow VM: no filesystem access, no wall-clock or random calls; every
@@ -186,7 +189,8 @@ const camelSplit = f => String(f).replace(/^\.\//, '').replace(/([A-Z]+)([A-Z][a
 // acronym split (ACLs, RBACs, userACLs only match in the first two)
 const lowerSplit = f => String(f).replace(/^\.\//, '').replace(/([a-z0-9])([A-Z])/g, '$1/$2').toLowerCase()
 const tokenForms = f => [String(f).replace(/^\.\//, '').toLowerCase(), lowerSplit(f), camelSplit(f)]
-const sensitiveFiles = files => arr(files).filter(f => touches([f], SENSITIVE_RES).length > 0 || (!arr(A.sensitiveGlobs).length && tokenForms(f).some(x => SENSITIVE_TOKEN_RE.test(x))))
+// a token- / userinfo-shaped path (pathSecret) is ALWAYS sensitive, whatever sensitiveGlobs says
+const sensitiveFiles = files => arr(files).filter(f => pathSecret(f) || touches([f], SENSITIVE_RES).length > 0 || (!arr(A.sensitiveGlobs).length && tokenForms(f).some(x => SENSITIVE_TOKEN_RE.test(x))))
 // prose = by EXTENSION only (ruling S2: .mdx is code; a docs/example.js is code and gets a code review)
 const PROSE_RE = /\.(md|txt|rst)$/i
 // release bookkeeping /ship may add after the gated head: VERSION and .md/.txt/.rst prose ONLY. Any package.json change,
@@ -258,7 +262,7 @@ const synFirst = (from, round) => ((A.synModel && round >= from) ? A.synModel : 
 const synChain = first => uniq([first].concat(SYN_CHAIN))
 
 // ---------- shared prompt fragments -------------------------------------------------------------------
-const PRIV = (db, wt) => opt(A.privtest, p => ` DB-backed tests run on a private database via ${p} ${db} ${wt} reset|run <files> (your own database; never another agent's).`)
+const PRIV = (db, wt) => opt(A.privtest, p => ` DB-backed tests run on a private database via ${p} ${db} ${wt} reset|run <files> (each file single-quoted; your own database; never another agent's).`)
 const CONC = 'Multi-connection / concurrency suites the briefs name run 5x; one flake is a failure.'
 const EDIT_NOTE = 'File edits: make every edit through Bash (python3 or a heredoc) inside your worktree; a session hook may block the Write/Edit tools for sibling worktrees.' // retro-2026-10-19 item 10(a)
 const SEV = 'Severities: [P1] = ship-blocker (wrong behaviour, data loss, security, a spec violation, a test that cannot fail for the thing it claims to guard); [P2] = lower. Each finding: severity, file:line, one-sentence defect, concrete failure scenario, suggested fix. CHANGELOG and docs prose is never [P1].'
@@ -458,7 +462,11 @@ const ID_KEYS = new Set(['unit', 'repo', 'arg', 'slug', 'host', 'owner', 'head_r
 const ID_VAL_RE = /^[A-Za-z0-9._\/-]{1,255}$/
 const ID_MAP_KEYS = new Set(['prs']) // objects keyed by a unit directory (safe(UNIT): [A-Za-z0-9._-]{1,60})
 const ID_MAPKEY_RE = /^[A-Za-z0-9._-]{1,60}$/
+// OUTPUT (ids=true): a repo-path list under a path key shows a credential-shaped path as <path:ID> (round 23: never the
+// scrubbed config/<token>.ts form, which still names its structure)
+const OUT_PATH_KEYS = new Set(['files', 'files_since_base', 'files_since_prev', 'files_since', 'tree_delta'])
 function scrubDeep(x, seen = new WeakSet(), ids = false, key = '') {
+  if (ids && OUT_PATH_KEYS.has(key) && Array.isArray(x)) x = x.map(v => typeof v === 'string' && pathSecret(v) ? `<path:${pathId(v)}>` : v)
   if (typeof x === 'string') return ids && ID_KEYS.has(key) && ID_VAL_RE.test(x) ? x : scrubText(x)
   if (x === null || typeof x !== 'object') return x
   if (seen.has(x)) return '[cycle]'
@@ -475,7 +483,119 @@ const scrubOut = x => scrubDeep(x, new WeakSet(), true)
 // allowlists, only the validated fields are kept (never the raw line), and identity values must reach the comparisons
 // unchanged (a scrubber must never turn a real branch like fix/sk-... into something else).
 const strictSchema = s => s === IDL || s === LINE || s === PUSHR
-const ask = async (prompt, opts) => { const r = await agent(prompt, opts); return opts && strictSchema(opts.schema) ? r : scrubDeep(r) }
+// Repo-path lists (security review r20): the fields below carry repository paths that drive decisions (the sensitive-
+// path classifier, the delta-review scope, the tree-delta / late-change checks). They are NEVER scrubbed on intake (a
+// scrubber would rewrite config/sk-<...>.ts or a user:pass@host-shaped path before the classifier sees it); like strict-
+// schema data they are kept verbatim and validated against PATH_OK by the consumer, which BLOCKs on a failure
+// (invalid_path:<field>, the value never echoed). Every other field of these envelopes is scrubbed as usual.
+const PATH_FIELDS = new Map([[FILES, ['files']], [GS, ['files_since_base', 'files_since_prev']], [GUARD, ['files_since', 'tree_delta']], [INT, ['files']]])
+const ask = async (prompt, opts) => {
+  const r = await agent(prompt, opts)
+  if (opts && strictSchema(opts.schema)) return r
+  const out = scrubDeep(r), pf = opts && PATH_FIELDS.get(opts.schema)
+  if (pf && r && out && typeof r === 'object' && typeof out === 'object') for (const k of pf) if (Array.isArray(r[k])) out[k] = r[k].slice()
+  return out
+}
+// The repo-path allowlist: a relative path of 1..1024 chars, '/'-separated segments of 1..255 chars from
+// [A-Za-z0-9 . _ @ + = , : ~ % # - [ ] ( ) and space], no '.' or '..' segment (so no traversal, no ./ prefix), no empty
+// segment (no leading '/', no '//', no trailing '/'), not starting with '-' (an option) or ':' (git pathspec magic).
+// Next.js App Router names ([locale], (marketing), [...slug], [[...catchall]]) and spaces are allowed. Rejected: NUL,
+// control characters (newline, tab), quotes (' " `), backslash, $ ; | & < > * ? ! { } ^ and every other character;
+// non-ASCII names arrive C-quoted by git and are rejected too (documented limit). ':' and '@' are allowed so a
+// user:pass@host-shaped NAME is representable (it is then sensitive); a scheme URL fails ('//' is an empty segment).
+// Because ' is rejected, a valid path is always safe inside single quotes (shq), and every git command that takes one
+// as a pathspec is told to use --literal-pathspecs: in git, [locale] is a glob matching ONE character (src/app/l/...).
+const PATH_SEG_RE = /^[A-Za-z0-9._@+=,:~%#[\]() -]{1,255}$/
+const PATH_OK = f => typeof f === 'string' && f.length >= 1 && f.length <= 1024 && !/^[-:]/.test(f) && f.split('/').every(x => PATH_SEG_RE.test(x) && x !== '.' && x !== '..')
+// why a path failed PATH_OK, as a cause class (the value itself is never echoed; the offender is named by <path:ID>)
+function pathWhy(f) {
+  if (typeof f !== 'string') return 'type'
+  if (!f.length || f.length > 1024) return 'length'
+  if (/[\x00-\x1f\x7f]/.test(f)) return 'control'
+  if (/[^\x00-\x7e]/.test(f) || /^".*\\[0-7]{3}/.test(f)) return 'non_ascii' // raw UTF-8, or git's C-quoted form
+  if (/['"`\\]/.test(f)) return 'quote'
+  if (/[$;|&<>*?!{}^]/.test(f)) return 'shell'
+  if (/:\/\//.test(f)) return 'url'
+  if (f.startsWith('/')) return 'absolute'
+  if (/^[-:]/.test(f)) return 'option'
+  if (f.split('/').some(x => x === '.' || x === '..')) return 'traversal'
+  if (f.split('/').some(x => !x.length)) return 'empty_segment'
+  if (f.split('/').some(x => x.length > 255)) return 'length'
+  return 'charset'
+}
+// -> '' when every listed field is an array of valid paths, else the BLOCK text
+// "invalid_path:<field> (<where>; <path:ID>: <cause>; a path outside the allowlist)" (the value is never echoed)
+function badPaths(r, fields, where) {
+  for (const k of fields) {
+    if (r[k] === undefined) continue
+    const f = Array.isArray(r[k]) ? r[k].find(x => !PATH_OK(x)) : r[k]
+    if (f !== undefined) return `invalid_path:${k} (${where}; ${Array.isArray(r[k]) ? `<path:${pathId(String(f))}>: ${pathWhy(f)}` : 'not a list'}; a path outside the allowlist)`
+  }
+  return ''
+}
+// A path scrubText WOULD rewrite (token- or userinfo-shaped) is kept verbatim for every decision, classified SENSITIVE,
+// and never written raw into free text, a prompt or the result: it is shown as <path:ID>, ID = the first 12 hex of its
+// git blob id (git hash-object of the path text), so an agent can resolve it locally without the name being relayed.
+const pathSecret = f => scrubText(f) !== String(f)
+// UTF-8 bytes of a string (an invalid, non-ASCII path still gets the id git hash-object would give it)
+function utf8(str) {
+  const b = []
+  for (const ch of String(str)) {
+    const c = ch.codePointAt(0)
+    if (c < 0x80) b.push(c)
+    else if (c < 0x800) b.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) b.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else b.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return b
+}
+const pathHash = f => { const body = utf8(f); return sha1Hex([...utf8(`blob ${body.length}`), 0, ...body]) } // git blob id
+const pathId = f => pathHash(f).slice(0, 12)
+// ids for the credential-shaped paths of ONE rendered list (round 23): 12 hex, lengthened (up to all 40) until distinct
+// paths get distinct ids; `hash` is injectable so a forced duplicate prefix can be tested
+function assignIds(paths, hash = pathHash) {
+  const u = [...new Set(arr(paths).map(String))], full = new Map(u.map(f => [f, hash(f)]))
+  let n = 12
+  while (n < 40 && new Set(u.map(f => full.get(f).slice(0, n))).size < u.length) n++
+  return { n, id: f => full.get(String(f)).slice(0, n) }
+}
+const showPath = f => pathSecret(f) ? `<path:${pathId(f)}>` : String(f)
+// THE renderer for repo paths in ANY prompt, message, log line or result text (rounds 22-23): every interpolation of a
+// PATH_FIELDS value or a list derived from one goes through renderPaths / showPaths / pathIdList / shellPaths / scopeText
+// (a static bun test enforces it). Credential-shaped paths appear only as <path:ID>; when an agent must act on the
+// files, `range` adds the resolve-by-id command, pinned to the lane (git -C '<lane>' for both git calls, so the ids
+// never depend on the agent's cwd or on another repository's object format; the lane is SHA-1: SHA_RE is 40-hex). It
+// prints nothing but "AMBIGUOUS <id>" when two changed paths share an id prefix (never two mappings for one id).
+const pathResolver = (range, n = 12) => String.raw`git -C ${shq(LANE)} diff --name-only ${range} | while IFS= read -r p; do printf '%s %s\n' "$(printf '%s' "$p" | git -C ${shq(LANE)} hash-object --stdin | cut -c1-${n})" "$p"; done | awk '{ c[$1]++; l[NR] = $0 } END { for (k in c) if (c[k] > 1) { print "AMBIGUOUS " k; exit 1 } for (i = 1; i <= NR; i++) print l[i] }'`
+function renderPaths(list, { range = '', json = true } = {}) {
+  const ids = assignIds(arr(list).filter(pathSecret))
+  const shown = arr(list).map(f => pathSecret(f) ? `<path:${ids.id(f)}>` : String(f)), held = arr(list).filter(pathSecret).length
+  const body = json ? J(shown) : shown.join(', ')
+  return held && range ? `${body} (a <path:ID> is a credential-shaped path withheld from this text: resolve ids locally with ${pathResolver(range, ids.n)}; refer to such a path only by its id in everything you write)` : body
+}
+const showPaths = fs => renderPaths(fs, { json: false })
+// the ids alone (JSON), and the plain (non-credential-shaped) paths as single-quoted shell words
+const pathIdList = list => { const ids = assignIds(list); return { n: ids.n, text: J(arr(list).map(ids.id)) } }
+const shellPaths = list => arr(list).filter(f => !pathSecret(f)).map(shq).join(' ')
+function sha1Hex(bytes) { // SHA-1 over a byte array (the Workflow VM has no crypto module)
+  const b = bytes.slice()
+  const bits = b.length * 8; b.push(0x80); while (b.length % 64 !== 56) b.push(0)
+  for (let i = 7; i >= 0; i--) b.push(i >= 4 ? 0 : (bits >>> (i * 8)) & 255)
+  let h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476, h4 = 0xc3d2e1f0
+  const w = new Array(80), rol = (x, n) => (x << n) | (x >>> (32 - n))
+  for (let o = 0; o < b.length; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = (b[o + 4 * i] << 24) | (b[o + 4 * i + 1] << 16) | (b[o + 4 * i + 2] << 8) | b[o + 4 * i + 3]
+    for (let i = 16; i < 80; i++) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
+    let a = h0, bb = h1, c = h2, d = h3, e = h4
+    for (let i = 0; i < 80; i++) {
+      const f = i < 20 ? (bb & c) | (~bb & d) : i < 40 ? bb ^ c ^ d : i < 60 ? (bb & c) | (bb & d) | (c & d) : bb ^ c ^ d
+      const k = i < 20 ? 0x5a827999 : i < 40 ? 0x6ed9eba1 : i < 60 ? 0x8f1bbcdc : 0xca62c1d6
+      const t = (rol(a, 5) + f + e + k + w[i]) | 0; e = d; d = c; c = rol(bb, 30); bb = a; a = t
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + bb) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0
+  }
+  return [h0, h1, h2, h3, h4].map(x => (x >>> 0).toString(16).padStart(8, '0')).join('')
+}
 const say = m => log(scrubText(m))
 async function finish(res0) {
   // the COMPLETE assembled result (incidents, rounds, flow_upgrades, stopped, decision, notes, envelopes) is scrubbed;
@@ -606,9 +726,9 @@ async function runChain(job, where, from, steps, ph) {
 }
 
 // ---------- gate members ------------------------------------------------------------------------------
-function seatCCore(round, scope, gs, prev) {
-  const range = scope === 'delta' ? `${prev}..${gs.reviewed_sha}` : `${BASE}...${gs.reviewed_sha}`
-  return `Seat C (Claude) of the ${UNIT} gate, round ${round}${scope === 'delta' ? ' (scoped to the fix delta; the earlier range was already reviewed and its rulings are in the register)' : ''}. Ship-unit ${UNIT} = ${IDS.join(', ') || 'see the briefs'}.${opt(A.gateFocus, f => ' ' + f)} Briefs (the acceptance criteria): ${BRIEFS || B}. Code: ${LANE} (branch ${BR}); RANGE=${range} — diff exactly this range, never a moving ref. Read-only: never edit, commit, stash or check out anything.
+function seatCCore(round, seatScope, gs, prev) {
+  const range = seatScope === 'delta' ? `${prev}..${gs.reviewed_sha}` : `${BASE}...${gs.reviewed_sha}`
+  return `Seat C (Claude) of the ${UNIT} gate, round ${round}${seatScope === 'delta' ? ' (scoped to the fix delta; the earlier range was already reviewed and its rulings are in the register)' : ''}. Ship-unit ${UNIT} = ${IDS.join(', ') || 'see the briefs'}.${opt(A.gateFocus, f => ' ' + f)} Briefs (the acceptance criteria): ${BRIEFS || B}. Code: ${LANE} (branch ${BR}); RANGE=${range} — diff exactly this range, never a moving ref. Read-only: never edit, commit, stash or check out anything.
 Already adjudicated in this unit (do not re-file without new facts): read ${RULINGS} first; a claim in it is closed unless you state a NEW fact.
 ONE pass, two methodologies, findings only: read ${SK}/plan-eng-review/SKILL.md and apply ONLY its review methodology (architecture, code quality, tests, performance, failure modes); read ${SK}/review/SKILL.md and run its checklist passes; both against the RANGE diff and the briefs. ${SEATC_SKIP} Anything either skill would ask the user: take the recommended option and list genuine taste calls in notes. Verify every acceptance clause of the briefs against the code (file:line, or MISSING). ${SEV}
 Write the full report to ${R}/gate-${U}-r${round}-seat-c.md.`
@@ -634,14 +754,14 @@ function seatCL1Check(env, chainModel, first) {
 }
 
 // v1.8 decision D-B: Seat C = Fable high (L1) -> claude-opus-5-5 high (L1) -> claude-opus-5-5 high (L2)
-async function seatC(round, scope, gs, prev) {
-  const core = seatCCore(round, scope, gs, prev)
+async function seatC(round, seatScope, gs, prev) {
+  const core = seatCCore(round, seatScope, gs, prev)
   const first = (A.synModel && round >= (A.synGateFrom || 99)) ? A.synModel : SEATC
   const c = await callChain(`r${round} seat C`, uniq([first, 'claude-opus-5-5']), `${core}\n${MARKER_RULE}\nReturn the envelope (member=seat_c; status PRESENT only when you completed the review and the report ends with the REVIEW_COMPLETE line, else INVALID; final_line = the report's last non-empty line, verbatim; actual_model = the literal model id you are running as, from your own system context (never the name you were asked for); verdict PASS or FAIL, FAIL iff any [P1]; p1 = one line per [P1]; p2_count; report).`, { label: `r${round} seat C`, phase: 'Gate', effort: 'high', schema: GATE })
   if (c.r) return seatCL1Check(c.r, c.model, first)
   const T = safe(`gate-${U}-r${round}-c-l2`)
   const label = `r${round} seat C (L2 claude-opus-5-5)`
-  const rng = scope === 'delta' ? `${prev}..${gs.reviewed_sha}` : `${BASE}...${gs.reviewed_sha}`
+  const rng = seatScope === 'delta' ? `${prev}..${gs.reviewed_sha}` : `${BASE}...${gs.reviewed_sha}`
   const p = `Rote relay for Seat C on lane L2 (second Claude account, claude-opus-5-5 at high effort; never Fable here, never --allow-credit-billing). Use Bash, every call with timeout 600000; run commands and copy their outputs; never read, judge or summarize review text yourself. Use the literal ADIR / OUT paths in every later call.
 1. ${GL} worktree add --run-dir ${RUN} --task ${T} --base ${gs.reviewed_sha} --detach --repo ${REPO} (reuse ${RUN}/wt/${T} if it exists). On failure return status ABSENT, verdict ABSENT, class error.
 2. AID=$(date -u +%Y%m%dT%H%M%SZ)-$$; ADIR=${RUN}/attempts/${T}/$AID; mkdir -p "$ADIR"; OUT="$ADIR/review.json".
@@ -734,13 +854,13 @@ async function seatX(round, gs) {
   return e
 }
 
-function memberCtx(round, gs) {
-  return `Ship-unit ${UNIT} = ${IDS.join(', ') || 'see the briefs'}.${opt(A.gateFocus, f => ' ' + f)} Briefs: ${BRIEFS || B}. Worktree ${LANE} (branch ${BR}) at ${gs.reviewed_sha}, RANGE=${BASE}...${gs.reviewed_sha}. Gate round ${round}. Never commit; leave git -C ${LANE} status --porcelain empty.`
+function memberCtx(round, sha) { // only the reviewed SHA: no envelope (and so no path list) reaches the prompt
+  return `Ship-unit ${UNIT} = ${IDS.join(', ') || 'see the briefs'}.${opt(A.gateFocus, f => ' ' + f)} Briefs: ${BRIEFS || B}. Worktree ${LANE} (branch ${BR}) at ${sha}, RANGE=${BASE}...${sha}. Gate round ${round}. Never commit; leave git -C ${LANE} status --porcelain empty.`
 }
 
 async function dockerMember(round, gs) { // retro-2026-10-19 item 3: Docker only when triggered
   const label = `r${round} docker`
-  const p = `${memberCtx(round, gs)}
+  const p = `${memberCtx(round, gs.reviewed_sha)}
 Docker verification (member=docker). ${A.dockerFocus || DOCKER_DEFAULT} Use the compose project name ab-${U}-r${round}; wait for busy ports up to 30 min; never stop or remove another project's containers. If the stack needs an untracked local env file, copy it from ${REPO} and delete it at the end. Tear down with down -v. Report ${R}/gate-${U}-r${round}-docker.md. Return the envelope (member=docker; status PRESENT when the verification ran to a result, ABSENT when docker itself was unavailable, with class; verdict PASS or FAIL; a failure is a [P1] line in p1).`
   let e = await ask(p, { label, phase: 'Gate', model: 'sonnet', effort: 'high', schema: GATE })
   if (!e) e = { status: 'ABSENT', verdict: 'ABSENT', class: await classify('sonnet', label, 'Gate'), notes: 'the docker member died; not a verification result' }
@@ -748,19 +868,19 @@ Docker verification (member=docker). ${A.dockerFocus || DOCKER_DEFAULT} Use the 
 }
 
 // retro-2026-10-19 item 3: mutation probe runs AFTER the parallel members, scoped per round
-async function mutationMember(round, gs, mode, named, delta) {
+async function mutationMember(round, gs, mode, named, delta, deltaRange) {
   const label = `r${round} mutation`
-  const scope = mode === 'full'
+  const probe = mode === 'full'
     ? 'Round probe per SECTION F: EVERY brief-named mutation target plus AT MOST 10 own mutants.'
     : (mode === 'brief'
       ? 'LITE probe: ONLY the brief-named mutation targets (no own mutants).'
-      : `Scoped probe: ONLY these fix-named mutants ${J(named)} plus every brief-named mutant whose target file is in ${J(delta)}. When that set is empty, return status PRESENT, verdict SKIPPED.`)
+      : `Scoped probe: ONLY these fix-named mutants ${J(named)} plus every brief-named mutant whose target file is in ${renderPaths(delta, { range: deltaRange })}. When that set is empty, return status PRESENT, verdict SKIPPED.`)
   const conc = mode === 'scoped'
-    ? `Re-run a multi-connection / concurrency suite 5x only when a file in ${J(delta)} has one.`
+    ? `Re-run a multi-connection / concurrency suite 5x only when a file in ${renderPaths(delta, { range: deltaRange })} has one.`
     : 'Run every multi-connection / concurrency suite the briefs name 5x on the unmutated tree; a flake is [P1].'
-  const p = `${memberCtx(round, gs)}
-Mutation probe (member=mutation) in ${LANE}. ${scope} ${conc}
-For each mutant: apply exactly that temporary mutation through Bash (python3 or a heredoc), run its named test${PRIV(`${DB}_gate`, LANE)} and record killed yes/no; then restore every modified file from the index (git -C ${LANE} checkout -- <path>, or git -C ${LANE} show :<path> > <path>) and confirm git -C ${LANE} status --porcelain is empty before the next mutant. Never commit. Judge survivors by ${SECF} Report ${R}/gate-${U}-r${round}-mutation.md. Return the envelope (member=mutation; mutants[] with brief_named; final_clean yes/no; p1 only per SECTION F).`
+  const p = `${memberCtx(round, gs.reviewed_sha)}
+Mutation probe (member=mutation) in ${LANE}. ${probe} ${conc}
+For each mutant: apply exactly that temporary mutation through Bash (python3 or a heredoc), run its named test${PRIV(`${DB}_gate`, LANE)} and record killed yes/no; then restore every modified file from the index (every path single-quoted and literal: git -C ${LANE} --literal-pathspecs checkout -- '<path>', or git -C ${LANE} show ':<path>' > '<path>') and confirm git -C ${LANE} status --porcelain is empty before the next mutant. Never commit. Judge survivors by ${SECF} Report ${R}/gate-${U}-r${round}-mutation.md. Return the envelope (member=mutation; mutants[] with brief_named; final_clean yes/no; p1 only per SECTION F).`
   let e = await ask(p, { label, phase: 'Gate', model: 'sonnet', effort: 'high', schema: GATE })
   if (!e) e = { status: 'ABSENT', verdict: 'ABSENT', class: await classify('sonnet', label, 'Gate'), notes: 'the mutation member died; not a probe result' }
   return Object.assign({}, e, { member: 'mutation' })
@@ -805,14 +925,27 @@ async function fixPass(fixes, tag, findings, ph) {
 async function headFiles(label, from, ph, extra) {
   const r = await ask(`Rote: return head = git -C ${LANE} rev-parse HEAD (full SHA) and files = git -C ${LANE} diff --name-only ${from}..HEAD (one path per entry; [] when none).${extra || ''}`, { label, phase: ph || curPhase, model: 'haiku', effort: 'low', schema: FILES })
   if (!r || !SHA_RE.test(String(r.head || '')) || !Array.isArray(r.files)) return null
+  const rb = badPaths(r, ['files'], `${label} inventory`)
+  if (rb) return { bad: rb }
   return r
 }
 
 // retro-2026-10-19 item 1: ONE Claude seat over the fix delta + the mutants the fixes name; not a round.
 // Both range ends are literal SHAs (never a moving ref); the review must report reviewed_sha == toSha.
 async function deltaReview(tag, fromSha, toSha, mutants, findings, why, rerun, scope) {
-  const p = `Scoped delta review (one Claude seat; ${why}) for ${UNIT}: RANGE=${fromSha}..${toSha} in ${LANE} (branch ${BR}); diff exactly this range, never HEAD; reviewed_sha = ${toSha}.${scope ? ` Review ONLY the changes to these paths: ${J(scope)} (the rest of the range is upstream code merged from the base branch, already reviewed there).` : ''}${opt(A.deltaKnown, k => ' ' + k)}${rerun ? ' A previous attempt at this review was incomplete: complete it now.' : ''} Already adjudicated in this unit (do not re-file without new facts): read ${RULINGS} first. Review ONLY this delta against what it claims to fix (${findings}) and the briefs (${BRIEFS || B}): each change does what was asked, carries a test that fails without it where it changes behaviour, and introduces no new defect. Re-run exactly these mutants: ${J(mutants)} — apply each through Bash, run its named test${PRIV(`${DB}_delta`, LANE)}, restore the file from the index, confirm git -C ${LANE} status --porcelain is empty at the end; a mutant a fix claimed to kill that survives is [P1]. Never edit anything else; never commit. ${SEV} Append the claims you adjudicate to ${RULINGS} (temp file + mv; keep every existing entry; entry shape {claim_id, disposition, reason, round: ${J(tag)}, member: "delta"}). Write ${R}/gate-${U}-${tag}-delta.md. Return the envelope: verdict PASS only when you COMPLETED the review and keep no [P1]; verdict FAIL with every kept [P1] in p1 (and owner-routed fixes, owner in ${J(OWNERS)}, each with the checks that verify it) when you keep one; if you could not complete the review, verdict FAIL with p1 EMPTY and the reason in notes. p2 = the remaining [P2] findings.`
+  const p = `Scoped delta review (one Claude seat; ${why}) for ${UNIT}: RANGE=${fromSha}..${toSha} in ${LANE} (branch ${BR}); diff exactly this range, never HEAD; reviewed_sha = ${toSha}.${scope ? ` Review ONLY the changes to these paths: ${scopeText(scope, fromSha, toSha)} The rest of the range is upstream code merged from the base branch, already reviewed there.` : ''}${opt(A.deltaKnown, k => ' ' + k)}${rerun ? ' A previous attempt at this review was incomplete: complete it now.' : ''} Already adjudicated in this unit (do not re-file without new facts): read ${RULINGS} first. Review ONLY this delta against what it claims to fix (${findings}) and the briefs (${BRIEFS || B}): each change does what was asked, carries a test that fails without it where it changes behaviour, and introduces no new defect. Re-run exactly these mutants: ${J(mutants)} — apply each through Bash, run its named test${PRIV(`${DB}_delta`, LANE)}, restore the file from the index, confirm git -C ${LANE} status --porcelain is empty at the end; a mutant a fix claimed to kill that survives is [P1]. Never edit anything else; never commit. ${SEV} Append the claims you adjudicate to ${RULINGS} (temp file + mv; keep every existing entry; entry shape {claim_id, disposition, reason, round: ${J(tag)}, member: "delta"}). Write ${R}/gate-${U}-${tag}-delta.md. Return the envelope: verdict PASS only when you COMPLETED the review and keep no [P1]; verdict FAIL with every kept [P1] in p1 (and owner-routed fixes, owner in ${J(OWNERS)}, each with the checks that verify it) when you keep one; if you could not complete the review, verdict FAIL with p1 EMPTY and the reason in notes. p2 = the remaining [P2] findings.`
   return callChain(`${tag} delta review`, synChain(A.deltaModel || synFirst(1, 1)), p, { label: `${tag} delta review${rerun ? ' (re-run)' : ''}`, phase: curPhase, effort: 'high', schema: DR })
+}
+// the review scope in a prompt: plain paths verbatim (JSON); a credential-shaped path only by its <path:ID>, with the
+// local command that resolves IDs to names (git hash-object of each changed path), so its text is never relayed
+// Paths reach git as LITERAL pathspecs, each single-quoted (safe: PATH_OK rejects ').
+function scopeText(scope, fromSha, toSha) {
+  const plain = scope.filter(f => !pathSecret(f)), held = scope.filter(pathSecret)
+  const lit = `git -C ${LANE} --literal-pathspecs diff ${fromSha}..${toSha} --`
+  const diff = plain.length ? ` Diff exactly these paths as literal pathspecs, each single-quoted (a [name] is NOT a glob here): ${lit} ${shellPaths(plain)}.` : ''
+  if (!held.length) return `${renderPaths(scope)}.${diff}`
+  const hid = pathIdList(held)
+  return `${renderPaths(plain)} plus ${held.length} credential-shaped path(s) withheld from this prompt, by id: ${hid.text}. Resolve them locally with: ${pathResolver(`${fromSha}..${toSha}`, hid.n)} (review those paths too, diffing each the same literal way: ${lit} '<path>'; refer to them only by id in everything you write).${diff}`
 }
 // ruling R4: PASS needs an explicit PASS, zero [P1] and the expected reviewed_sha; [P1]s are P1; anything else is INCOMPLETE
 function deltaOutcome(r, toSha) {
@@ -839,7 +972,7 @@ async function deltaChecked(tag, fromSha, toSha, mutants, findings, why, scope) 
 // an amend is covered by the pre-push guard scan.
 async function factCheck(tag, fromSha, amend) {
   const fold = amend
-    ? `fold the corrections into the not-yet-pushed ship commit: git -C ${LANE} commit --amend --no-edit --only -- <those doc paths>`
+    ? `fold the corrections into the not-yet-pushed ship commit: git -C ${LANE} --literal-pathspecs commit --amend --no-edit --only -- '<doc path>' ... (each path single-quoted; literal pathspecs, so a [name] is never a glob)`
     : `commit them via ${GL} commit --cwd ${LANE} --base ${fromSha} -m "docs: make the ${UNIT} notes exact" (message ending with the trailer line "${TRAILER}"; a secret_path= / filter_path= refusal = verdict FAIL)`
   const p = `CHANGELOG / docs fact-check for ${UNIT} (one pass, claim by claim). In ${LANE} (branch ${BR}) at HEAD: read the CHANGELOG entry and every docs/README line changed in ${fromSha}..HEAD, plus any docs line this unit made stale; check each claim against the code at HEAD (cite file:line). VERSION, the package version and the CHANGELOG heading agree. Correct every INACCURATE claim in place (prose only; never touch code), then ${fold}. Prose is never [P1]: p1 stays empty. checks[] = one {name: "claim <n>", command: "<file:line you checked>", exit_code: 0 accurate as written, 1 corrected}. Return the envelope (verdict CLEAN once every claim is accurate or corrected, FAIL only if you could not finish; doc_fixes = the corrections applied; members "factcheck").`
   const c = await callChain(`${tag} fact-check`, ['haiku', 'sonnet'], p, { label: `${tag} CHANGELOG fact-check`, phase: curPhase, effort: 'max', schema: DC })
@@ -1216,6 +1349,8 @@ async function prePushGuard(tag, base, cmpSha, reviewedTree) {
   const g = await ask(p, { label: `${tag} pre-push guard`, phase: curPhase, model: 'haiku', effort: 'low', schema: GUARD })
   if (g && Number(g.exit_code) !== 0) return { ok: false, why: `guard refused (exit ${g.exit_code}): ${arr(g.lines).join(' | ') || 'no detail'}`, g }
   if (!g || !SHA_RE.test(String(g.head || '')) || !Array.isArray(g.files_since) || (reviewedTree && !Array.isArray(g.tree_delta))) return { ok: false, why: 'guard scan did not report (no evidence)' }
+  const gb = badPaths(g, ['files_since', 'tree_delta'], `${tag} guard scan`)
+  if (gb) return { ok: false, why: gb }
   if (!arr(g.lines).some(l => /^no_changes=true/.test(String(l)))) return { ok: false, why: 'guard scan did not confirm no_changes=true (an unscanned commit or a dirty tree)', g }
   return { ok: true, g }
 }
@@ -1284,7 +1419,7 @@ async function gateLoop() {
     round++
     enter('Gate')
     await writeState(`Gate r${round}`)
-    const gsLabel = `r${round} gate start`
+    const gsLabel = `r${round} gate start`, prevAtStart = prev
     // ruling R9 / the skill's step c: commit through the helper's secret guard first (a no-op on a clean tree); it also
     // scans every commit in BASE..HEAD (raw merges and amends included) before anything is reviewed or pushed.
     const gs = await ask(`Gate start for ${UNIT}, round ${round} (rote: run the commands, report their output). 0) ${frozenSha ? `This round re-runs an INVALID seat at the frozen SHA ${frozenSha}: do NOT commit anything. If git -C ${LANE} status --porcelain is not empty, guard_exit = 2 and guard_lines = ["dirty: " + the first 5 paths], stop here and return the envelope with reviewed_sha "" and empty lists; else guard_exit = 0 and guard_lines = [].` : `Run ${GL} commit --cwd ${LANE} --base ${BASE} -m "wip(${UNIT}): gate round ${round}" and capture its stdout and exit status: guard_exit = that status; guard_lines = every stdout line starting with secret_path=, filter_path=, control_changed=, no_changes= or result_sha=. On a non-zero guard_exit stop here and return the envelope with reviewed_sha "" and empty lists.`} 1) mkdir -p ${GATES}; if ${RULINGS} does not exist, write [] to it (never overwrite an existing register). 2) reviewed_sha = git -C ${LANE} rev-parse HEAD (full SHA). 3) files_since_base = git -C ${LANE} diff --name-only ${BASE}...<reviewed_sha>. 4) files_since_prev = ${prev ? `git -C ${LANE} diff --name-only ${prev}..<reviewed_sha>` : 'the same list as files_since_base'}. 5) rulings = the number of entries in ${RULINGS}. Return the envelope.`, { label: gsLabel, phase: 'Gate', model: 'haiku', effort: 'low', schema: GS })
@@ -1294,10 +1429,13 @@ async function gateLoop() {
       const cls = gs ? 'error' : await classify('haiku', gsLabel, 'Gate')
       return { stop: { stopped: `BLOCKED: gate start failed in round ${round} (${cls})`, failure_class: cls } }
     }
+    const gsb = badPaths(gs, ['files_since_base', 'files_since_prev'], `gate start of round ${round}`)
+    if (gsb) return { stop: { stopped: `BLOCKED: ${gsb}`, failure_class: 'error' } }
     if (frozenSha && gs.reviewed_sha !== frozenSha) return { stop: { stopped: `BLOCKED: the INVALID re-run of round ${round} is at ${gs.reviewed_sha}, not the frozen SHA ${frozenSha} (HEAD moved); the unresolved review must be re-run on the same code`, failure_class: 'error' } }
     frozenSha = ''
     const sinceBase = arr(gs.files_since_base)
     const delta = round === 1 ? sinceBase : arr(gs.files_since_prev)
+    const deltaRange = round === 1 || !prevAtStart ? `${BASE}...${gs.reviewed_sha}` : `${prevAtStart}..${gs.reviewed_sha}`
     const sched = round === 1
       ? { seat_c: true, seat_x: true, docker: flow === 'FULL' || GATE_CLASS === 'critical' || touches(sinceBase, DOCKER_RES).length > 0, mutation: true }
       : { seat_c: rerun.has('seat_c'), seat_x: rerun.has('seat_x'), docker: rerun.has('docker') || touches(delta, DOCKER_RES).length > 0, mutation: rerun.has('mutation') || fixMutants.length > 0 || (briefMutants && delta.length > 0) }
@@ -1330,7 +1468,7 @@ async function gateLoop() {
     }
 
     if (sched.mutation) {
-      const m = await mutationMember(round, gs, mutMode, fixMutants, delta)
+      const m = await mutationMember(round, gs, mutMode, fixMutants, delta, deltaRange)
       if (up(m.verdict) !== 'SKIPPED') {
         envs.mutation = m
         if (mutMode === 'full' && up(m.status) === 'PRESENT') mutFullDone = true
@@ -1406,6 +1544,7 @@ p1 = every kept [P1] still unfixed at ${gs.reviewed_sha}, including ones kept in
     if (fx.stop) return { stop: fx.stop }
     const hf = await headFiles(`r${round}-p2 delta head`, gs.reviewed_sha, 'Fix')
     if (!hf) return { stop: { stopped: `BLOCKED: P2 fix delta inventory unreadable in round ${round}`, failure_class: 'error' } }
+    if (hf.bad) return { stop: { stopped: `BLOCKED: ${hf.bad}`, failure_class: 'error' } }
     const dc = await deltaChecked(`r${round}-p2`, gs.reviewed_sha, hf.head, uniq(p2.flatMap(f => arr(f.mutants))), `the P2 fix-now items of ${R}/gate-${U}-r${round}-consolidated.md`, 'P2 fix-now verification')
     if (dc.outcome === 'FAILED') return { stop: { stopped: `BLOCKED: scoped delta review failed (${dc.class}); a member failure, not a gate verdict`, failure_class: dc.class } }
     rounds.push({ delta_review: `r${round}-p2`, verdict: dc.r.verdict, outcome: dc.outcome, p1: arr(dc.r.p1).length, counts_as_round: false })
@@ -1539,6 +1678,8 @@ ${INV_SH}`
   const flr = await ask(flP, { label: 'ship delta files', phase: 'Ship', model: 'haiku', effort: 'low', schema: FILES })
   const fl = flr && SHA_RE.test(String(flr.head || '')) && Array.isArray(flr.files) && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(String(flr.snap_tree || '')) ? flr : null
   if (!fl) return finish({ stopped: 'BLOCKED: /ship delta file inventory unreadable; publication needs positive evidence of what /ship changed', final: cons, failure_class: 'error' })
+  const flb = badPaths(fl, ['files'], '/ship delta inventory')
+  if (flb) return finish({ stopped: `BLOCKED: ${flb}`, final: cons, failure_class: 'error' })
   // the reviewed-tree snapshot is BOUND to the gated tree: it must equal the tree of /ship's base-merge commit (or of the
   // gated head when the base merge was a no-op), i.e. gated code + reviewed merge changes only
   if (skip && prep.r.reviewed_tree !== fl.snap_tree) return finish({ stopped: `BLOCKED: reviewed-tree snapshot ${prep.r.reviewed_tree} is not the merged gated tree ${fl.snap_tree}`, final: cons, ship: prep.r, failure_class: 'error' })
@@ -1565,9 +1706,9 @@ ${INV_SH}`
   // the pushed tree vs the saved reviewed tree (stands in for "Verification Gate" stage 2): only the release bookkeeping
   // the fact-check covered (VERSION, prose) or a path the ship-delta review PASSED (e.g. the package.json version bump) may differ
   const treeLate = skip ? gd.g.tree_delta.filter(f => notBookkeeping(f) && !(shipDelta && scope.includes(f))) : []
-  if (treeLate.length) return finish({ stopped: `BLOCKED: the head to push differs from the reviewed tree ${prep.r.reviewed_tree} beyond release bookkeeping: ${treeLate.join(', ')}`, final: cons })
+  if (treeLate.length) return finish({ stopped: `BLOCKED: the head to push differs from the reviewed tree ${prep.r.reviewed_tree} beyond release bookkeeping: ${showPaths(treeLate)}`, final: cons })
   const lateCode = gd.g.files_since.filter(f => !BOOKKEEP_RE.test(f))
-  if (lateCode.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${fl.head}: ${lateCode.join(', ')}`, final: cons })
+  if (lateCode.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${fl.head}: ${showPaths(lateCode)}`, final: cons })
   const pushHead = gd.g.head
   // the unit script pushes and verifies the push over the forge API; /ship publish only creates the PR and binds CI
   const ip = await pushAndVerify('ship', 'Ship', rid, pushHead)
@@ -1667,6 +1808,8 @@ async function unitFlow() {
   if (!integ) return finish({ stopped: `BLOCKED: integration agent failed (${ic.class})`, failure_class: ic.class, refresh, built })
   if (integ.status !== 'GREEN') return finish({ stopped: 'integration RED', refresh, built, integ })
   if (!Number.isFinite(Number(integ.prod_loc)) || !Number.isFinite(Number(integ.test_loc)) || Number(integ.prod_loc) < 0 || Number(integ.test_loc) < 0 || !Array.isArray(integ.files) || typeof integ.linear !== 'boolean') return finish({ stopped: 'SHIP_METER STOP: the integration envelope lacks a meter reading, the file list or the linear flag (fail closed)', refresh, built, integ })
+  const ib = badPaths(integ, ['files'], 'integration file list')
+  if (ib) return finish({ stopped: `BLOCKED: ${ib}`, refresh, built, failure_class: 'error' })
   if (meterStop) integ.meter_stop = meterStop
   const prod = Number(integ.prod_loc), test = Number(integ.test_loc)
   integ.loc = prod + test
@@ -1681,7 +1824,7 @@ async function unitFlow() {
   if (flow === 'LITE') { // v1.8 decision D-E: LITE = <= liteLocCap prod LOC, T0/T1 only, no sensitive path
     if (prod > LITE_CAP) upgrade(`${prod} prod LOC > LITE cap ${LITE_CAP}`, 0)
     const sens = sensitiveFiles(integ.files)
-    if (sens.length) upgrade(`sensitive path(s) ${sens.slice(0, 5).join(', ')}`, 0)
+    if (sens.length) upgrade(`sensitive path(s) ${showPaths(sens.slice(0, 5))}`, 0)
   }
 
   const g = await gateLoop()
@@ -1735,10 +1878,11 @@ ${PSETUP_SH}`, { label: `PATCH #${N} setup`, phase: 'Fix', model: 'haiku', effor
   if (fx.stop) return finish(fx.stop)
   const hf = await headFiles('PATCH delta files', from, 'Fix')
   if (!hf) return finish({ stopped: 'BLOCKED: PATCH delta file inventory unreadable', failure_class: 'error' })
+  if (hf.bad) return finish({ stopped: `BLOCKED: ${hf.bad}`, failure_class: 'error' })
   const files = hf.files
   if (!files.length) return finish({ stopped: 'PATCH produced no change' })
   const sens = sensitiveFiles(files)
-  if (sens.length) return finish({ stopped: `PATCH escalates to a full re-round: the delta touches sensitive path(s) ${sens.join(', ')}`, escalate: 'FULL', decision: `${UNIT}: PATCH on PR #${N} touches a sensitive path; run a full gate round` })
+  if (sens.length) return finish({ stopped: `PATCH escalates to a full re-round: the delta touches sensitive path(s) ${showPaths(sens)}`, escalate: 'FULL', decision: `${UNIT}: PATCH on PR #${N} touches a sensitive path; run a full gate round` })
   let review = null
   if (files.every(f => PROSE_RE.test(f))) { // prose-only delta (by extension): Haiku fact-check instead of a delta review
     const fc = await factCheck('patch', from, false)
@@ -1757,7 +1901,7 @@ ${PSETUP_SH}`, { label: `PATCH #${N} setup`, phase: 'Fix', model: 'haiku', effor
   const gd = await prePushGuard('PATCH', from, hf.head)
   if (!gd.ok) return finish({ stopped: `BLOCKED: pre-push guard: ${gd.why}`, review, failure_class: 'guard' })
   const late = gd.g.files_since.filter(f => !PROSE_RE.test(f))
-  if (late.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${hf.head}: ${late.join(', ')}`, review })
+  if (late.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${hf.head}: ${showPaths(late)}`, review })
   const want = gd.g.head
   const ip = await pushAndVerify(`PATCH #${N}`, 'Ship', rid, want)
   if (!ip.ok) return finish({ stopped: `BLOCKED: PATCH ${ip.why}`, review, push: ip.res, failure_class: 'error' })

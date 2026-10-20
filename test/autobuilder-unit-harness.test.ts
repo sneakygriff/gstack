@@ -7,6 +7,7 @@
 import { describe, test, expect, setDefaultTimeout } from 'bun:test'
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 
 const ROOT = path.join(import.meta.dir, '..')
@@ -14,7 +15,7 @@ const SCRIPT = path.join(ROOT, 'autobuilder-loop', 'autobuilder-unit.js')
 const FIX = path.join(import.meta.dir, 'fixtures', 'autobuilder-unit')
 const POSIX = process.platform !== 'win32' // bash + git scratch repositories
 // every test here spawns bash / git / jq / perl subprocesses: under load the bun default (5 s) is a flake, not a signal;
-// each test's own deadlines are asserted explicitly (BOUND) and every sync spawn is bounded by SUB_TIMEOUT_MS
+// each test's own deadlines are asserted explicitly (within: lower and upper bound) and every sync spawn is bounded by SUB_TIMEOUT_MS
 setDefaultTimeout(120_000)
 
 const { scenarios, runScenario } = await import(path.join(FIX, 'harness.mjs'))
@@ -111,8 +112,18 @@ describe.skipIf(!POSIX)('autobuilder-unit.js shell blocks (bash + scratch git re
 
 const F40 = 'f'.repeat(40)
 const SK_BRANCH = 'fix/' + fake.sk('validation-of-the-input-parser')
-// wall-clock bounds derive from the block's own deadlines (seconds) plus generous headroom, never a tight absolute time
-const BOUND = (deadline: number, grace: number) => (deadline + grace + 12) * 1000
+// Wall-clock bounds are derived from the block's own deadline + grace (seconds), with BOTH ends asserted:
+// - lower: deadline + grace - 1.5 s. The block measures its deadline with `date +%s` (1 s granularity, so it can fire up
+//   to 1 s early) and 0.5 s is jitter; anything above deadline + 0.5 s still proves the call was NOT killed at the
+//   deadline but only after the grace (TERM ignored -> KILL G s later).
+// - upper: deadline + grace + 4 s. Measured on this host: the stubborn call ends at 7.0-7.3 s (2 + 5 + ~0.2 s of bash,
+//   timeout|perl and fake-gh start-up) and the cleanup at 8.0-8.1 s; 4 s is >10x that start-up overhead under a loaded
+//   full-suite run, while a missing KILL would never end (the stubborn sleep runs for days).
+const MARGIN_S = 4
+const within = (ms: number, deadline: number, grace: number) => {
+  expect(ms).toBeGreaterThanOrEqual((deadline + grace - 1.5) * 1000)
+  expect(ms).toBeLessThan((deadline + grace + MARGIN_S) * 1000)
+}
 const noLeak = (r: { stdout: string, stderr: string, left: string[] }) => {
   expect(r.stderr).toBe('')
   expect(r.left).toEqual([])
@@ -182,7 +193,7 @@ describe.skipIf(!POSIX || !hasJq())('autobuilder-unit.js URL-blind gh blocks (fa
     const t0 = Date.now()
     const stall = realGhBlock(ci, { json: st(F40, 'MERGEABLE', 'CLEAN', []), env: Object.assign({}, env, { TOTAL: '2', FAKE_SLEEP: '30' }) }); noLeak(stall)
     expect(stall.stdout).toBe('CI status=BLOCKED head=none reason=ci:timeout pass=0 fail=0 pending=0')
-    expect(Date.now() - t0).toBeLessThan(BOUND(2, 5)) // far below the 30 s stall
+    within(Date.now() - t0, 2, 0) // gh honours TERM: it ends AT the 2 s deadline (no grace needed), far below the 30 s stall
   }, 60_000)
   // kill escalation: a TERM-resistant gh (and its child) is TERMed at the deadline and KILLed G=5 s later, with its
   // whole process group, on the timeout/gtimeout path and on the perl-watchdog path (PATH without timeout/gtimeout)
@@ -196,7 +207,7 @@ describe.skipIf(!POSIX || !hasJq())('autobuilder-unit.js URL-blind gh blocks (fa
       const r = realGhBlock(ci, { env: Object.assign({}, env, { TOTAL: '2', FAKE_STUBBORN: m }), noTimeout }); noLeak(r)
       const left = survivors(m)
       expect(r.stdout).toBe('CI status=BLOCKED head=none reason=ci:timeout pass=0 fail=0 pending=0')
-      expect(r.ms).toBeLessThan(BOUND(2, 5)) // TOTAL + G + headroom (the TERM-resistant call would otherwise never end)
+      within(r.ms, 2, 5) // TERM ignored: KILLed G=5 s after the 2 s deadline, never before, never much later
       expect(left).toBe('')
     }, 60_000)
     t(`CI block: gh honours TERM but its TERM-ignoring grandchild is KILLed with the group (${where})`, () => {
@@ -212,7 +223,7 @@ describe.skipIf(!POSIX || !hasJq())('autobuilder-unit.js URL-blind gh blocks (fa
         const c = await realCiCleanup(shellBlock(src, 'CI_SH'), shellBlock(src, 'CI_RUN'), shellBlock(src, 'CI_STOP'), m, { env: Object.assign({}, env, { TOTAL: '600' }), noTimeout, shell })
         expect(c.started).toBe(true)
         expect(c.out).toBe('CI_STOP ok')
-        expect(c.ms).toBeLessThan(BOUND(0, 8)) // the cleanup's own 8 s grace + headroom
+        within(c.ms, 0, 8) // CI_STOP's own TERM -> 8 s -> KILL
         expect(c.alive).toBe(false)
         expect(c.left).toBe('')
       }, 60_000)
@@ -236,6 +247,155 @@ describe.skipIf(!POSIX || !hasJq())('autobuilder-unit.js URL-blind gh blocks (fa
       }
     }, 60_000)
   }
+})
+
+describe.skipIf(!POSIX)('autobuilder-unit.js literal pathspecs (real git)', () => {
+  // round 21: [locale] is a ONE-character glob in a git pathspec. The delta-review command the script writes must be
+  // literal: run verbatim (with --name-only) against a scratch repo it names exactly src/app/[locale]/page.tsx and never
+  // the sibling src/app/l/page.tsx; the same command without --literal-pathspecs DOES sweep the sibling in (control).
+  test('the delta-review diff command scopes [locale] literally, never its one-character-glob sibling', async () => {
+    const sc = await runScenario('nextLocaleScopeLiteral', SCRIPT)
+    expect(sc.ok).toBe(true)
+    const dp = (sc.calls.find((x: { label: string }) => /^ship delta review/.test(x.label)) || { prompt: '' }).prompt
+    const m = dp.match(/(git -C \/lane --literal-pathspecs diff [0-9a-f]{40}\.\.[0-9a-f]{40} -- '[^']+')\./)
+    expect(m).not.toBeNull()
+    withTmp((dir: string) => {
+      const R = path.join(dir, 'repo'); fs.mkdirSync(R)
+      const env = gitEnv(dir, {})
+      const g = (...a: string[]) => { const r = spawnSync('git', ['-C', R, ...a], { encoding: 'utf8', timeout: SUB_TIMEOUT_MS, env }); if (r.status !== 0) throw new Error(r.stderr); return r.stdout.trim() }
+      g('init', '-q'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't')
+      for (const f of ['src/app/[locale]/page.tsx', 'src/app/l/page.tsx']) { fs.mkdirSync(path.join(R, path.dirname(f)), { recursive: true }); fs.writeFileSync(path.join(R, f), 'a\n') }
+      g('add', '-A'); g('commit', '-q', '-m', 'a'); const A = g('rev-parse', 'HEAD')
+      for (const f of ['src/app/[locale]/page.tsx', 'src/app/l/page.tsx']) fs.writeFileSync(path.join(R, f), 'b\n')
+      g('commit', '-q', '-am', 'b'); const B = g('rev-parse', 'HEAD')
+      const cmd = m![1].replace('git -C /lane ', `git -C '${R}' `).replace(/[0-9a-f]{40}\.\.[0-9a-f]{40}/, `${A}..${B}`).replace(' diff ', ' diff --name-only ')
+      for (const sh of hasZsh() ? ['bash', 'zsh'] : ['bash']) { // the agent's shell may be zsh: same result
+        const run = (c: string) => spawnSync(sh, ['-c', c], { encoding: 'utf8', timeout: SUB_TIMEOUT_MS, env }).stdout.trim()
+        expect([sh, run(cmd)]).toEqual([sh, 'src/app/[locale]/page.tsx'])
+        expect(run(cmd.replace(' --literal-pathspecs', '')).split('\n')).toContain('src/app/l/page.tsx') // the hazard is real
+      }
+    })
+  }, 60_000)
+  // round 22: a withheld credential-shaped path is resolvable by the agent: the resolver command the r2 mutation prompt
+  // carries, run verbatim (bash and zsh) in a scratch repo where that path changed, prints "<id> <path>" with the id the
+  // prompt names (the pure-JS SHA-1 over a > 60-char path agrees with git hash-object)
+  test('the resolve-by-id command in a prompt maps <path:ID> back to the exact token-shaped path (pinned to the lane)', async () => {
+    const sc = await runScenario('r2TokenPathMutationScoped', SCRIPT)
+    expect(sc.ok).toBe(true)
+    const mp = (sc.calls.find((x: { label: string }) => x.label === 'r2 mutation') || { prompt: '' }).prompt
+    const id = (mp.match(/<path:([0-9a-f]{12})>/) || [])[1]
+    const m = mp.match(/resolve ids locally with (git -C '\/lane' diff --name-only [0-9a-f]{40}\.\.[0-9a-f]{40} \| while .*? \| awk '.*?'); refer/)
+    expect(id).toBeTruthy()
+    expect(m).not.toBeNull()
+    expect(m![1]).not.toContain('\n') // one line: printf's \n is the two characters, not a line break
+    expect(m![1].match(/git -C '\/lane' /g)!.length).toBe(2) // both git calls pinned to the lane
+    const P = `config/secrets/${fake.sk('longPathToken' + 'Q'.repeat(40))}/settings.ts`
+    withTmp((dir: string) => {
+      const R = path.join(dir, 'repo'), OUT = path.join(dir, 'elsewhere'), S256 = path.join(dir, 'sha256repo')
+      fs.mkdirSync(R); fs.mkdirSync(OUT); fs.mkdirSync(S256)
+      const env = gitEnv(dir, {})
+      const g = (cwd: string, ...a: string[]) => { const r = spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8', timeout: SUB_TIMEOUT_MS, env }); if (r.status !== 0) throw new Error(r.stderr); return r.stdout.trim() }
+      g(R, 'init', '-q'); g(R, 'config', 'user.email', 't@example.invalid'); g(R, 'config', 'user.name', 't')
+      fs.writeFileSync(path.join(R, 'a.ts'), 'a\n'); g(R, 'add', '-A'); g(R, 'commit', '-q', '-m', 'a'); const A = g(R, 'rev-parse', 'HEAD')
+      fs.mkdirSync(path.join(R, path.dirname(P)), { recursive: true }); fs.writeFileSync(path.join(R, P), 'x\n'); g(R, 'add', '-A'); g(R, 'commit', '-q', '-m', 'b'); const B = g(R, 'rev-parse', 'HEAD')
+      const s256 = spawnSync('git', ['init', '-q', '--object-format=sha256', S256], { encoding: 'utf8', timeout: SUB_TIMEOUT_MS, env }).status === 0
+      const cmd = m![1].split("git -C '/lane' ").join(`git -C '${R}' `).replace(/[0-9a-f]{40}\.\.[0-9a-f]{40}/, `${A}..${B}`)
+      // run from a NON-repo cwd and from inside a sha256 repository: the ids are the lane's, never the cwd's
+      for (const cwd of s256 ? [OUT, S256] : [OUT]) for (const sh of hasZsh() ? ['bash', 'zsh'] : ['bash']) {
+        const out = spawnSync(sh, ['-c', cmd], { cwd, encoding: 'utf8', timeout: SUB_TIMEOUT_MS, env }).stdout.trim()
+        expect([cwd === OUT ? 'non-repo' : 'sha256', sh, out]).toEqual([cwd === OUT ? 'non-repo' : 'sha256', sh, `${id} ${P}`])
+      }
+      // forced duplicate prefix: cut the ids to 1 hex char over 17 changed paths (pigeonhole: two must share it); the
+      // resolver prints ONLY "AMBIGUOUS <id>" and fails, never two mappings for one id
+      for (let i = 0; i < 17; i++) fs.writeFileSync(path.join(R, `f${i}.ts`), `${i}\n`)
+      g(R, 'add', '-A'); g(R, 'commit', '-q', '-m', 'c'); const C = g(R, 'rev-parse', 'HEAD')
+      const dup = cmd.replace(`${A}..${B}`, `${B}..${C}`).replace('cut -c1-12', 'cut -c1-1')
+      for (const sh of hasZsh() ? ['bash', 'zsh'] : ['bash']) {
+        const r = spawnSync(sh, ['-c', dup], { cwd: OUT, encoding: 'utf8', timeout: SUB_TIMEOUT_MS, env })
+        expect([sh, r.status !== 0, /^AMBIGUOUS [0-9a-f]$/.test(r.stdout.trim())]).toEqual([sh, true, true])
+      }
+    })
+  }, 60_000)
+  // round 23: ids are lengthened per rendered list until distinct paths differ (forced duplicate 12-hex prefix)
+  test('assignIds lengthens colliding ids (forced duplicate prefix) and keeps 12 hex otherwise', () => {
+    const src = loadScript(SCRIPT).src
+    const a = src.indexOf('function assignIds('), b = src.indexOf('\n}\n', a) + 2
+    const assignIds = new Function('arr', `${src.slice(a, b)}; return assignIds`)((x: unknown) => Array.isArray(x) ? x : [])
+    const pre = 'abcdef012345'
+    const forced = (f: string) => f === 'x' ? pre + '0' + 'a'.repeat(27) : f === 'y' ? pre + '1' + 'b'.repeat(27) : pre + '1' + 'c'.repeat(27)
+    const two = assignIds(['x', 'y', 'x'], forced)
+    expect([two.n, two.id('x'), two.id('y')]).toEqual([13, pre + '0', pre + '1'])
+    const three = assignIds(['x', 'y', 'z'], forced) // y and z share 13 hex: 14
+    expect([three.n, new Set(['x', 'y', 'z'].map(three.id)).size]).toEqual([14, 3])
+    const none = assignIds(['x'], forced)
+    expect(none.n).toBe(12)
+  })
+  // round 23 negative controls: mutated copies of the script that leak a credential component the generic assertion
+  // must catch WITHOUT any per-scenario secret (genericOnly): the userinfo password alone, the scrubbed
+  // config/<token>.ts form, a lowercased token path, a truncated token; the unmutated script passes the same runs
+  test('generic leak assertion: negative controls (password alone, config/<token>.ts, case-folded, truncated)', async () => {
+    const src = fs.readFileSync(SCRIPT, 'utf8')
+    const site = 'upgrade(`sensitive path(s) ${showPaths(sens.slice(0, 5))}`, 0)'
+    expect(src.includes(site)).toBe(true)
+    const mutants: [string, string, string][] = [
+      ['password alone', 'userinfoPathSensitiveFull', 'upgrade(`sensitive path(s) ${sens.map(f => String(f).replace(/^.*:([^@]*)@.*$/, "$1")).join(", ")}`, 0)'],
+      ['scrubbed form', 'tokenPathSensitiveFull', 'upgrade(`sensitive path(s) ${sens.map(scrubText).join(", ")}`, 0)'],
+      ['case-folded', 'tokenPathSensitiveFull', 'upgrade(`sensitive path(s) ${sens.map(f => String(f).toLowerCase()).join(", ")}`, 0)'],
+      ['truncated token', 'tokenPathSensitiveFull', 'upgrade(`sensitive path(s) ${sens.map(f => String(f).slice(0, 29)).join(", ")}`, 0)'],
+    ]
+    for (const name of ['userinfoPathSensitiveFull', 'tokenPathSensitiveFull']) expect([name, (await runScenario(name, SCRIPT, { genericOnly: true })).ok]).toEqual([name, true])
+    await (async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abu-mut-'))
+      try {
+        for (const [what, scen, repl] of mutants) {
+          const f = path.join(dir, 'm.js'); fs.writeFileSync(f, src.replace(site, repl))
+          const r = await runScenario(scen, f, { genericOnly: true })
+          expect([what, r.ok, r.leaks.length > 0]).toEqual([what, false, true])
+        }
+      } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+    })()
+  }, 60_000)
+  // rounds 22-23 (structural): no raw repo-path list reaches a prompt, message or JSON. Every J(...) argument and every
+  // template ${...} is reduced to its CODE (string literals and template text removed, renderer calls removed:
+  // renderPaths / showPaths / showPath / pathIdList / shellPaths / scopeText); what remains must not name a path list or
+  // path field, wrapped or not (J(delta.map(...)), J(r.files), J(touches(delta, X)), ${integ}...). Allowed: X.length and
+  // a bare truthiness test (X ? ...). It CANNOT see: an alias (const x = delta; J(x)), a list passed into a helper that
+  // interpolates it under another name, or concatenation outside J()/templates; the runtime generic assertion covers
+  // those for every scenario that feeds a credential-shaped path.
+  test('static: path lists are interpolated only through the renderers (wrapped forms too)', () => {
+    const src = loadScript(SCRIPT).src
+    const NAMES = /\b(delta|sinceBase|scope|files|sens|late|lateCode|treeLate|plain|held|files_since_base|files_since_prev|files_since|tree_delta)\b|\b(integ|gs|fl|hf|gd)\b(?!\.)/
+    const RENDER = /\b(renderPaths|showPaths|showPath|pathIdList|shellPaths|scopeText)\(/
+    const bal = (t: string, i: number, o: string, c: string) => { let d = 0; for (let j = i; j < t.length; j++) { if (t[j] === o) d++; else if (t[j] === c && --d === 0) return j } return -1 }
+    const code = (t: string): string => { // drop quoted text, keep ${...} code of templates (recursively)
+      let out = ''
+      for (let i = 0; i < t.length; i++) {
+        const ch = t[i]
+        if (ch === "'" || ch === '"') { const q = ch; i++; while (i < t.length && t[i] !== q) { if (t[i] === '\\') i++; i++ } continue }
+        if (ch === '`') { i++; while (i < t.length && t[i] !== '`') { if (t[i] === '\\') { i += 2; continue } if (t[i] === '$' && t[i + 1] === '{') { const e = bal(t, i + 1, '{', '}'); out += ' (' + code(t.slice(i + 2, e)) + ') '; i = e + 1; continue } i++ } continue }
+        out += ch
+      }
+      return out
+    }
+    const strip = (t: string) => { let m; while ((m = RENDER.exec(t))) { const e = bal(t, m.index + m[0].length - 1, '(', ')'); t = t.slice(0, m.index) + 'R' + t.slice(e + 1) } return t }
+    const bad: string[] = []
+    for (const [re, o, c] of [[/\bJ\(/g, '(', ')'], [/\$\{/g, '{', '}']] as [RegExp, string, string][]) {
+      let m: RegExpExecArray | null
+      while ((m = re.exec(src))) {
+        const s0 = m.index + m[0].length - 1, e = bal(src, s0, o, c)
+        if (e < 0) continue
+        const rest = strip(code(src.slice(s0 + 1, e))).replace(/\b\w+\.length\b/g, 'N').replace(/\b(\w+)\s*\?/g, 'C ?')
+        if (NAMES.test(rest)) bad.push(`${src.slice(0, m.index).split('\n').length}: ${m[0]}${src.slice(s0 + 1, Math.min(e, s0 + 100))}`)
+      }
+    }
+    expect(bad).toEqual([])
+    // the checker itself sees the wrapped regressions it exists for
+    for (const probe of ['J(delta.map(f => f))', 'J(r.files)', 'J(touches(delta, X))', '${J(delta.slice(0, 5))}', '${integ}', '${gd.g.tree_delta.join(", ")}']) {
+      const isJ = probe.startsWith('J(')
+      const inner = isJ ? probe.slice(2, -1) : probe.slice(2, -1)
+      expect([probe, NAMES.test(strip(code(inner)).replace(/\b\w+\.length\b/g, 'N').replace(/\b(\w+)\s*\?/g, 'C ?'))]).toEqual([probe, true])
+    }
+  })
 })
 
 describe.skipIf(!POSIX)('autobuilder-unit.js mock harness scenarios', () => {

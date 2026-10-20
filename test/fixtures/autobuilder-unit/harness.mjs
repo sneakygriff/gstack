@@ -5,9 +5,46 @@
 // Library: import { scenarios, runScenario, runAll } from './harness.mjs'
 // CLI:     node harness.mjs [script] [scenario] [v]
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { loadScript, shellBlock, realIdentity, SHA, DEFAULT_SCRIPT, fake } from './lib.mjs'
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+// security review r20: repo paths are never scrubbed; token- / userinfo-shaped ones are sensitive and shown only by id
+// (the first 12 hex of the git blob id of the path text, computed here independently with node:crypto)
+const gitId = f => crypto.createHash('sha1').update(`blob ${Buffer.byteLength(f)}\0${f}`).digest('hex').slice(0, 12)
+const TOK = fake.sk('pathTokenAbcdefghijklmnop0123') // built at runtime: no credential-shaped literal in the source
+const TOK_PATH = `config/${TOK}.ts`
+const UI_PASS = 'Pw0rdValue77'
+const UI_PATH = 'deploy/ops' + ':' + UI_PASS + '@' + 'db.example/seed.ts'
+// a token path long enough that `blob <len>\0<path>` crosses the SHA-1 55/56-byte padding edge (pins the pure-JS SHA-1)
+const TOK_LONG = fake.sk('longPathToken' + 'Q'.repeat(40))
+const TOK_LONG_PATH = `config/secrets/${TOK_LONG}/settings.ts`
+// GENERIC (round 22): any secret-shaped path an agent returns in a path list is recorded, and no prompt, log or result
+// of the scenario may contain it (nor its token part). Shapes mirror the script's scrubber (token / userinfo forms).
+// (assembled from pieces like `fake`, so no source line holds a token-shaped literal for the pre-push scanner)
+const SECRET_PATH_RE = new RegExp('(?:^|[^A-Za-z0-9])((?:' + 's' + 'k-[A-Za-z0-9_-]{20,})|(?:' + 'g' + 'h[pousr]_[A-Za-z0-9]{30,})|(?:' + 'github' + '_pat_[A-Za-z0-9_]{30,})|(?:[^\\s:/@]+:[^\\s@/]*@[A-Za-z0-9.-]+))')
+const PATH_KEYS = ['files', 'files_since_base', 'files_since_prev', 'files_since', 'tree_delta']
+// The credential COMPONENTS of a secret-shaped path (round 23), each a leak marker: the full path, its scrubbed form
+// (config/<token>.ts still names the path's structure: the script must show <path:ID>), every token value, the userinfo
+// user and password, all verbatim; plus case-folded markers (the lowercased token core = 16 chars after its marker,
+// the lowercased user / password). Components shorter than MIN_COMPONENT are skipped (no false positives on words).
+const MIN_COMPONENT = 6
+const TOKEN_RES = [['s' + 'k-', '[A-Za-z0-9_-]{20,}'], ['g' + 'hp_', '[A-Za-z0-9]{30,}'], ['g' + 'ho_', '[A-Za-z0-9]{30,}'], ['g' + 'hu_', '[A-Za-z0-9]{30,}'], ['g' + 'hs_', '[A-Za-z0-9]{30,}'], ['g' + 'hr_', '[A-Za-z0-9]{30,}'], ['github' + '_pat_', '[A-Za-z0-9_]{30,}']]
+function secretMarkers(f, scrub) {
+  const exact = new Set([f]), folded = new Set()
+  const sf = scrub(f)
+  if (sf !== f && sf.length >= 8 && !/^<(url|token)>$/.test(sf)) exact.add(sf)
+  for (const [mk, body] of TOKEN_RES) for (const m of f.matchAll(new RegExp(mk + body, 'g'))) { exact.add(m[0]); folded.add(m[0].slice(mk.length, mk.length + 16).toLowerCase()) }
+  for (const m of f.matchAll(/([^\s:/@]+):([^\s@/]*)@/g)) for (const c of [m[1], m[2]]) if (c.length >= MIN_COMPONENT) { exact.add(c); folded.add(c.toLowerCase()) }
+  return { exact: [...exact], folded: [...folded].filter(c => c.length >= MIN_COMPONENT) }
+}
+// the script's own scrubber, so the scrubbed form is exactly what scrubText would produce
+const scrubberFrom = src => { const a = src.indexOf('const SECRET_RES = ['), b = src.indexOf('\nconst scrubText', a); return new Function(src.slice(a, b) + '\nreturn x => SECRET_RES.reduce((t, [re, to]) => t.replace(re, to), String(x))')() }
+const LITE1 = { flow: 'LITE', waves: [[{ id: 'T-A', impl: 'claude', model: 'haiku', tier: 'T1' }]] }
+// Next.js App Router names (round 21): brackets, parentheses and spaces are valid repo paths
+const NEXT = ['src/app/[locale]/(marketing)/page.tsx', 'src/app/[...slug]/page.tsx', 'src/app/[[...catchall]]/route.ts', 'src/components/Hero Banner.tsx']
+const shq1 = x => `'${x}'`
+const withheld = (p, ids) => p.includes(`Review ONLY the changes to these paths: [] plus ${ids.length} credential-shaped path(s) withheld from this prompt, by id: ${JSON.stringify(ids)}.`) && /git -C '\/lane' hash-object --stdin \| cut -c1-12/.test(p)
 const ID = spec => ({ __id: spec }) // an identity spec: run the real ID_SH against scratch repos configured from it
 const DEFAULT_ID = { repo_url: 'git@github.com:acme/app.git', lane_url: 'https://github.com/acme/app', push_urls: [] }
 const rangeEnd = p => { const m = String(p).match(/RANGE=([0-9a-f]{40})\.\.([0-9a-f]{40})/); return m ? m[2] : '' }
@@ -36,6 +73,7 @@ function makeAgent(sc, calls, ctx) {
       r = { lines: realIdentity(ctx.idsh, r.__id) }
       calls[calls.length - 1].output = r.lines.join('\n')
     }
+    if (r && typeof r === 'object') for (const k of PATH_KEYS) for (const f of Array.isArray(r[k]) ? r[k] : []) if (typeof f === 'string' && SECRET_PATH_RE.test(f)) ctx.secretPaths.add(f)
     return r && typeof r === 'object' ? structuredClone(r) : r
   }
   function base(L, prompt) {
@@ -611,6 +649,72 @@ const scenarios = {
   patchCiOldHead: { args: PATCH, override(L) { if (/wait CI/.test(L)) return CIL('READY', SHA('1')) }, expect: (r) => r.status === 'BLOCKED' },
 
   // ---- R6 sensitive globs ----
+  // ---- security review r20: repo paths are validated, never scrubbed; token-shaped paths are sensitive, never echoed ----
+  tokenPathSensitiveFull: { // LITE + a token-shaped path: verbatim to the classifier (FULL), exact path in the delta scope (by id), never echoed
+    args: LITE1, wt: [], files: [TOK_PATH], codeChanged: true, deltaFiles: [TOK_PATH, 'VERSION'], secrets: [TOK, 'pathTokenAbcdefghijklmnop0123'],
+    expect: (r, c) => {
+      const dp = (c.find(x => /^ship delta review/.test(x.label)) || {}).prompt || ''
+      return r.status === 'READY' && r.flow === 'FULL' && r.flow_upgrades.length === 1 && r.flow_upgrades[0].why === `sensitive path(s) <path:${gitId(TOK_PATH)}>` && withheld(dp, [gitId(TOK_PATH)])
+    },
+  },
+  userinfoPathSensitiveFull: { args: LITE1, wt: [], files: ['src/a.ts', UI_PATH], secrets: [UI_PASS], expect: (r) => r.status === 'READY' && r.flow === 'FULL' && r.flow_upgrades[0].why === `sensitive path(s) <path:${gitId(UI_PATH)}>` },
+  tokenPathSensitiveDespiteGlobs: { args: Object.assign({}, LITE1, { sensitiveGlobs: ['**/nothing-matches-this'] }), wt: [], files: [TOK_PATH], secrets: [TOK], expect: (r) => r.status === 'READY' && r.flow === 'FULL' },
+  tokenPathMixedScope: { codeChanged: true, deltaFiles: ['src/merge.ts', TOK_PATH, 'VERSION'], secrets: [TOK], expect: (r, c) => { const dp = (c.find(x => /^ship delta review/.test(x.label)) || {}).prompt || ''; return r.status === 'READY' && dp.includes(`Review ONLY the changes to these paths: ["src/merge.ts"] plus 1 credential-shaped path(s) withheld from this prompt, by id: ["${gitId(TOK_PATH)}"]`) } },
+  tokenPathPatchEscalates: { args: PATCH, patchFiles: [TOK_PATH], secrets: [TOK], expect: (r) => r.status === 'STOPPED' && r.escalate === 'FULL' && r.stopped.endsWith(`sensitive path(s) <path:${gitId(TOK_PATH)}>`) },
+  tokenPathLateChangeById: { // a late change named by id, never by its text
+    override(L) { if (L === 'ship pre-push guard') return { exit_code: 0, lines: ['no_changes=true'], head: SHA('f'), files_since: [TOK_PATH], tree_delta: ['VERSION'] } },
+    secrets: [TOK], expect: (r) => r.status === 'BLOCKED' && r.stopped.endsWith(`unreviewed change after the reviewed head ${SHA('f')}: <path:${gitId(TOK_PATH)}>`),
+  },
+  tokenPathLongSensitive: { args: LITE1, wt: [], files: [TOK_LONG_PATH], expect: (r) => r.status === 'READY' && r.flow === 'FULL' && r.flow_upgrades[0].why === `sensitive path(s) <path:${gitId(TOK_LONG_PATH)}>` },
+  r2TokenPathMutationScoped: { // round 2's scoped mutation probe names a token-shaped files_since_prev path only by id, with the resolver
+    override(L, o, p, c, st) {
+      if (/r1 seat X/.test(L)) return Object.assign({}, SEATX_OK, { verdict: 'FAIL', verdict_line: 'VERDICT=PRESENT_P1 reason=p1_found p1_count=1 runtime_model=gpt-6-astra' })
+      if (/r1 consolidate/.test(L)) return { verdict: 'FAIL', members_present: {}, p1: ['race in a.ts'], fixes: [{ owner: 'T-B', item: 'fix race', severity: 'P1', mutants: ['m9'], checks: [{ name: 'race', command: 'bun test race' }] }], deferred_p2: [], members: 'x', new_p1: true }
+      if (/fix-r1 T-B/.test(L)) return { status: 'DONE', head: SHA('b'), test_result: 'pass', checks: [{ name: 'race', command: 'bun test race', exit_code: 0 }] }
+      if (L === 'r2 gate start') { st.gated = SHA('7'); return { guard_exit: 0, guard_lines: ['no_changes=true'], reviewed_sha: SHA('7'), files_since_base: ['src/a.ts', TOK_LONG_PATH], files_since_prev: [TOK_LONG_PATH], rulings: 0 } }
+    },
+    expect: (r, c) => {
+      const mp = (c.find(x => x.label === 'r2 mutation') || {}).prompt || ''
+      const g1 = (c.find(x => x.label === 'r1 gate start') || {}).prompt ? SHA('2') : ''
+      return r.status === 'READY' && mp.includes(`whose target file is in ["<path:${gitId(TOK_LONG_PATH)}>"] (a <path:ID> is a credential-shaped path withheld from this text: resolve ids locally with git -C '/lane' diff --name-only ${g1}..${SHA('7')} | while IFS= read -r p; do printf '%s %s\\n' "$(printf '%s' "$p" | git -C '/lane' hash-object --stdin | cut -c1-12)" "$p"; done | awk '`) && /done \| awk '\{ c\[\$1\]\+\+; l\[NR\] = \$0 \} END \{ for \(k in c\) if \(c\[k\] > 1\) \{ print "AMBIGUOUS " k; exit 1 \}/.test(mp)
+    },
+  },
+  pathDotDotBlocked: { files: ['src/../../etc/hosts.ts'], secrets: ['etc/hosts'], expect: (r, c) => r.status === 'BLOCKED' && r.stopped === `BLOCKED: invalid_path:files (integration file list; <path:${gitId('src/../../etc/hosts.ts')}>: traversal; a path outside the allowlist)` && !has(c, /^r1 /) },
+  pathLeadingDashBlocked: { files: ['-rf.ts'], secrets: ['-rf.ts'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files .*: option; /.test(r.stopped) },
+  pathNewlineBlocked: { files: ['src/a.ts\nsrc/evil.ts'], secrets: ['evil.ts'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files .*: control; /.test(r.stopped) },
+  pathAbsoluteBlocked: { files: ['/etc/hostsfile.ts'], secrets: ['hostsfile'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files .*: absolute; /.test(r.stopped) },
+  pathSchemeUrlBlocked: { files: ['vendor/' + fake.auth('https', 'u', 'urlPw55', 'h.example/x.ts')], secrets: ['urlPw55'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files .*: url; /.test(r.stopped) },
+  pathGateStartBlocked: {
+    override(L) { if (/^r1 gate start/.test(L)) return { guard_exit: 0, guard_lines: ['no_changes=true'], reviewed_sha: SHA('1'), files_since_base: ['src/a.ts'], files_since_prev: ['src/a;b.ts'], rulings: 0 } },
+    expect: (r, c) => r.status === 'BLOCKED' && /invalid_path:files_since_prev \(gate start of round 1/.test(r.stopped) && !has(c, /seat C/),
+  },
+  pathGuardTreeDeltaBlocked: {
+    override(L) { if (L === 'ship pre-push guard') return { exit_code: 0, lines: ['no_changes=true'], head: SHA('f'), files_since: [], tree_delta: ['VERSION', '../escape.ts'] } },
+    secrets: ['escape.ts'], expect: (r, c) => r.status === 'BLOCKED' && r.stopped === `BLOCKED: pre-push guard: invalid_path:tree_delta (ship guard scan; <path:${gitId('../escape.ts')}>: traversal; a path outside the allowlist)` && !has(c, /ship push$/),
+  },
+  pathShipDeltaBlocked: { deltaFiles: ['CHANGELOG.md', '-x.ts'], expect: (r, c) => r.status === 'BLOCKED' && /invalid_path:files \(\/ship delta inventory/.test(r.stopped) && !has(c, /ship delta review|ship push$/) },
+  pathPatchBlocked: { args: PATCH, patchFiles: ['src/../x.ts'], expect: (r, c) => r.status === 'BLOCKED' && /invalid_path:files \(PATCH delta files inventory; <path:[0-9a-f]{12}>: traversal; /.test(r.stopped) && !has(c, /delta review|push$/) },
+  // ---- round 21: Next.js App Router paths are accepted, classified by the same rules, and reach git literally ----
+  nextAppPagesStayLite: { args: LITE1, wt: [], files: [NEXT[0], NEXT[1], NEXT[3]], expect: (r) => r.status === 'READY' && r.flow === 'LITE' && !r.flow_upgrades.length },
+  nextAppRouteSensitive: { args: LITE1, wt: [], files: [NEXT[0], NEXT[2]], expect: (r) => r.status === 'READY' && r.flow === 'FULL' && r.flow_upgrades[0].why === `sensitive path(s) ${NEXT[2]}` },
+  nextAppDeltaScopeExact: { codeChanged: true, deltaFiles: [...NEXT, 'VERSION', 'CHANGELOG.md'], expect: (r, c) => {
+    const dp = (c.find(x => /^ship delta review/.test(x.label)) || {}).prompt || ''
+    const range = (dp.match(/RANGE=([0-9a-f]{40}\.\.[0-9a-f]{40})/) || [])[1]
+    return r.status === 'READY' && dp.includes(`Review ONLY the changes to these paths: ${JSON.stringify(NEXT)}. Diff exactly these paths as literal pathspecs, each single-quoted (a [name] is NOT a glob here): git -C /lane --literal-pathspecs diff ${range} -- ${NEXT.map(shq1).join(' ')}. The rest of the range`)
+  } },
+  nextLocaleScopeLiteral: { codeChanged: true, deltaFiles: ['src/app/[locale]/page.tsx', 'VERSION'], expect: (r, c) => r.status === 'READY' && has(c, /^ship delta review/) },
+  nextAppPatchDelta: { args: PATCH, patchFiles: [NEXT[0], NEXT[1]], expect: (r, c) => r.status === 'READY' && has(c, /patch delta review/) },
+  pathQuoteBlocked: { files: [`src/app/it's.tsx`], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files .*: quote; /.test(r.stopped) },
+  pathDoubleQuoteBlocked: { files: ['src/app/"x".tsx'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files/.test(r.stopped) },
+  pathBacktickBlocked: { files: ['src/app/`id`.tsx'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files/.test(r.stopped) },
+  pathDollarBlocked: { files: ['src/app/$HOME.tsx'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files .*: shell; /.test(r.stopped) },
+  pathNonAsciiBlocked: { files: ['src/caf\u00e9.ts'], expect: (r) => r.status === 'BLOCKED' && r.stopped === `BLOCKED: invalid_path:files (integration file list; <path:${gitId('src/caf\u00e9.ts')}>: non_ascii; a path outside the allowlist)` },
+  pathGitQuotedBlocked: { files: ['"src/caf\\303\\251.ts"'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files .*: non_ascii; /.test(r.stopped) },
+  pathSemicolonBlocked: { files: ['src/app/a;rm -rf x.tsx'], secrets: ['rm -rf'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files/.test(r.stopped) },
+  pathTabBlocked: { files: ['src/app/a\tb.tsx'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files/.test(r.stopped) },
+  pathGlobStarBlocked: { deltaFiles: ['CHANGELOG.md', 'src/app/*.tsx'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files \(\/ship delta inventory/.test(r.stopped) },
+  pathNextDotDotBlocked: { args: PATCH, patchFiles: ['src/app/[locale]/../../x.tsx'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files \(PATCH delta files inventory; <path:[0-9a-f]{12}>: traversal; /.test(r.stopped) },
+  pathNextLeadingDashBlocked: { files: ['-[locale]/page.tsx'], expect: (r) => r.status === 'BLOCKED' && /invalid_path:files/.test(r.stopped) },
   liteAuthorNotSensitive: { args: { flow: 'LITE', waves: [[{ id: 'T-A', impl: 'claude', model: 'haiku', tier: 'T1' }]] }, wt: [], files: ['docs/author.md', 'src/authors/list.ts', 'src/coauthor.tsx'], expect: (r) => r.status === 'READY' && r.flow === 'LITE' },
   liteCriticalRunsDockerFull: { args: { flow: 'LITE', gateClass: 'critical', waves: [[{ id: 'T-A', impl: 'claude', model: 'haiku', tier: 'T1' }]] }, wt: [], files: ['src/a.ts'], expect: (r, c) => r.status === 'READY' && r.flow === 'FULL' && has(c, /^r1 docker/) },
   liteAuthSensitive: { args: { flow: 'LITE', waves: [[{ id: 'T-A', impl: 'claude', model: 'haiku', tier: 'T1' }]] }, wt: [], files: ['src/lib/auth.ts'], expect: (r) => r.flow === 'FULL' && /sensitive/.test(r.flow_upgrades[0].why) },
@@ -683,11 +787,12 @@ function urlLeaks(ctx, calls, res) {
 }
 
 export { scenarios }
-export async function runScenario(name, scriptPath = DEFAULT_SCRIPT) {
+// genericOnly: ignore the scenario's own secrets and expect(); ok = no crash and no GENERIC leak (negative controls)
+export async function runScenario(name, scriptPath = DEFAULT_SCRIPT, { genericOnly = false } = {}) {
   const sc = scenarios[name]
   if (!sc) throw new Error(`unknown scenario ${name}`)
   const { src, body } = loadScript(scriptPath)
-  const ctx = { idsh: shellBlock(src, 'ID_SH'), specs: [] }
+  const ctx = { idsh: shellBlock(src, 'ID_SH'), specs: [], secretPaths: new Set() }
   const calls = [], logs = []
   const fn = new AsyncFunction('args', 'agent', 'parallel', 'phase', 'log', body)
   const parallel = async thunks => Promise.all(thunks.map(t => t().catch(e => { logs.push('THUNK ERR ' + e.message); return null })))
@@ -697,14 +802,22 @@ export async function runScenario(name, scriptPath = DEFAULT_SCRIPT) {
   const leaks = urlLeaks(ctx, calls, res)
   // scenario secrets (relayed by a mocked agent) must never reach the result, any later prompt (state writes included)
   // or a log line
-  for (const sec of sc.secrets || []) {
-    if (JSON.stringify(res || {}).includes(sec)) leaks.push(`result: ${sec}`)
+  const scrub = scrubberFrom(src), resText = JSON.stringify(res || {})
+  const exact = new Set(genericOnly ? [] : sc.secrets || []), folded = new Set()
+  for (const f of ctx.secretPaths) { const m = secretMarkers(f, scrub); m.exact.forEach(x => exact.add(x)); m.folded.forEach(x => folded.add(x)) }
+  for (const sec of exact) {
+    if (resText.includes(sec)) leaks.push(`result: ${sec}`)
     for (const c of calls) if (c.prompt.includes(sec)) leaks.push(`${c.label} prompt: ${sec}`)
     if (logs.some(l => l.includes(sec))) leaks.push(`log: ${sec}`)
   }
-  try { ok = !res.CRASH && !logs.some(l => /THUNK ERR/.test(l)) && !leaks.length && !!sc.expect(res, calls) } catch (e) { ok = false; logs.push('EXPECT ERR ' + e.message) }
+  for (const sec of folded) {
+    if (resText.toLowerCase().includes(sec)) leaks.push(`result (case-folded): ${sec}`)
+    for (const c of calls) if (c.prompt.toLowerCase().includes(sec)) leaks.push(`${c.label} prompt (case-folded): ${sec}`)
+    if (logs.some(l => l.toLowerCase().includes(sec))) leaks.push(`log (case-folded): ${sec}`)
+  }
+  try { ok = !res.CRASH && !logs.some(l => /THUNK ERR/.test(l)) && !leaks.length && (genericOnly || !!sc.expect(res, calls)) } catch (e) { ok = false; logs.push('EXPECT ERR ' + e.message) }
   const detail = `${name}: status=${res.status} stopped=${res.stopped || ''} flow=${res.flow} agents=${calls.length}` + (ok ? '' : `\n  crash: ${res.CRASH || ''}\n  url leaks: ${leaks.join(' | ')}\n  labels: ${calls.map(c => `${c.label} [${c.model}]`).join(' | ')}\n  logs: ${logs.join(' | ')}\n  rounds: ${JSON.stringify(res.rounds)}`)
-  return { name, ok, detail, res, calls }
+  return { name, ok, detail, res, calls, leaks }
 }
 export async function runAll(scriptPath = DEFAULT_SCRIPT, only) {
   const results = []
