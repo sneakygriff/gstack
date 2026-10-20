@@ -351,8 +351,6 @@ const DEFER_ITEM = { type: 'object', properties: { finding: STR, files: STRS, ow
 // retro-2026-10-19 item 9: CONS carries members_present and the CLEAN|DEGRADED|FAIL|BLOCKED verdict enum
 const CONS = { type: 'object', properties: { verdict: { type: 'string', enum: ['CLEAN', 'DEGRADED', 'FAIL', 'BLOCKED'] }, members_present: { type: 'object', properties: { seat_c: STR, seat_x: STR, docker: STR, mutation: STR }, required: ['seat_c', 'seat_x'] }, p1: STRS, fixes: { type: 'array', items: FIX_ITEM }, deferred_p2: { type: 'array', items: DEFER_ITEM }, invalidates: { type: 'array', items: { type: 'string', enum: ['seat_c', 'seat_x', 'docker', 'mutation'] } }, member_downgrades: { type: 'array', items: { type: 'object', properties: { member: { type: 'string', enum: ['docker', 'mutation'] }, reason: STR }, required: ['member', 'reason'] } }, new_p1: { type: 'boolean' }, re_raises: { type: 'number' }, rulings_written: { type: 'number' }, members: STR }, required: ['verdict', 'members_present', 'p1', 'fixes', 'deferred_p2', 'members'] }
 const PR = { type: 'object', properties: { pr: { type: 'number' }, head: STR, title: STR }, required: ['pr', 'head', 'title'] }
-const SHIPPR = { type: 'object', properties: { pr: { type: 'number' }, state: STR, cross_repo: { type: 'boolean' }, head_repo: STR, head_ref: STR, head: STR, title: STR, notes: STR }, required: ['pr', 'state', 'cross_repo', 'head_repo', 'head_ref', 'head'] }
-const RD = { type: 'object', properties: { status: { type: 'string', enum: ['READY', 'BLOCKED'] }, head: STR, title: STR, ci_run_id: STR, failing_check: STR, failure_class: STR, notes: STR }, required: ['status', 'notes'] }
 const DC = { type: 'object', properties: { verdict: { type: 'string', enum: ['CLEAN', 'FAIL'] }, p1: STRS, doc_fixes: STRS, members: STR, checks: CHECKS }, required: ['verdict', 'p1', 'doc_fixes', 'members'] }
 const DR = { type: 'object', properties: { verdict: { type: 'string', enum: ['PASS', 'FAIL'] }, reviewed_sha: STR, p1: STRS, p2: STRS, fixes: { type: 'array', items: FIX_ITEM }, mutants: { type: 'array', items: { type: 'object', properties: { name: STR, killed: { type: 'boolean' } }, required: ['name', 'killed'] } }, notes: STR }, required: ['verdict', 'p1'] }
 const REFRESH = { type: 'object', properties: { status: { type: 'string', enum: ['READY', 'BLOCKED'] }, disjoint: { type: 'boolean' }, baseline: { type: 'string', enum: ['GREEN', 'RED', 'UNKNOWN'] }, edits: STRS, open_issues: STRS, tasks: { type: 'array', items: { type: 'object', properties: { id: STR, named_checks: NAMED, mutation_targets: STRS }, required: ['id', 'named_checks'] } } }, required: ['status', 'tasks'] }
@@ -362,9 +360,7 @@ const GS = { type: 'object', properties: { guard_exit: { type: 'number' }, guard
 const FILES = { type: 'object', properties: { head: STR, files: STRS, snap_tree: STR }, required: ['head', 'files'] }
 const METERS = { type: 'object', properties: { prod_loc: { type: 'number' }, test_loc: { type: 'number' }, line: STR }, required: ['prod_loc', 'test_loc'] }
 const GUARD = { type: 'object', properties: { exit_code: { type: 'number' }, lines: STRS, head: STR, files_since: STRS, tree_delta: STRS }, required: ['exit_code', 'lines', 'head', 'files_since'] }
-const PSETUP = { type: 'object', properties: { recorded_pr: { type: 'number' }, recorded_branch: STR, state: STR, head_ref: STR, cross_repo: { type: 'boolean' }, head_repo: STR, head: STR, remote_head: STR, notes: STR }, required: ['recorded_pr', 'recorded_branch', 'state', 'head_ref', 'cross_repo', 'head_repo', 'head', 'remote_head'] }
-const PUSH = { type: 'object', properties: { exit_code: { type: 'number' }, local_head: STR, remote_head: STR, notes: STR }, required: ['exit_code', 'local_head', 'remote_head'] }
-const PUB = { type: 'object', properties: { status: { type: 'string', enum: ['PUBLISHED', 'BLOCKED'] }, pushed: { type: 'boolean' }, pr_number: { type: 'number' }, head: STR, notes: STR }, required: ['status', 'pushed', 'head'] }
+const PUB = { type: 'object', properties: { status: { type: 'string', enum: ['PUBLISHED', 'BLOCKED'] }, pr_number: { type: 'number' }, head: STR, notes: STR }, required: ['status', 'head'] }
 const SHIPPREP = { type: 'object', properties: { status: { type: 'string', enum: ['COMMITTED', 'BLOCKED'] }, head: STR, version: STR, reviewed_tree: STR, code_changed: { type: 'boolean' }, merge_conflict: { type: 'boolean' }, changed_files: STRS, decisions_auto_taken: STRS, failure_class: STR, notes: STR }, required: ['status'] }
 
 // ---------- run state ---------------------------------------------------------------------------------
@@ -382,26 +378,27 @@ function upgrade(why, r) { // v1.8 decision D-E: LITE -> FULL is recorded, never
   if (flow !== 'LITE') return
   flow = 'FULL'
   flowUpgrades.push({ from: 'LITE', to: 'FULL', why, round: r })
-  log(`${UNIT}: flow LITE -> FULL (${why})`)
+  say(`${UNIT}: flow LITE -> FULL (${why})`)
 }
 
 // retro-2026-10-19 item 11: $RUN_DIR/state.json at every phase boundary. Returns true only when the write was confirmed;
 // one retry. A failed write before publication stops the unit (ruling R4); elsewhere it is recorded and the next
 // boundary rewrites the whole file.
 let stateWriteFailures = 0
-async function writeState(ph, decisions, extra) {
+async function writeState(ph0, decisions0, extra0) {
+  const ph = scrubText(ph0), decisions = scrubOut(arr(decisions0)), extra = scrubOut(extra0 || {})
   const dec = arr(decisions).length
     ? `, open_decisions=<the existing open_decisions array (or []) plus ${J(decisions)}, without duplicates>`
     : ', open_decisions=<keep the existing array, or [] when absent>'
   const ext = Object.keys(extra || {}).map(k => `, ${k}=<the existing ${k} object (or {}) with these entries set: ${J(extra[k])}>`).join('')
   const p = `Rote state update; edit ONLY ${RUN}/state.json. Read it if it exists (else start from {}). Keep every key you are not told to set; keep workflow_run_id exactly as it is (null when absent: the orchestrator records it at launch; never invent one). Set unit=${J(UNIT)}, flow=${J(flow)}, phase=${J(ph)}, round=${round}, ship_base=${J(BASE)}, lane_head=<output of git -C ${LANE} rev-parse HEAD, or null on error>, lanes_roster=<an object mapping each lane key of ${RUN}/lanes.json to its status field, or {} when the file is missing>, updated_at=<output of date -u +%Y-%m-%dT%H:%M:%SZ>${dec}${ext}. Write valid JSON to a temp file in ${RUN} and mv it over state.json, then confirm with jq -e .unit ${RUN}/state.json. Return only: ok (or FAILED: <reason> when the mv or the jq check failed)`
   for (const lbl of [`state: ${ph}`, `state: ${ph} (retry)`]) {
-    const r = await agent(p, { label: lbl, phase: curPhase, model: 'haiku', effort: 'low' })
+    const r = await ask(p, { label: lbl, phase: curPhase, model: 'haiku', effort: 'low' })
     if (r && /^\s*ok\b/i.test(String(r))) return true
   }
   stateWriteFailures++
   incidents.push({ step: `state: ${ph}`, class: 'error', note: 'state.json write not confirmed after one retry' })
-  log(`state.json not updated at "${ph}"`)
+  say(`state.json not updated at "${ph}"`)
   return false
 }
 
@@ -410,12 +407,12 @@ async function writeState(ph, decisions, extra) {
 // no answer -> 'quota' (model unavailable: switch model); answer -> 'error' (transient: retry once).
 // CLI-lane calls (Seat X, Codex/L2 work) report the gstack-lane helper's own class (quota|throttle|auth|timeout|error).
 async function classify(model, step, ph) {
-  const ok = await agent('Reply with exactly: OK', { label: `probe ${model} (after ${step})`, phase: ph || curPhase, model, effort: 'low' })
+  const ok = await ask('Reply with exactly: OK', { label: `probe ${model} (after ${step})`, phase: ph || curPhase, model, effort: 'low' })
   const cls = ok ? 'error' : 'quota'
   if (!ok) downModels.add(model)
   // the in-session failure itself carries no metadata: record the class as inferred, with the classes it may really be
   incidents.push({ step, model, class: cls, inferred: true, possible: ok ? 'error|timeout|throttle' : 'quota|auth', basis: ok ? 'model answered a probe: transient failure (retry once)' : 'model did not answer a probe: unavailable now (switch model; quota or auth)' })
-  log(`${step}: ${model} failed, classified ${cls}`)
+  say(`${step}: ${model} failed, classified ${cls}`)
   return cls
 }
 
@@ -426,11 +423,11 @@ async function callChain(step, chain, prompt, opts) {
   for (let i = 0; i < live.length; i++) {
     const m = live[i]
     const o = Object.assign({}, opts, { model: m, label: m === chain[0] ? opts.label : `${opts.label} [${m}]` })
-    let r = await agent(prompt, o)
+    let r = await ask(prompt, o)
     if (r) return { r, model: m, class: i ? lastClass : '' }
     let cls = await classify(m, o.label, opts.phase)
     if (cls === 'error') {
-      r = await agent(prompt, Object.assign({}, o, { label: `${o.label} (retry)` }))
+      r = await ask(prompt, Object.assign({}, o, { label: `${o.label} (retry)` }))
       if (r) return { r, model: m, class: 'error' }
       cls = await classify(m, `${o.label} (retry)`, opts.phase)
     }
@@ -440,8 +437,50 @@ async function callChain(step, chain, prompt, opts) {
   return { r: null, model: null, class: lastClass }
 }
 
-async function finish(res) {
-  const out = Object.assign({ unit: UNIT, flow_requested: FLOW_REQ, flow, gate_class: GATE_CLASS, round, rounds, flow_upgrades: flowUpgrades, incidents }, res)
+// URL-blind results (Astra p2): agent-relayed text (notes, CI log excerpts, gh error lines) can carry URLs, possibly
+// with credentials; every string of the unit's result and of the decisions written to state.json is scrubbed of
+// scheme://... and user@host:path forms before it leaves the script.
+const SECRET_RES = [
+  [/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>'], // scheme://... to the next whitespace (a password may hold ) ] ' " >)
+  [/[^\s:/@]+:\S*@(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])\S*/g, '<url>'], // user:pass@host without a scheme (pass may hold @; any host form)
+  [/\b[A-Za-z0-9_.-]+@(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\]):\S+/g, '<url>'], // scp form user@host:path (single-label hosts and IP literals too)
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}/g, '<token>'], [/\bgithub_pat_[A-Za-z0-9_]{30,}/g, '<token>'], [/\bsk-[A-Za-z0-9_-]{20,}/g, '<token>'],
+  [/\bAuthorization\s*:\s*(?:Bearer|token|Basic)\s+\S+/gi, 'Authorization: <redacted>'], [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer <redacted>'],
+]
+const scrubText = x => SECRET_RES.reduce((t, [re, to]) => t.replace(re, to), String(x))
+// strings at ANY depth are scrubbed; cycles are detected (never a depth cut-off).
+// OUTPUT points (finish / writeState / main; ids=true) exempt the VALIDATED identity fields BY FIELD, never by string:
+// a value is kept verbatim only when its key is an identity key AND it fits the identity charset (no whitespace, no ':',
+// no '@', so no URL / credential form can pass); the same text under any other key (notes, stopped, decision) is still
+// scrubbed. A real branch like fix/sk-... must reach state.json prs[<unit>] and the result exactly (PATCH ownership).
+// Intake (ask) never exempts anything.
+const ID_KEYS = new Set(['unit', 'repo', 'arg', 'slug', 'host', 'owner', 'head_repo', 'branch', 'head_ref', 'recorded_branch', 'head', 'pushed_head', 'gated_head', 'local_head', 'remote_head', 'verified_sha', 'sha', 'pr', 'recorded_pr'])
+const ID_VAL_RE = /^[A-Za-z0-9._\/-]{1,255}$/
+const ID_MAP_KEYS = new Set(['prs']) // objects keyed by a unit directory (safe(UNIT): [A-Za-z0-9._-]{1,60})
+const ID_MAPKEY_RE = /^[A-Za-z0-9._-]{1,60}$/
+function scrubDeep(x, seen = new WeakSet(), ids = false, key = '') {
+  if (typeof x === 'string') return ids && ID_KEYS.has(key) && ID_VAL_RE.test(x) ? x : scrubText(x)
+  if (x === null || typeof x !== 'object') return x
+  if (seen.has(x)) return '[cycle]'
+  seen.add(x)
+  const map = ids && ID_MAP_KEYS.has(key)
+  const out = Array.isArray(x) ? x.map(v => scrubDeep(v, seen, ids)) : Object.fromEntries(Object.entries(x).map(([k, v]) => [map && ID_MAPKEY_RE.test(k) ? k : scrubText(k), scrubDeep(v, seen, ids, map ? '' : k)]))
+  seen.delete(x)
+  return out
+}
+const scrubOut = x => scrubDeep(x, new WeakSet(), true)
+// every agent result is scrubbed on intake, so no relayed tool text (stderr, CI logs, notes) can flow into a later
+// prompt, a state.json write, a log line or the result; and every log line is scrubbed too. EXCEPTION: the strict-line
+// steps (identity, push, API, PR, PATCH setup, CI) are NOT transformed on intake: their lines are parsed against exact
+// allowlists, only the validated fields are kept (never the raw line), and identity values must reach the comparisons
+// unchanged (a scrubber must never turn a real branch like fix/sk-... into something else).
+const strictSchema = s => s === IDL || s === LINE || s === PUSHR
+const ask = async (prompt, opts) => { const r = await agent(prompt, opts); return opts && strictSchema(opts.schema) ? r : scrubDeep(r) }
+const say = m => log(scrubText(m))
+async function finish(res0) {
+  // the COMPLETE assembled result (incidents, rounds, flow_upgrades, stopped, decision, notes, envelopes) is scrubbed;
+  // only the validated identity fields are exempt (by field: scrubOut)
+  const out = scrubOut(Object.assign({ unit: UNIT, flow_requested: FLOW_REQ, flow, gate_class: GATE_CLASS, round, rounds, flow_upgrades: flowUpgrades, incidents }, res0))
   if (!out.status) out.status = out.stopped ? (/^BLOCKED/.test(out.stopped) ? 'BLOCKED' : 'STOPPED') : 'DONE'
   const ph = out.status === 'READY' ? 'READY' : (out.stopped ? `${out.status}: ${out.stopped}` : out.status)
   if (!(await writeState(ph, out.decision ? [out.decision] : []))) out.state_write_failed = true
@@ -493,10 +532,10 @@ JOB (${job.id}, tier ${job.tier}): ${job.text}
 6. Commit: ${commit} -m "<the proposed message, ending with the line ${TRAILER}>". The helper refuses credential-shaped paths: report a refusal verbatim, never work around it.
 7. Write ${job.report}. Return the envelope: checks[] = {name, command, exit_code} for every check you ran in step 4; requested_model=${model}; actual_model = the runtime_model; failure_class when not DONE.`
   const label = `${tag} ${job.id} (${lane} ${model})`
-  let env = await agent(prompt, { label, phase: ph, model: 'sonnet', effort: 'high', schema: ENV })
+  let env = await ask(prompt, { label, phase: ph, model: 'sonnet', effort: 'high', schema: ENV })
   if (!env) {
     const cls = await classify('sonnet', label, ph)
-    env = await agent(prompt, { label: `${label} (retry)`, phase: ph, model: 'sonnet', effort: 'high', schema: ENV })
+    env = await ask(prompt, { label: `${label} (retry)`, phase: ph, model: 'sonnet', effort: 'high', schema: ENV })
     if (!env) return { status: 'BLOCKED', head: '', test_result: 'wrapper died', failure_class: cls }
   }
   if (env.status === 'LANE_UNAVAILABLE') incidents.push({ step: label, model, class: env.failure_class || 'quota', lane, reset_at: env.reset_at || '' })
@@ -507,26 +546,26 @@ JOB (${job.id}, tier ${job.tier}): ${job.text}
 async function escalate(job, where, prior, gap, ph) {
   const why = `escalated ONCE (v1.8 D-C) after a Haiku attempt (head ${(prior && prior.head) || 'unknown'}): ${gap}. Finish the job so every named check passes`
   incidents.push({ step: `${ph} ${job.id}`, class: 'check', note: why })
-  log(`${job.id}: Haiku ${gap} -> escalating once`)
+  say(`${job.id}: Haiku ${gap} -> escalating once`)
   let env = await laneImpl({ lane: 'l3', model: 'gpt-6.1-sol', effort: 'medium', job, where, why, tag: `esc-${ph}`, ph })
   if (env && env.status !== 'LANE_UNAVAILABLE') return env
   env = await laneImpl({ lane: 'l2', model: 'claude-sonnet-5-5', effort: 'high', job, where, why, tag: `esc-${ph}`, ph })
   if (env && env.status !== 'LANE_UNAVAILABLE') return env
-  return agent(claudePrompt(job, where, '', { model: 'sonnet', effort: 'high' }, why), { label: `esc-${ph} ${job.id} (L1 sonnet)`, phase: ph, model: 'sonnet', effort: 'high', schema: ENV })
+  return ask(claudePrompt(job, where, '', { model: 'sonnet', effort: 'high' }, why), { label: `esc-${ph} ${job.id} (L1 sonnet)`, phase: ph, model: 'sonnet', effort: 'high', schema: ENV })
 }
 
 // In-session (L1) implementation; L1 quota spills to L2 with the same model family (never Fable via claude -p).
 async function claudeImpl(job, where, from, m, why, ph) {
   const label = `${ph === 'Build' ? 'build' : `fix-${job.tag || ph}`} ${job.id} (${m.model}${why ? ', ' + why : ''})`
   const prompt = claudePrompt(job, where, from, m, why)
-  let env = await agent(prompt, { label, phase: ph, model: m.model, effort: m.effort, schema: ENV })
+  let env = await ask(prompt, { label, phase: ph, model: m.model, effort: m.effort, schema: ENV })
   let ran = m.model
   if (!env) {
     const cls = await classify(m.model, label, ph)
     if (cls === 'quota') {
       ran = L2_MODEL[m.model] || 'claude-opus-5-5'
       env = await laneImpl({ lane: 'l2', model: ran, effort: m.effort, job, where, why: `L1 ${m.model} unavailable (${cls})`, tag: `spill-${ph}`, ph })
-    } else env = await agent(prompt, { label: `${label} (retry)`, phase: ph, model: m.model, effort: m.effort, schema: ENV })
+    } else env = await ask(prompt, { label: `${label} (retry)`, phase: ph, model: m.model, effort: m.effort, schema: ENV })
   }
   if (/haiku/.test(ran)) { // v1.8 decision D-C: Haiku dev dispatches must prove their checks
     const gap = checkGap(job, env)
@@ -541,11 +580,11 @@ async function claudeL1(job, where, from, s, why, ph) {
   const label = `${ph === 'Build' ? 'build' : `fix-${job.tag || ph}`} ${job.id} (L1 ${s.model}${why ? ', ' + why : ''})`
   const m = { model: s.model, effort: s.effort }
   const prompt = claudePrompt(job, where, from, m, why)
-  let env = await agent(prompt, { label, phase: ph, model: m.model, effort: m.effort, schema: ENV })
+  let env = await ask(prompt, { label, phase: ph, model: m.model, effort: m.effort, schema: ENV })
   if (env) return env
   const cls = await classify(m.model, label, ph)
   if (cls === 'quota') return { status: 'LANE_UNAVAILABLE', head: '', test_result: 'L1 unavailable', failure_class: cls }
-  env = await agent(prompt, { label: `${label} (retry)`, phase: ph, model: m.model, effort: m.effort, schema: ENV })
+  env = await ask(prompt, { label: `${label} (retry)`, phase: ph, model: m.model, effort: m.effort, schema: ENV })
   return env || { status: 'BLOCKED', head: '', test_result: 'L1 attempt died twice', failure_class: 'error' }
 }
 
@@ -615,7 +654,7 @@ BRIEF>>>
 ${SEATC_L2_ADJ}
 6. cp "$ADIR/review.txt" ${R}/gate-${U}-r${round}-seat-c.md 2>/dev/null; ${GL} worktree rm --run-dir ${RUN} --task ${T} --force.
 Envelope: member=seat_c; requested_model=claude-opus-5-5; runtime_model = the runtime_model= token of the SEATC line; summary_line=$SUMMARY verbatim; verdict_line = the SEATC line verbatim; class = its class= token; report=${R}/gate-${U}-r${round}-seat-c.md; status = its status= token (PRESENT, INVALID or ABSENT, copied, never upgraded); p1_count = its p1= token; verdict FAIL if status PRESENT and p1_count > 0, PASS if status PRESENT and p1_count = 0, INVALID if status INVALID, else ABSENT; p1=[].`
-  let e = await agent(p, { label, phase: 'Gate', model: 'haiku', effort: 'low', schema: GATE })
+  let e = await ask(p, { label, phase: 'Gate', model: 'haiku', effort: 'low', schema: GATE })
   if (!e) e = { status: 'ABSENT', verdict: 'ABSENT', class: await classify('haiku', label, 'Gate'), notes: 'the L2 relay died; Seat C never ran (not a reviewer verdict)' }
   e = Object.assign({}, e, { member: 'seat_c', requested_model: 'claude-opus-5-5', substituted: `${first}->L2 claude-opus-5-5` })
   // re-check the relay's copy against its own SEATC line (fail closed: a status the line does not show is INVALID)
@@ -657,10 +696,10 @@ Envelope: member=seat_x; requested_model=${model}; verdict_line=$VERDICT verbati
 async function seatX(round, gs) {
   const once = async model => {
     const label = `r${round} seat X (${model})`
-    let e = await agent(seatXPrompt(round, gs, model), { label, phase: 'Gate', model: 'haiku', effort: 'low', schema: GATE })
+    let e = await ask(seatXPrompt(round, gs, model), { label, phase: 'Gate', model: 'haiku', effort: 'low', schema: GATE })
     if (!e) {
       const cls = await classify('haiku', label, 'Gate')
-      e = await agent(seatXPrompt(round, gs, model), { label: `${label} (relay retry)`, phase: 'Gate', model: 'haiku', effort: 'low', schema: GATE })
+      e = await ask(seatXPrompt(round, gs, model), { label: `${label} (relay retry)`, phase: 'Gate', model: 'haiku', effort: 'low', schema: GATE })
       if (!e) e = { status: 'ABSENT', verdict: 'ABSENT', class: 'error', notes: `the relay died twice (${cls}); Seat X never ran (not a reviewer verdict)` }
     }
     e = Object.assign({}, e, { member: 'seat_x', requested_model: model })
@@ -703,7 +742,7 @@ async function dockerMember(round, gs) { // retro-2026-10-19 item 3: Docker only
   const label = `r${round} docker`
   const p = `${memberCtx(round, gs)}
 Docker verification (member=docker). ${A.dockerFocus || DOCKER_DEFAULT} Use the compose project name ab-${U}-r${round}; wait for busy ports up to 30 min; never stop or remove another project's containers. If the stack needs an untracked local env file, copy it from ${REPO} and delete it at the end. Tear down with down -v. Report ${R}/gate-${U}-r${round}-docker.md. Return the envelope (member=docker; status PRESENT when the verification ran to a result, ABSENT when docker itself was unavailable, with class; verdict PASS or FAIL; a failure is a [P1] line in p1).`
-  let e = await agent(p, { label, phase: 'Gate', model: 'sonnet', effort: 'high', schema: GATE })
+  let e = await ask(p, { label, phase: 'Gate', model: 'sonnet', effort: 'high', schema: GATE })
   if (!e) e = { status: 'ABSENT', verdict: 'ABSENT', class: await classify('sonnet', label, 'Gate'), notes: 'the docker member died; not a verification result' }
   return Object.assign({}, e, { member: 'docker' })
 }
@@ -722,7 +761,7 @@ async function mutationMember(round, gs, mode, named, delta) {
   const p = `${memberCtx(round, gs)}
 Mutation probe (member=mutation) in ${LANE}. ${scope} ${conc}
 For each mutant: apply exactly that temporary mutation through Bash (python3 or a heredoc), run its named test${PRIV(`${DB}_gate`, LANE)} and record killed yes/no; then restore every modified file from the index (git -C ${LANE} checkout -- <path>, or git -C ${LANE} show :<path> > <path>) and confirm git -C ${LANE} status --porcelain is empty before the next mutant. Never commit. Judge survivors by ${SECF} Report ${R}/gate-${U}-r${round}-mutation.md. Return the envelope (member=mutation; mutants[] with brief_named; final_clean yes/no; p1 only per SECTION F).`
-  let e = await agent(p, { label, phase: 'Gate', model: 'sonnet', effort: 'high', schema: GATE })
+  let e = await ask(p, { label, phase: 'Gate', model: 'sonnet', effort: 'high', schema: GATE })
   if (!e) e = { status: 'ABSENT', verdict: 'ABSENT', class: await classify('sonnet', label, 'Gate'), notes: 'the mutation member died; not a probe result' }
   return Object.assign({}, e, { member: 'mutation' })
 }
@@ -764,7 +803,7 @@ async function fixPass(fixes, tag, findings, ph) {
 
 // Rote inventory: HEAD (full SHA) + files changed since `from`. null when unreadable (callers fail closed).
 async function headFiles(label, from, ph, extra) {
-  const r = await agent(`Rote: return head = git -C ${LANE} rev-parse HEAD (full SHA) and files = git -C ${LANE} diff --name-only ${from}..HEAD (one path per entry; [] when none).${extra || ''}`, { label, phase: ph || curPhase, model: 'haiku', effort: 'low', schema: FILES })
+  const r = await ask(`Rote: return head = git -C ${LANE} rev-parse HEAD (full SHA) and files = git -C ${LANE} diff --name-only ${from}..HEAD (one path per entry; [] when none).${extra || ''}`, { label, phase: ph || curPhase, model: 'haiku', effort: 'low', schema: FILES })
   if (!r || !SHA_RE.test(String(r.head || '')) || !Array.isArray(r.files)) return null
   return r
 }
@@ -806,93 +845,359 @@ async function factCheck(tag, fromSha, amend) {
   const c = await callChain(`${tag} fact-check`, ['haiku', 'sonnet'], p, { label: `${tag} CHANGELOG fact-check`, phase: curPhase, effort: 'max', schema: DC })
   if (c.r && c.r.verdict === 'CLEAN') return c
   if (c.r && c.model === 'haiku') { // escalate once to Sonnet (v1.8 D-C table)
-    const s = await agent(p, { label: `${tag} CHANGELOG fact-check (sonnet escalation)`, phase: curPhase, model: 'sonnet', effort: 'high', schema: DC })
+    const s = await ask(p, { label: `${tag} CHANGELOG fact-check (sonnet escalation)`, phase: curPhase, model: 'sonnet', effort: 'high', schema: DC })
     if (s) return { r: s, model: 'sonnet', class: '' }
   }
   return c
 }
 
 // CI is bound to the EXACT pushed SHA (ruling R4): READY only for runs on that head with the PR head unchanged.
-// ---------- repository identity (ship + PATCH) ----------------------------------------------------------
-// The identity comes from the lane's OWN git remote, parsed here; GH_REPO / GH_HOST in the environment can redirect a
-// directory-scoped gh call, so every gh call runs as GHX with an explicit, single-quoted repository:
-//   gh pr / run / release / workflow ... --repo '<host/owner/repo>'    (host ALWAYS included, github.com too)
-//   gh repo view '<host/owner/repo>' ...                               (positional: repo view rejects --repo)
-//   gh api --hostname '<host>' repos/<owner>/<repo>/...                 (api rejects --repo)
-// Strict validation (security review / Astra r10): host ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ (lowercased, no port, no
-// userinfo in it), owner and repo ^[A-Za-z0-9_.-]+$ ('.' / '..' rejected, .git stripped); https/http/git:// URLs carrying
-// userinfo (credentials) are rejected; ssh:// and scp-form remotes may carry a plain user (git@) and ssh:// a numeric
-// port, neither of which is part of the identity. Anything else -> null -> BLOCKED. The quoting is defence in depth.
+// ---------- repository identity, push, and API verification (ship + PATCH) -------------------------------
+// The identity comes from the lane's OWN git remotes and is validated IN-SHELL (ID_SH): the remote URLs are read into
+// shell variables / a private temp file (removed on EXIT, HUP, INT, TERM) and NEVER printed, so no agent ever sees a raw
+// URL or its userinfo; the block prints only "ID <role> ok <host>/<owner>/<repo> scheme= user= port=" or
+// "ID <role> fail scheme= host_ok= reason=". Rules: host ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ (lowercased), owner / repo
+// ^[A-Za-z0-9_.-]+$ ('.' / '..' rejected, .git stripped); http(s)/git:// URLs with userinfo (credentials) or a port are
+// rejected; ssh:// / scp-form may carry a plain user (not starting with '-') and ssh:// a numeric port; whitespace,
+// control characters, empty entries and anything else are rejected. The push URL list of
+// `git remote get-url --push --all origin` (pushurl / pushInsteadOf / insteadOf applied) is kept VERBATIM, one entry
+// per line, empty entries included, and must hold EXACTLY ONE valid https / ssh / scp entry naming the same
+// host/owner/repo. RULE: a remote whose only usable push URL embeds credentials is BLOCKED (userinfo is never accepted).
+// GH_REPO / GH_HOST in the environment can redirect a directory-scoped gh call, so every gh call runs as GHX with an
+// explicit, single-quoted repository (host ALWAYS included, github.com too):
+//   gh pr / run / release / workflow ... --repo '<host/owner/repo>';  gh repo view '<host/owner/repo>' (positional);
+//   gh api --hostname '<host>' repos/<owner>/<repo>/...
 const GHX = 'env -u GH_REPO -u GH_HOST gh'
-const HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/, NAME_RE = /^[A-Za-z0-9_.-]+$/
-function parseRemote(url) {
-  const u = String(url || '').trim()
-  let m = u.match(/^(https?|git):\/\/([^/@]+)\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/)
-  if (!m) { m = u.match(/^(ssh):\/\/(?:([A-Za-z0-9_.-]+)@)?([^/:@]+)(?::[0-9]{1,5})?\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/); if (m) m = [m[0], m[1], m[3], m[4], m[5]] }
-  if (!m) { m = u.match(/^(?:([A-Za-z0-9_.-]+)@)?([^:/@]+):([^/]+)\/([^/]+?)(?:\.git)?\/?$/); if (m) m = [m[0], 'scp', m[2], m[3], m[4]] }
-  if (!m) return null
-  const host = String(m[2]).toLowerCase(), owner = m[3], repo = m[4]
-  if (!HOST_RE.test(host) || !NAME_RE.test(owner) || !NAME_RE.test(repo) || ['.', '..'].includes(owner) || ['.', '..'].includes(repo)) return null
-  const slug = `${owner}/${repo}`
-  // the identity ALWAYS carries the host (github.com included): gh's saved default host is never relied on
-  return { host, owner, repo, slug, arg: `${host}/${slug}` }
+const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/, NAME_RE = /^[A-Za-z0-9_.-]+$/
+// a single-quoted shell word (paths are also validated against SAFE_PATH in main; this is defence in depth)
+const shq = x => `'${String(x).replace(/'/g, `'\\''`)}'`
+// '@{' stands for '${' inside the shell blocks (a JS template literal cannot hold '${' verbatim)
+const ID_SH = String.raw`# Repository identity, validated IN-SHELL: remote URLs are read into variables / a private temp file and never printed.
+# Output (only): "ID <role> ok <host>/<owner>/<repo> scheme=<s> user=<u> port=<p>" or "ID <role> fail scheme=<s> host_ok=<0|1> reason=<code>",
+# "PUSH_N <n>", or "ERROR <code>". Inputs (env, always read as "$VAR"): R (run repo dir), L (lane dir).
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+lc() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+parse_url() { # $1 = url -> sets P_* ; returns 0 when valid
+  local u="$1" auth path
+  P_SCHEME=unknown; P_HOSTOK=0; P_REASON=""; P_ID=""; P_USER=""; P_PORT=""; P_HOST=""
+  if [ -z "$u" ] || [[ "$u" =~ ^[[:space:]]+$ ]]; then P_SCHEME=none; P_REASON=empty; return 1; fi
+  if [[ "$u" =~ [[:space:][:cntrl:]] ]]; then P_REASON=whitespace_or_control; return 1; fi
+  if [[ "$u" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)/(.*)$ ]]; then
+    P_SCHEME=$(lc "@{BASH_REMATCH[1]}"); auth="@{BASH_REMATCH[2]}"; path="@{BASH_REMATCH[3]}"
+    case "$P_SCHEME" in
+      http|https|git)
+        if [[ "$auth" == *@* ]]; then P_REASON=userinfo; P_HOST="@{auth##*@}"
+        elif [[ "$auth" == *:* ]]; then P_REASON=port; P_HOST="@{auth%%:*}"
+        else P_HOST="$auth"; fi ;;
+      ssh)
+        if [[ "$auth" =~ ^(([A-Za-z0-9_][A-Za-z0-9_.-]*)@)?([^@:/]+)(:([0-9]{1,5}))?$ ]]; then P_USER="@{BASH_REMATCH[2]}"; P_HOST="@{BASH_REMATCH[3]}"; P_PORT="@{BASH_REMATCH[5]}"
+        else P_REASON=bad_authority; P_HOST="@{auth##*@}"; P_HOST="@{P_HOST%%:*}"; fi ;;
+      *) P_REASON=unsupported_scheme ;;
+    esac
+  elif [[ "$u" =~ ^(([A-Za-z0-9_][A-Za-z0-9_.-]*)@)?([^@:/-][^@:/]*):(.*)$ ]]; then
+    P_SCHEME=scp; P_USER="@{BASH_REMATCH[2]}"; P_HOST="@{BASH_REMATCH[3]}"; path="@{BASH_REMATCH[4]}"
+  else P_REASON=unsupported_form; return 1; fi
+  # the host is NEVER rewritten: it is printed as-is and compared case-insensitively by the script (DNS names are)
+  [[ "$P_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] && P_HOSTOK=1
+  [ -n "$P_REASON" ] && return 1
+  [ "$P_HOSTOK" = 1 ] || { P_REASON=invalid_host; return 1; }
+  path="@{path%/}"; path="@{path%.git}"
+  if [[ "$path" =~ ^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$ ]] && [ "@{BASH_REMATCH[1]}" != . ] && [ "@{BASH_REMATCH[1]}" != .. ] && [ "@{BASH_REMATCH[2]}" != . ] && [ "@{BASH_REMATCH[2]}" != .. ]; then
+    P_ID="$P_HOST/@{BASH_REMATCH[1]}/@{BASH_REMATCH[2]}"; return 0
+  fi
+  P_REASON=invalid_path; return 1
 }
-// Why a remote URL was rejected, WITHOUT echoing any part of it (a password may contain '@' or ':'): only the scheme,
-// whether a host passed validation, and the reason.
-function remoteReason(url) {
-  const u = String(url || '').trim()
-  if (!u) return 'empty remote'
-  const sm = u.match(/^([a-z][a-z0-9+.-]*):\/\//i)
-  const scheme = sm ? sm[1].toLowerCase() : (/^[^/:]+:/.test(u) ? 'scp-form' : 'local path / unknown')
-  const rest = sm ? u.slice(sm[0].length) : u
-  const auth = sm ? rest.split('/')[0] : rest.split(':')[0]
-  const hostPart = auth.includes('@') ? auth.slice(auth.lastIndexOf('@') + 1) : auth
-  const hostOk = HOST_RE.test(hostPart.replace(/:[0-9]{1,5}$/, '').toLowerCase())
-  const why = !['http', 'https', 'git', 'ssh', 'scp-form'].includes(scheme) ? 'unsupported scheme or form'
-    : (/^(https?|git)$/.test(scheme) && auth.includes('@')) ? 'userinfo (possible credentials) in the URL'
-    : (/^(https?|git)$/.test(scheme) && /:[0-9]+$/.test(auth)) ? 'a port in the URL'
-    : !hostOk ? 'invalid host' : 'invalid owner/repo path'
-  return `scheme ${scheme}, host ${hostOk ? 'valid' : 'invalid'}: ${why}`
+emit() { # $1 = role, $2 = url
+  if parse_url "$2"; then echo "ID $1 ok $P_ID scheme=$P_SCHEME user=$P_USER port=$P_PORT"
+  else echo "ID $1 fail scheme=$P_SCHEME host_ok=$P_HOSTOK reason=$P_REASON"; fi
 }
-// the gh rule every dispatch on the ship / PATCH paths gets (no bare gh anywhere)
-const ghRule = rid => `Run every gh command as ${GHX} (never a bare gh): gh pr / run / release / workflow subcommands with --repo '${rid.arg}'; gh repo view with the repository positional ('${rid.arg}', never --repo); gh api with --hostname '${rid.host}' and repos/${rid.slug}/... paths (never --repo).`
-const REMOTES = { type: 'object', properties: { repo_url: STR, lane_url: STR, push_urls: STRS, notes: STR }, required: ['repo_url', 'lane_url', 'push_urls'] }
-const sameId = (x, y) => x.host === y.host && x.slug.toLowerCase() === y.slug.toLowerCase()
-// -> { arg, slug, host, push_urls } or { why } (BLOCK). The run repo's and the lane's fetch remotes must parse and name the
-// same repository, AND every effective push URL of the lane's origin (git remote get-url --push --all, which applies
-// pushurl and pushInsteadOf / insteadOf) must parse to exactly that host/owner/repo: the push target is validated too.
-async function repoIdentity(tag, ph) {
-  const r = await agent(`Rote repository identity for ${UNIT} (${tag}): repo_url = the output of git -C ${REPO} remote get-url origin; lane_url = the output of git -C ${LANE} remote get-url origin; push_urls = every output line of git -C ${LANE} remote get-url --push --all origin (verbatim; "" / [] on error). Run nothing else. Return the envelope.`, { label: `repo identity (${tag})`, phase: ph, model: 'haiku', effort: 'low', schema: REMOTES })
-  if (!r) return { why: 'repository identity did not report' }
-  const a = parseRemote(r.repo_url), b = parseRemote(r.lane_url)
-  if (!a) return { why: `the run repository's origin remote was rejected (${remoteReason(r.repo_url)})` }
-  if (!b) return { why: `the lane's origin remote was rejected (${remoteReason(r.lane_url)})` }
-  if (!sameId(a, b)) return { why: `the lane fetches from ${b.arg}, not the run repository ${a.arg}` }
-  const pushes = arr(r.push_urls).map(x => String(x).trim()).filter(Boolean)
-  if (!pushes.length) return { why: 'the lane origin has no resolvable push URL' }
-  for (const [i, pu] of pushes.entries()) {
-    const c = parseRemote(pu)
-    if (!c) return { why: `the lane's push URL #${i + 1} was rejected (${remoteReason(pu)})` }
-    if (!sameId(c, b)) return { why: `the lane's push URL #${i + 1} targets ${c.arg}, not ${b.arg} (pushurl / pushInsteadOf redirect)` }
+T=$(mktemp -d "@{TMPDIR:-/tmp}/abu-id.XXXXXX") || { echo "ERROR mktemp"; exit 0; }
+# the temp file holds raw push URLs: removed on every exit path, signals included
+trap 'rm -rf "$T"' EXIT
+trap 'rm -rf "$T"; exit 1' HUP INT TERM
+if U=$(git -C "$R" remote get-url origin 2>/dev/null); then emit repo "$U"; else echo "ID repo fail scheme=none host_ok=0 reason=git_error"; fi
+if U=$(git -C "$L" remote get-url origin 2>/dev/null); then emit lane "$U"; else echo "ID lane fail scheme=none host_ok=0 reason=git_error"; fi
+U=""
+# push URLs verbatim, one per line, EMPTY entries kept (never trimmed or dropped)
+if git -C "$L" remote get-url --push --all origin > "$T/push" 2>/dev/null; then
+  n=0; while IFS= read -r line || [ -n "$line" ]; do n=$((n + 1)); emit "push$n" "$line"; done < "$T/push"
+  echo "PUSH_N $n"
+else echo "ID push1 fail scheme=none host_ok=0 reason=git_error"; echo "PUSH_N 0"; fi
+rm -rf "$T"`.split('@{').join('${')
+// THREAT MODEL of the push (orchestrator ruling, round 13): same-user tampering with git config or the environment
+// (remote.origin.pushurl, url.*.insteadOf, credential helpers, GIT_* / ssh variables) is OUT of scope: a same-user
+// process can already read everything the push would send, and isolating git from its own user is unwinnable. So the
+// push is a plain `git push origin <sha>:refs/heads/<branch>` from the lane (PUSH_SH), preceded by the fail-fast,
+// URL-blind identity check of the push URLs, and its OUTCOME is verified through an independent channel: the forge
+// API (API_SH: GHX api --hostname <host> repos/<owner>/<repo>/git/ref/heads/<branch>) must report the pushed SHA
+// for the validated repository, and the PR identity check (gh pr view --repo) must agree, before any READY. Never
+// verified over git / ssh (a redirect could fool both). Residual: a redirected push could deliver the branch content to
+// another repository, which grants nothing a same-user process cannot already read; it can never produce a false READY.
+const API_SH = String.raw`# Forge API check of the pushed branch, URL-blind: stderr is captured privately (it can carry URLs) and only an
+# allowlisted reason code is printed. Inputs (env, read as "$VAR"): H (host), OW (owner), RP (repo), B (branch).
+# Prints only "API exit=<n> ref=<ok|mismatch|none> sha=<40-hex|none> reason=<ok|api_error:<code>|mismatch_ref|mismatch_url|empty|parse>".
+set -u
+E=$(mktemp "@{TMPDIR:-/tmp}/abu-api.XXXXXX") || { echo "API exit=9 ref=none sha=none reason=api_error:tmp"; exit 0; }
+trap 'rm -f "$E"' EXIT
+trap 'rm -f "$E"; exit 1' HUP INT TERM
+O=$(env -u GH_REPO -u GH_HOST gh api --hostname "$H" "repos/$OW/$RP/git/ref/heads/$B" --jq '[.ref, .object.type, .object.sha, .url] | @tsv' 2>"$E"); rc=$?
+if [ "$rc" != 0 ]; then
+  if grep -q 'HTTP 404' "$E"; then c=http_404; elif grep -q 'HTTP 401' "$E"; then c=http_401; elif grep -q 'HTTP 403' "$E"; then c=http_403
+  elif grep -q -E 'HTTP 5[0-9][0-9]' "$E"; then c=http_5xx; elif grep -q -i -E 'could not resolve|connection|timeout|dial tcp|no such host|network' "$E"; then c=network
+  elif grep -q -i -E 'authenticat|gh auth login' "$E"; then c=auth; else c=other; fi
+  echo "API exit=$rc ref=none sha=none reason=api_error:$c"; exit 0
+fi
+[ -n "$O" ] || { echo "API exit=0 ref=none sha=none reason=empty"; exit 0; }
+IFS=$'\t' read -r REF TYP SHA URL <<< "$O"
+case "$SHA" in *[!0-9a-f]*|'') echo "API exit=0 ref=none sha=none reason=parse"; exit 0 ;; esac
+[ "@{#SHA}" = 40 ] || { echo "API exit=0 ref=none sha=none reason=parse"; exit 0; }
+[ "$REF" = "refs/heads/$B" ] && [ "$TYP" = commit ] || { echo "API exit=0 ref=mismatch sha=$SHA reason=mismatch_ref"; exit 0; }
+# the branch suffix EXACTLY (git refs are case-sensitive); host / owner / repo case-insensitively (as GitHub treats them)
+SUF="/git/refs/heads/$B"
+case "$URL" in *"$SUF") PRE="@{URL%"$SUF"}" ;; *) echo "API exit=0 ref=mismatch sha=$SHA reason=mismatch_url"; exit 0 ;; esac
+if [ "$(printf '%s' "$H" | tr 'A-Z' 'a-z')" = github.com ]; then W="https://api.github.com/repos/$OW/$RP"; else W="https://$H/api/v3/repos/$OW/$RP"; fi
+[ "$(printf '%s' "$PRE" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$W" | tr 'A-Z' 'a-z')" ] || { echo "API exit=0 ref=mismatch sha=$SHA reason=mismatch_url"; exit 0; }
+echo "API exit=0 ref=ok sha=$SHA reason=ok"`.split('@{').join('${')
+// The remaining network calls of the ship / PATCH paths run as URL-blind blocks too: private stderr, allowlisted codes.
+const PRV_SH = String.raw`# PR identity, URL-blind: gh stderr is captured privately and only an allowlisted code is printed; every field is
+# validated against its allowlist and printed verbatim, or rejected (never rewritten). Inputs (env, read as "$VAR"):
+# N (PR number), X (host/owner/repo). Prints only "PR exit=0 number=<n> state=<S> cross=<true|false>
+# head_repo=<owner/repo> head_ref=<branch> head=<sha>" or "PR exit=<n> reason=<api_error:<code>|invalid_field:<name>>".
+set -u
+E=$(mktemp "@{TMPDIR:-/tmp}/abu-pr.XXXXXX") || { echo "PR exit=9 reason=api_error:tmp"; exit 0; }
+trap 'rm -f "$E"' EXIT
+trap 'rm -f "$E"; exit 1' HUP INT TERM
+# shared: classify a private stderr file into an allowlisted code (never printed raw)
+ecode() { if grep -q 'HTTP 404' "$1"; then echo http_404; elif grep -q 'HTTP 401' "$1"; then echo http_401; elif grep -q 'HTTP 403' "$1"; then echo http_403
+  elif grep -q -E 'HTTP 5[0-9][0-9]' "$1"; then echo http_5xx; elif grep -q -i -E 'could not resolve|connection|timeout|dial tcp|no such host|network' "$1"; then echo network
+  elif grep -q -i -E 'authenticat|gh auth login|permission denied' "$1"; then echo auth; else echo other; fi; }
+PFX="PR exit=0"
+# an identity field is compared EXACTLY downstream: it is never rewritten; a value outside its allowlist is rejected
+chk() { if [ -z "$2" ] || ! [[ "$2" =~ $3 ]]; then echo "$PFX reason=invalid_field:$1"; exit 0; fi; }
+S='[.number, .state, .isCrossRepository, (.headRepositoryOwner.login + "/" + .headRepository.name), .headRefName, .headRefOid] | map(tostring) | @tsv'
+O=$(env -u GH_REPO -u GH_HOST gh pr view "$N" --repo "$X" --json number,state,isCrossRepository,headRepository,headRepositoryOwner,headRefName,headRefOid --jq "$S" 2>"$E"); rc=$?
+[ "$rc" = 0 ] || { echo "PR exit=$rc reason=api_error:$(ecode "$E")"; exit 0; }
+IFS=$'\t' read -r PN PS PC PH PR PO <<< "$O"
+chk number "$PN" '^[0-9]{1,9}$'; chk state "$PS" '^[A-Z_]{1,20}$'; chk cross "$PC" '^(true|false)$'
+chk head_repo "$PH" '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; chk head_ref "$PR" '^[A-Za-z0-9._/-]{1,255}$'; chk head "$PO" '^[0-9a-f]{40}$'
+echo "PR exit=0 number=$PN state=$PS cross=$PC head_repo=$PH head_ref=$PR head=$PO"`.split('@{').join('${')
+const PSETUP_SH = String.raw`# PATCH setup, URL-blind: every network command (gh, git fetch) has its stderr captured privately; only allowlisted
+# codes are printed. Inputs (env, read as "$VAR"): RUN, K (unit key), N (PR number), X (host/owner/repo), L (lane),
+# B (branch). Prints only "SETUP <key>=<value> ..." (recorded_pr recorded_branch state cross head_repo head_ref head
+# remote_head reason); every field is validated and printed verbatim, or rejected (invalid_field:<name>), never rewritten.
+set -u
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+E=$(mktemp "@{TMPDIR:-/tmp}/abu-setup.XXXXXX") || { echo "SETUP reason=api_error:tmp"; exit 0; }
+trap 'rm -f "$E"' EXIT
+trap 'rm -f "$E"; exit 1' HUP INT TERM
+# shared: classify a private stderr file into an allowlisted code (never printed raw)
+ecode() { if grep -q 'HTTP 404' "$1"; then echo http_404; elif grep -q 'HTTP 401' "$1"; then echo http_401; elif grep -q 'HTTP 403' "$1"; then echo http_403
+  elif grep -q -E 'HTTP 5[0-9][0-9]' "$1"; then echo http_5xx; elif grep -q -i -E 'could not resolve|connection|timeout|dial tcp|no such host|network' "$1"; then echo network
+  elif grep -q -i -E 'authenticat|gh auth login|permission denied' "$1"; then echo auth; else echo other; fi; }
+PFX="SETUP"
+# an identity field is compared EXACTLY downstream: it is never rewritten; a value outside its allowlist is rejected
+chk() { if [ -z "$2" ] || ! [[ "$2" =~ $3 ]]; then echo "$PFX reason=invalid_field:$1"; exit 0; fi; }
+rec() { for f in "$RUN/state.json" "$RUN/state.final.json"; do v=$(jq -r --arg k "$K" "$1" "$f" 2>/dev/null) && [ -n "$v" ] && [ "$v" != null ] && [ "$v" != 0 ] && { printf '%s' "$v"; return; }; done; printf '%s' "$2"; }
+RP=$(rec '.prs[$k].pr // 0' 0); RB=$(rec '.prs[$k].branch // ""' none)
+chk recorded_pr "$RP" '^[0-9]{1,9}$'; chk recorded_branch "$RB" '^[A-Za-z0-9._/-]{1,255}$'
+S='[.state, .isCrossRepository, (.headRepositoryOwner.login + "/" + .headRepository.name), .headRefName] | map(tostring) | @tsv'
+O=$(env -u GH_REPO -u GH_HOST gh pr view "$N" --repo "$X" --json state,isCrossRepository,headRepository,headRepositoryOwner,headRefName --jq "$S" 2>"$E"); rc=$?
+[ "$rc" = 0 ] || { echo "SETUP recorded_pr=$RP recorded_branch=$RB reason=api_error:$(ecode "$E")"; exit 0; }
+IFS=$'\t' read -r PS PC PH PR <<< "$O"
+chk state "$PS" '^[A-Z_]{1,20}$'; chk cross "$PC" '^(true|false)$'; chk head_repo "$PH" '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; chk head_ref "$PR" '^[A-Za-z0-9._/-]{1,255}$'
+P="SETUP recorded_pr=$RP recorded_branch=$RB state=$PS cross=$PC head_repo=$PH head_ref=$PR"
+[ "$(git -C "$L" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$B" ] || { echo "$P head=none remote_head=none reason=wrong_branch"; exit 0; }
+[ -z "$(git -C "$L" status --porcelain 2>/dev/null)" ] || { echo "$P head=none remote_head=none reason=dirty"; exit 0; }
+git -C "$L" fetch --quiet origin "$B" >/dev/null 2>"$E" || { echo "$P head=none remote_head=none reason=fetch_error:$(ecode "$E")"; exit 0; }
+git -C "$L" merge --quiet --ff-only "origin/$B" >/dev/null 2>&1 || { echo "$P head=none remote_head=none reason=not_ff"; exit 0; }
+H=$(git -C "$L" rev-parse HEAD 2>/dev/null); RH=$(git -C "$L" rev-parse "origin/$B" 2>/dev/null)
+echo "$P head=@{H:-none} remote_head=@{RH:-none} reason=ok"`.split('@{').join('${')
+const CI_SH = String.raw`# CI wait for exactly one head, URL-blind and bounded. NO free text is relayed: no check names, no logs; only
+# allowlisted codes and integer counts. gh stderr is captured privately; every gh call runs under the REMAINING
+# deadline with kill escalation: TERM at the deadline, KILL G seconds later, to the call's whole process group
+# (timeout -k / gtimeout -k, else a perl watchdog doing the same), so a stalled or TERM-resistant call cannot outlive
+# TOTAL + G. A TERM to this watcher (the outer cleanup) is forwarded to the running call the same way before exit.
+# Inputs (env, read as "$VAR"):
+# N (PR number), X (host/owner/repo), H (expected head), APPEAR (s), TOTAL (s), POLL (s, default 30). Prints only
+# "CI status=<READY|BLOCKED> head=<sha|none|invalid> reason=<code> pass=<n> fail=<n> pending=<n>" with code one of
+# ci:pass ci:none ci:fail ci:pending ci:timeout head_moved not_mergeable api_error:<code>.
+set -u
+E=$(mktemp "@{TMPDIR:-/tmp}/abu-ci.XXXXXX") || { echo "CI status=BLOCKED head=none reason=api_error:tmp pass=0 fail=0 pending=0"; exit 0; }
+F="$E.out"; G=5; TP=
+# the running call (TP) is stopped with the same TERM -> G -> KILL escalation (both helpers do it on TERM), then reaped;
+# sweep() then KILLs what is left of a timeout/gtimeout call's own process group (pgid == TP): a TERM-ignoring
+# grandchild of a gh that did exit. The group id stays reserved while any member lives, so it names only that group.
+sweep() { kill -KILL -- "-$1" 2>/dev/null; }
+stop() { [ -n "$TP" ] && { kill -TERM "$TP" 2>/dev/null; wait "$TP" 2>/dev/null; sweep "$TP"; }; rm -f "$E" "$F"; }
+trap 'rm -f "$E" "$F"' EXIT
+trap 'stop; exit 1' HUP INT TERM
+# shared: classify a private stderr file into an allowlisted code (never printed raw)
+ecode() { if grep -q 'HTTP 404' "$1"; then echo http_404; elif grep -q 'HTTP 401' "$1"; then echo http_401; elif grep -q 'HTTP 403' "$1"; then echo http_403
+  elif grep -q -E 'HTTP 5[0-9][0-9]' "$1"; then echo http_5xx; elif grep -q -i -E 'could not resolve|connection|timeout|dial tcp|no such host|network' "$1"; then echo network
+  elif grep -q -i -E 'authenticat|gh auth login|permission denied' "$1"; then echo auth; else echo other; fi; }
+# tmo runs in a background subshell and EXECs the helper, so TP is the helper itself (never a wrapper shell)
+tmo() { local t="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then exec timeout -k "$G" "$t" "$@"; elif command -v gtimeout >/dev/null 2>&1; then exec gtimeout -k "$G" "$t" "$@"
+  else exec perl -MPOSIX=:sys_wait_h -e '($t, $g) = splice(@ARGV, 0, 2); defined($p = fork) or exit 125; if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    $k = sub { $SIG{$_} = "IGNORE" for qw(ALRM TERM HUP INT); kill "TERM", -$p; for (1 .. 10 * $g) { last if waitpid($p, WNOHANG) > 0; select(undef, undef, undef, 0.1) } kill "KILL", -$p; waitpid($p, 0); exit 124 };
+    $SIG{$_} = $k for qw(ALRM TERM HUP INT); alarm $t; waitpid($p, 0); $s = $?; alarm 0; kill "KILL", -$p; exit(($s & 127) ? 128 + ($s & 127) : $s >> 8)' "$t" "$G" "$@"; fi; }
+START=$(date +%s); P=@{POLL:-30}
+S='[.headRefOid, .mergeable, .mergeStateStatus, ([.statusCheckRollup[]? | if .__typename == "CheckRun" then (if .status != "COMPLETED" then "PENDING" else (.conclusion // "PENDING") end) else (.state // "PENDING") end | if . == "SUCCESS" or . == "SKIPPED" or . == "NEUTRAL" then "pass" elif . == "PENDING" or . == "EXPECTED" or . == "QUEUED" or . == "IN_PROGRESS" or . == "WAITING" or . == "REQUESTED" then "pending" else "fail" end] | ((map(select(. == "pass")) | length), (map(select(. == "fail")) | length), (map(select(. == "pending")) | length)))] | map(tostring) | @tsv'
+out() { echo "CI status=$1 head=$2 reason=$3 pass=@{4:-0} fail=@{5:-0} pending=@{6:-0}"; exit 0; }
+while :; do
+  EL=$(( $(date +%s) - START )); LEFT=$(( TOTAL - EL ))
+  [ "$LEFT" -gt 0 ] || out BLOCKED none ci:timeout
+  # in the background + wait, so a TERM to this watcher runs stop() at once (bash defers traps behind a foreground child)
+  tmo "$LEFT" env -u GH_REPO -u GH_HOST gh pr view "$N" --repo "$X" --json headRefOid,mergeable,mergeStateStatus,statusCheckRollup --jq "$S" > "$F" 2>"$E" & TP=$!
+  { wait "$TP"; } 2>/dev/null; rc=$?; sweep "$TP"; TP=; O=$(cat "$F" 2>/dev/null)
+  case "$rc" in 124|137|142) out BLOCKED none ci:timeout ;; esac
+  [ "$rc" = 0 ] || out BLOCKED none "api_error:$(ecode "$E")"
+  IFS=$'\t' read -r HD MG MS NP NF NQ <<< "$O"
+  [[ "$HD" =~ ^[0-9a-f]{40}$ ]] || out BLOCKED invalid head_moved
+  [[ "$NP$NF$NQ" =~ ^[0-9]+$ ]] || out BLOCKED "$HD" api_error:parse
+  [ "$HD" = "$H" ] || out BLOCKED "$HD" head_moved "$NP" "$NF" "$NQ"
+  [ "$NF" = 0 ] || out BLOCKED "$HD" ci:fail "$NP" "$NF" "$NQ"
+  MOK=0; [ "$MG" = MERGEABLE ] && { [ "$MS" = CLEAN ] || [ "$MS" = HAS_HOOKS ]; } && MOK=1
+  if [ "$NQ" = 0 ] && [ "$NP" != 0 ]; then [ "$MOK" = 1 ] && out READY "$HD" ci:pass "$NP" 0 0; out BLOCKED "$HD" not_mergeable "$NP" 0 0; fi
+  if [ "$NP$NQ" = 00 ] && [ "$EL" -ge "$APPEAR" ]; then [ "$MOK" = 1 ] && out READY "$HD" ci:none 0 0 0; out BLOCKED "$HD" not_mergeable 0 0 0; fi
+  EL=$(( $(date +%s) - START )); [ "$EL" -ge "$TOTAL" ] && out BLOCKED "$HD" ci:timeout "$NP" "$NF" "$NQ"
+  W=$P; [ $(( TOTAL - EL )) -lt "$W" ] && W=$(( TOTAL - EL )); sleep "$W"
+done`.split('@{').join('${')
+const PUSH_SH = String.raw`# Plain push of exactly the validated SHA from the lane to its origin (the fail-fast identity check ran first; the
+# outcome is then verified through the forge API). Inputs (env, always read as "$VAR"): L (lane), S (full SHA),
+# B (branch). Prints only "PUSH exit=<n> local=<sha|none> reason=<code>"; git output is discarded (it can echo a URL).
+set -u
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+git check-ref-format --branch "$B" >/dev/null 2>&1 || { echo "PUSH exit=6 local=none reason=bad_branch"; exit 0; }
+[ "$(git -C "$L" rev-parse HEAD 2>/dev/null)" = "$S" ] || { echo "PUSH exit=3 local=none reason=head_moved"; exit 0; }
+git -C "$L" push --quiet origin "$S:refs/heads/$B" >/dev/null 2>&1; rc=$?
+echo "PUSH exit=$rc local=$S reason=$([ $rc = 0 ] && echo ok || echo push_failed)"`.split('@{').join('${')
+const IDL = { type: 'object', properties: { lines: STRS }, required: ['lines'] }
+const ID_OK = /^ID (\S+) ok ([A-Za-z0-9.-]+)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+) scheme=(https|http|git|ssh|scp) user=((?:[A-Za-z0-9_][A-Za-z0-9_.-]*)?) port=([0-9]{0,5})$/
+const ID_FAIL = /^ID (\S+) fail scheme=([a-z0-9+.-]+) host_ok=([01]) reason=([a-z_]+)$/
+function idOf(lines, role) {
+  const l = lines.find(x => String(x).startsWith(`ID ${role} `))
+  if (!l) return { fail: `no ${role} identity line` }
+  const ok = String(l).match(ID_OK)
+  if (ok && ok[1] === role && HOST_RE.test(ok[2]) && ![ok[3], ok[4]].some(n => !NAME_RE.test(n) || n === '.' || n === '..')) {
+    // host / owner / repo are case-insensitive (DNS, GitHub): lowercased ONLY for comparisons and the --repo / --hostname /
+    // API-path arguments (lc*); no other transformation. Branches and SHAs are always compared exactly.
+    return { host: ok[2], owner: ok[3], repo: ok[4], slug: `${ok[3]}/${ok[4]}`, arg: `${ok[2]}/${ok[3]}/${ok[4]}`.toLowerCase(), lcHost: ok[2].toLowerCase(), lcOwner: ok[3].toLowerCase(), lcRepo: ok[4].toLowerCase(), scheme: ok[5], user: ok[6], port: ok[7] }
   }
-  return { arg: b.arg, slug: b.slug, host: b.host, push_urls: pushes }
+  const f = String(l).match(ID_FAIL)
+  return { fail: f ? `scheme ${f[2]}, host ${f[3] === '1' ? 'valid' : 'invalid'}, reason ${f[4]}` : `unrecognized ${role} identity line` }
 }
-// The push itself goes to the remote NAME origin only after repoIdentity validated its effective push URLs, and the
-// pushing step re-reads them immediately before pushing and refuses unless they are byte-identical to the validated list
-// (a config change in between, or a rewrite, cannot slip through).
-const pushGuard = rid => `Immediately before pushing, run git -C ${LANE} remote get-url --push --all origin: its output lines must be exactly ${J(rid.push_urls)} (same lines, same order); if not, push nothing.`
+const sameId = (x, y) => x.arg === y.arg // host/owner/repo case-insensitive (already lowercased in arg); nothing else folded
+// the gh rule every dispatch on the ship / PATCH paths gets (no bare gh anywhere)
+const ghRule = rid => `Run every gh command as ${GHX} (never a bare gh): gh pr / run / release / workflow subcommands with --repo '${rid.arg}'; gh repo view with the repository positional ('${rid.arg}', never --repo); gh api with --hostname '${rid.host}' and repos/${rid.slug}/... paths (never --repo). Run every gh and every network git command (fetch, pull, push, ls-remote) with its stderr redirected to a private temp file (2>file) and report only an error code (http_404, http_401, http_403, http_5xx, network, auth or other), never tool stderr, which can carry URLs and credentials.`
+// -> { arg, slug, host, owner, repo } or { why } (BLOCK)
+async function repoIdentity(tag, ph) {
+  const r = await ask(`Rote repository identity for ${UNIT} (${tag}). Write the block below verbatim to a temp file with a quoted heredoc and run it with: R=${shq(REPO)} L=${shq(LANE)} bash <file> (then delete the file). It prints only parsed identities and reason codes, never a URL. lines = its stdout lines, verbatim and in order. Run no other command: never read, print or quote a git remote URL yourself.
+${ID_SH}`, { label: `repo identity (${tag})`, phase: ph, model: 'haiku', effort: 'low', schema: IDL })
+  if (!r || !Array.isArray(r.lines)) return { why: 'repository identity did not report' }
+  const lines = r.lines.map(String)
+  const a = idOf(lines, 'repo'), b = idOf(lines, 'lane')
+  if (a.fail) return { why: `the run repository's origin remote was rejected (${a.fail})` }
+  if (b.fail) return { why: `the lane's origin remote was rejected (${b.fail})` }
+  if (!sameId(a, b)) return { why: `the lane fetches from ${b.arg}, not the run repository ${a.arg}` }
+  const nl = lines.find(x => /^PUSH_N \d+$/.test(x))
+  const n = nl ? Number(nl.slice(7)) : -1
+  if (n < 0) return { why: 'the push URL count was not reported' }
+  if (n === 0) return { why: 'the lane origin has no resolvable push URL' }
+  for (let i = 1; i <= n; i++) { // every entry, verbatim (an empty / whitespace entry is a fail line, never dropped)
+    const c = idOf(lines, `push${i}`)
+    if (c.fail) return { why: `the lane's push URL #${i} was rejected (${c.fail})` }
+    if (!sameId(c, b)) return { why: `the lane's push URL #${i} targets ${c.arg}, not ${b.arg} (pushurl / pushInsteadOf redirect)` }
+    if (!['https', 'ssh', 'scp'].includes(c.scheme)) return { why: `the lane's push URL #${i} uses ${c.scheme}; pushes go over https or ssh only` }
+  }
+  if (n !== 1) return { why: `the lane origin has ${n} effective push URLs; exactly one is supported` }
+  // lowercase forms only: they feed the comparisons and the --repo / --hostname / repos/<owner>/<repo> arguments
+  return { arg: b.arg, slug: `${b.lcOwner}/${b.lcRepo}`, host: b.lcHost, owner: b.lcOwner, repo: b.lcRepo }
+}
+// push (PUSH_SH) + outcome verification over the forge API (see THREAT MODEL above). Success only when the push
+// exited 0 for exactly `sha` AND the API reports the validated repository's branch head == sha.
+const PUSHR = { type: 'object', properties: { line: STR }, required: ['line'] }
+async function pushAndVerify(tag, ph, rid, sha) {
+  // fail fast: the push URLs are re-read (URL-blind) right before the push and must still name the validated repository
+  const again = await repoIdentity(`${tag} pre-push`, ph)
+  if (again.why) return { ok: false, why: `pre-push identity check: ${again.why}` }
+  if (again.arg !== rid.arg) return { ok: false, why: `pre-push identity check: the lane now pushes to ${again.arg}, not ${rid.arg}` }
+  const r = await ask(`Rote push for ${UNIT} (${tag}). Write the block below verbatim to a temp file with a quoted heredoc and run it with: L=${shq(LANE)} S=${sha} B=${shq(BR)} bash <file> (then delete the file). Never run git push yourself, never force, never open a PR, never bump a version. line = its one PUSH line, verbatim.
+${PUSH_SH}`, { label: `${tag} push`, phase: ph, model: 'haiku', effort: 'low', schema: PUSHR })
+  const m = r && String(r.line || '').match(/^PUSH exit=(\d+) local=([0-9a-f]{40}|none) reason=([a-z_]+)$/)
+  if (!m) return { ok: false, why: 'the push step did not report a PUSH line' }
+  const res = { exit_code: Number(m[1]), local_head: m[2], reason: m[3] }
+  if (res.exit_code !== 0 || res.local_head !== sha) return { ok: false, why: `push failed (exit ${res.exit_code}, reason ${res.reason}, local ${res.local_head}, expected ${sha})`, res }
+  // API_SH: the API answer must be self-describing (ref == refs/heads/<branch>, object.type == commit, url == the API
+  // URL of the validated repository and branch); stderr stays private and only an allowlisted reason code comes back
+  const v = await ask(`Rote forge API check for ${UNIT} (${tag}). Write the block below verbatim to a temp file with a quoted heredoc and run it with: H=${shq(rid.host)} OW=${shq(rid.owner)} RP=${shq(rid.repo)} B=${shq(BR)} bash <file> (then delete the file). Run no other command. line = its one API line, verbatim.
+${API_SH}`, { label: `${tag} verify push`, phase: ph, model: 'haiku', effort: 'low', schema: PUSHR })
+  const am = v && String(v.line || '').match(/^API exit=(\d+) ref=(ok|mismatch|none) sha=([0-9a-f]{40}|none) reason=(ok|api_error:[a-z0-9_]+|mismatch_ref|mismatch_url|empty|parse)$/)
+  if (!am) return { ok: false, why: `push not verified: the ${rid.arg} API check did not report an API line`, res }
+  if (am[1] !== '0' || am[2] !== 'ok') return { ok: false, why: `push not verified: the ${rid.arg} API check failed (exit ${am[1]}, reason ${am[4]})`, res }
+  if (am[3] !== sha) return { ok: false, why: `push not verified: ${rid.arg} branch ${BR} is at ${am[3]}, not the pushed ${sha} (the push went elsewhere or was overwritten)`, res }
+  return { ok: true, res: Object.assign(res, { verified_sha: am[3] }) }
+}
+
+const LINE = { type: 'object', properties: { line: STR }, required: ['line'] }
+// "PR exit=0 number= state= cross= head_repo= head_ref= head=" | "PR exit=<n> reason=api_error:<code>" -> object or null
+// "SETUP recorded_pr= recorded_branch= state= cross= head_repo= head_ref= head= remote_head= reason=" -> object or null
+function setupLine(r) {
+  const l = String((r && r.line) || '')
+  if (!/^SETUP( [a-z_]+=[A-Za-z0-9._\/:-]*)+$/.test(l)) return null
+  const kv = Object.fromEntries(l.slice(6).split(' ').map(x => [x.slice(0, x.indexOf('=')), x.slice(x.indexOf('=') + 1)]))
+  if (!kv.reason) return null
+  return { recorded_pr: Number(kv.recorded_pr || 0), recorded_branch: kv.recorded_branch === 'none' ? '' : kv.recorded_branch || '', state: kv.state || '', cross_repo: kv.cross === 'false' ? false : kv.cross === 'true' ? true : null, head_repo: kv.head_repo || '', head_ref: kv.head_ref || '', head: kv.head || '', remote_head: kv.remote_head || '', reason: kv.reason }
+}
+function prLine(r) {
+  const l = String((r && r.line) || '')
+  const ok = l.match(/^PR exit=0 number=(\d+) state=([A-Z_]+) cross=(true|false) head_repo=([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+) head_ref=([A-Za-z0-9._\/-]+) head=([A-Za-z0-9._\/-]*)$/)
+  if (ok) return { pr: Number(ok[1]), state: ok[2], cross_repo: ok[3] === 'true', head_repo: ok[4], head_ref: ok[5], head: ok[6] }
+  const f = l.match(/^PR exit=(\d+) reason=(api_error:[a-z0-9_]+|invalid_field:[a-z_]+)$/)
+  return f ? { pr: 0, notes: f[2] } : null
+}
 
 // Bounded: runs for the SHA must appear within CI_APPEAR_MIN and finish within CI_TOTAL_MIN, else BLOCKED with the
 // missing / pending checks named (a path-filtered workflow never leaves the unit waiting forever). `repo`
 // (host/owner/repo) scopes every gh call.
 const CI_APPEAR_MIN = 20, CI_TOTAL_MIN = 120
+// ciWait launch / cleanup (run by the agent's own shell, bash or zsh; every path is absolute and derived from RUN and the
+// PR number, so each Bash call re-states it). The launcher makes the watcher a process-group leader and writes ITS pid
+// (== its pgid) to "$O.pid" itself, then execs bash on the block file "$BF". CI_STOP kills only after proving the pid
+// file names that watcher: a positive integer > 1, not the caller's own pgid, still a group leader, and its command line
+// EXACTLY "bash $BF" (the launch argv, never a substring match); otherwise it prints a skip reason and kills nothing (an
+// empty value must never become `kill -- -0`, which is the caller's own group). It signals the watcher's group (always
+// seeded first: "ok" is printed only when that TERM was delivered) AND every process group of the watcher's
+// descendants (a timeout/gtimeout call sits in its own group), collected once BEFORE the leader's TERM: TERM,
+// 8 s (> the in-block grace G=5), KILL.
+const CI_RUN = String.raw`nohup perl -e '$f = shift; setpgrp(0, 0); open(my $h, ">", $f) or exit 126; print $h "$$\n"; close $h; exec @ARGV or exit 127' "$O.pid" bash "$BF" > "$O" 2>/dev/null &`.split('@{').join('${')
+const CI_STOP = String.raw`P=$(cat "$O.pid" 2>/dev/null); ME=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+case "$P" in
+  ''|0*|*[!0-9]*) echo "CI_STOP skip=no_pid" ;;
+  *) if [ "$P" -le 1 ] || [ -z "$ME" ] || [ "$P" = "$ME" ]; then echo "CI_STOP skip=own_group"
+     elif [ "$(ps -o pgid= -p "$P" 2>/dev/null | tr -d ' ')" != "$P" ] || [ "$(ps -ww -o command= -p "$P" 2>/dev/null)" != "bash $BF" ]; then echo "CI_STOP skip=not_watcher"
+     else GS=$(printf '%s\n' "$P"; ps -A -o pid= -o ppid= -o pgid= 2>/dev/null | awk -v r="$P" -v me="$ME" '{ pp[$1] = $2; pg[$1] = $3 } END { for (i in pp) { j = i; n = 0; while (j != r && (j in pp) && n++ < 64) j = pp[j]; if (j == r && pg[i] > 1 && pg[i] != me) s[pg[i]] = 1 } for (x in s) print x }')
+       if ! kill -TERM -- "-$P" 2>/dev/null; then echo "CI_STOP skip=gone"
+       else printf '%s\n' "$GS" | while read -r g; do [ -n "$g" ] && [ "$g" != "$P" ] && kill -TERM -- "-$g" 2>/dev/null; done; sleep 8
+         printf '%s\n' "$GS" | while read -r g; do [ -n "$g" ] && kill -KILL -- "-$g" 2>/dev/null; done; echo "CI_STOP ok"; fi; fi ;;
+esac`.split('@{').join('${')
 async function ciWait(prNumber, head, repo) {
-  const R_ = repo ? ` --repo '${repo}'` : ''
-  const p = `PR #${prNumber} (branch ${BR}${repo ? `, repository ${repo}` : ''}), expected head ${head}. Do NOT merge. Record START=$(date +%s); every wait below is bounded from START. ${GHX} pr view ${prNumber}${R_} --json headRefOid,title: if headRefOid is not ${head}, wait up to 5 min for it (the push may still be propagating), else return BLOCKED with notes "PR head <sha> != ${head}". Wait for every CI workflow run whose headSha is exactly ${head} (${GHX} run list${R_} --branch ${BR} --json databaseId,headSha,status,conclusion,name every 30 s until runs for that SHA appear; runs on any other SHA never count; if none appear within ${CI_APPEAR_MIN} min of START, run ${GHX} pr view ${prNumber}${R_} --json statusCheckRollup and, when it lists no required check pending, continue with that rollup, else return BLOCKED with failing_check "no CI run appeared" and the pending check names in notes; ${GHX} run watch <id>${R_} --exit-status with Bash timeout 600000, repeated; never end your turn while CI runs; once ${CI_TOTAL_MIN} min have passed since START, stop waiting and return BLOCKED with failing_check "CI timeout" and the still-pending run / check names in notes). Then ${GHX} pr view ${prNumber}${R_} --json mergeable,mergeStateStatus,statusCheckRollup,headRefOid: READY only if MERGEABLE, mergeStateStatus CLEAN or HAS_HOOKS, every check SUCCESS / SKIPPED / NEUTRAL and headRefOid still ${head}; else BLOCKED with failing_check and the last 60 lines of ${GHX} run view <id>${R_} --log-failed in notes. If gh itself fails, set failure_class to quota|throttle|auth|timeout|error. Return the envelope (title exact, head = the full headRefOid).`
-  const c = await callChain(`PR #${prNumber} CI wait`, ['haiku', 'sonnet'], p, { label: `wait CI #${prNumber}`, phase: 'Ship', effort: 'low', schema: RD })
+  const total = CI_TOTAL_MIN * 60
+  const bf = `${RUN}/ci-${prNumber}.sh`, vars = `O=${shq(`${RUN}/ci-${prNumber}.out`)}; BF=${shq(bf)}`
+  const p = `Rote CI wait for PR #${prNumber} of ${UNIT} (branch ${BR}). Do NOT merge. Write the block below verbatim, with a quoted heredoc, to ${shq(bf)}. It runs up to ${CI_TOTAL_MIN} minutes, so launch it in the background, exactly: ${vars}; rm -f "$O" "$O.pid"; N=${prNumber} X=${shq(repo)} H=${head} APPEAR=${CI_APPEAR_MIN * 60} TOTAL=${total} ${CI_RUN}
+Then poll in separate Bash calls (shell variables do not survive between calls: every call starts with ${vars}), each under 10 minutes (for i in $(seq 1 18); do grep -q '^CI ' "$O" && break; sleep 30; done), until "$O" holds its CI line or ${CI_TOTAL_MIN + 5} minutes have passed (then the line is "CI status=BLOCKED head=none reason=ci:timeout pass=0 fail=0 pending=0"). In EVERY case finish with exactly this (it kills nothing unless "$O.pid" names the watcher):
+${vars}; ${CI_STOP}
+then delete "$BF", "$O" and "$O.pid". Never end your turn while it runs. Run no other command. line = its one CI line, verbatim.
+${CI_SH}`
+  const c = await callChain(`PR #${prNumber} CI wait`, ['haiku', 'sonnet'], p, { label: `wait CI #${prNumber}`, phase: 'Ship', effort: 'low', schema: LINE })
   if (!c.r) return { status: 'BLOCKED', notes: `CI watcher failed (${c.class})`, failure_class: c.class }
-  if (c.r.status === 'READY' && String(c.r.head || '') !== head) return Object.assign({}, c.r, { status: 'BLOCKED', notes: `CI READY reported for head ${c.r.head || 'unknown'}, not the pushed ${head}` })
-  return c.r
+  // only codes and integer counts are accepted: no check names, no logs, no free text
+  const m = String(c.r.line || '').match(/^CI status=(READY|BLOCKED) head=([0-9a-f]{40}|none|invalid) reason=(ci:(?:pass|fail|pending|timeout|none)|head_moved|not_mergeable|api_error:[a-z0-9_]+) pass=(\d{1,4}) fail=(\d{1,4}) pending=(\d{1,4})$/)
+  if (!m) return { status: 'BLOCKED', notes: 'the CI watcher did not report a CI line' }
+  const r = { status: m[1], head: m[2], notes: m[3], checks: { pass: Number(m[4]), fail: Number(m[5]), pending: Number(m[6]) } }
+  if (r.status === 'READY' && (r.head !== head || !['ci:pass', 'ci:none'].includes(r.notes))) return Object.assign(r, { status: 'BLOCKED', notes: `CI READY reported for head ${r.head} (${r.notes}), not a pass on the pushed ${head}` })
+  if (/^api_error:/.test(r.notes)) r.failure_class = r.notes.slice(10)
+  return r
 }
 
 // v1.8 decision D-E: late gate-born follow-ups (ship-delta / PATCH-delta P2s) append to hardening.json. false = not written.
@@ -908,7 +1213,7 @@ const p2Items = (r, owner) => arr(r && r.p2).map(f => ({ finding: String(f), fil
 // each parent, amends included) for credential-shaped / filtered paths; on a clean tree it commits nothing.
 async function prePushGuard(tag, base, cmpSha, reviewedTree) {
   const p = `Pre-push secret guard for ${UNIT} (${tag}; rote: run the commands and copy their output). 1) git -C ${LANE} status --porcelain must be empty; if not, skip step 2 and return exit_code 2 with lines = ["dirty: " + the first 5 paths]. 2) Run ${GL} commit --cwd ${LANE} --base ${base} -m "chore(${UNIT}): pre-push guard scan" and capture its stdout and exit status: exit_code = that status; lines = every stdout line that starts with secret_path=, filter_path=, control_changed= or no_changes=. 3) head = git -C ${LANE} rev-parse HEAD (full SHA). 4) files_since = git -C ${LANE} diff --name-only ${cmpSha}..HEAD.${reviewedTree ? ` 5) tree_delta = git -C ${LANE} diff --name-only ${reviewedTree} HEAD (the saved reviewed tree vs the head to push; [] when equal).` : ''} Return the envelope.`
-  const g = await agent(p, { label: `${tag} pre-push guard`, phase: curPhase, model: 'haiku', effort: 'low', schema: GUARD })
+  const g = await ask(p, { label: `${tag} pre-push guard`, phase: curPhase, model: 'haiku', effort: 'low', schema: GUARD })
   if (g && Number(g.exit_code) !== 0) return { ok: false, why: `guard refused (exit ${g.exit_code}): ${arr(g.lines).join(' | ') || 'no detail'}`, g }
   if (!g || !SHA_RE.test(String(g.head || '')) || !Array.isArray(g.files_since) || (reviewedTree && !Array.isArray(g.tree_delta))) return { ok: false, why: 'guard scan did not report (no evidence)' }
   if (!arr(g.lines).some(l => /^no_changes=true/.test(String(l)))) return { ok: false, why: 'guard scan did not confirm no_changes=true (an unscanned commit or a dirty tree)', g }
@@ -942,7 +1247,7 @@ async function gateLoop() {
     if (!inv.length) return
     maxR += 1; invalidExtra += 1
     rounds.push({ invalid_rerun_round: round + 1, seats: inv.join(','), why, counts_as_round: false })
-    log(`${UNIT}: round ${round + 1} re-runs INVALID ${inv.join(', ')} (${why}); it does not count against the round cap`)
+    say(`${UNIT}: round ${round + 1} re-runs INVALID ${inv.join(', ')} (${why}); it does not count against the round cap`)
   }
 
   // P1 path: LITE -> FULL, round cap / automatic 4th, owner-routed fix, then only failed + invalidated members re-run
@@ -956,7 +1261,7 @@ async function gateLoop() {
         autoFourthUsed = true
         maxR += 1
         rounds.push({ auto_extra_round: maxR, why: `round ${round} found a NEW [P1] with an in-scope fix` })
-        log(`${UNIT}: automatic round ${maxR} (round ${round} found a new [P1] with an in-scope fix)`)
+        say(`${UNIT}: automatic round ${maxR} (round ${round} found a new [P1] with an in-scope fix)`)
       } else if (has(A.shipOpenP1)) return { result: { verdict: 'FAIL', cons, deferred, shippedOpen: true, gatedSha: gs.reviewed_sha } }
       else return { result: { stop: { stopped: `gate FAIL: ${keptP1} kept [P1] after ${round - invalidExtra} full round(s)${invalidExtra ? ` (+${invalidExtra} INVALID re-run(s), not counted)` : ''}`, final: cons, decision: `${UNIT}: gate FAIL after ${round - invalidExtra} full rounds with ${keptP1} kept [P1]: another round, ship open (shipOpenP1), or re-plan?` } } }
     }
@@ -982,7 +1287,7 @@ async function gateLoop() {
     const gsLabel = `r${round} gate start`
     // ruling R9 / the skill's step c: commit through the helper's secret guard first (a no-op on a clean tree); it also
     // scans every commit in BASE..HEAD (raw merges and amends included) before anything is reviewed or pushed.
-    const gs = await agent(`Gate start for ${UNIT}, round ${round} (rote: run the commands, report their output). 0) ${frozenSha ? `This round re-runs an INVALID seat at the frozen SHA ${frozenSha}: do NOT commit anything. If git -C ${LANE} status --porcelain is not empty, guard_exit = 2 and guard_lines = ["dirty: " + the first 5 paths], stop here and return the envelope with reviewed_sha "" and empty lists; else guard_exit = 0 and guard_lines = [].` : `Run ${GL} commit --cwd ${LANE} --base ${BASE} -m "wip(${UNIT}): gate round ${round}" and capture its stdout and exit status: guard_exit = that status; guard_lines = every stdout line starting with secret_path=, filter_path=, control_changed=, no_changes= or result_sha=. On a non-zero guard_exit stop here and return the envelope with reviewed_sha "" and empty lists.`} 1) mkdir -p ${GATES}; if ${RULINGS} does not exist, write [] to it (never overwrite an existing register). 2) reviewed_sha = git -C ${LANE} rev-parse HEAD (full SHA). 3) files_since_base = git -C ${LANE} diff --name-only ${BASE}...<reviewed_sha>. 4) files_since_prev = ${prev ? `git -C ${LANE} diff --name-only ${prev}..<reviewed_sha>` : 'the same list as files_since_base'}. 5) rulings = the number of entries in ${RULINGS}. Return the envelope.`, { label: gsLabel, phase: 'Gate', model: 'haiku', effort: 'low', schema: GS })
+    const gs = await ask(`Gate start for ${UNIT}, round ${round} (rote: run the commands, report their output). 0) ${frozenSha ? `This round re-runs an INVALID seat at the frozen SHA ${frozenSha}: do NOT commit anything. If git -C ${LANE} status --porcelain is not empty, guard_exit = 2 and guard_lines = ["dirty: " + the first 5 paths], stop here and return the envelope with reviewed_sha "" and empty lists; else guard_exit = 0 and guard_lines = [].` : `Run ${GL} commit --cwd ${LANE} --base ${BASE} -m "wip(${UNIT}): gate round ${round}" and capture its stdout and exit status: guard_exit = that status; guard_lines = every stdout line starting with secret_path=, filter_path=, control_changed=, no_changes= or result_sha=. On a non-zero guard_exit stop here and return the envelope with reviewed_sha "" and empty lists.`} 1) mkdir -p ${GATES}; if ${RULINGS} does not exist, write [] to it (never overwrite an existing register). 2) reviewed_sha = git -C ${LANE} rev-parse HEAD (full SHA). 3) files_since_base = git -C ${LANE} diff --name-only ${BASE}...<reviewed_sha>. 4) files_since_prev = ${prev ? `git -C ${LANE} diff --name-only ${prev}..<reviewed_sha>` : 'the same list as files_since_base'}. 5) rulings = the number of entries in ${RULINGS}. Return the envelope.`, { label: gsLabel, phase: 'Gate', model: 'haiku', effort: 'low', schema: GS })
     if (gs && frozenSha && Number(gs.guard_exit) !== 0) return { stop: { stopped: `BLOCKED: the INVALID re-run of round ${round} found a dirty lane (${arr(gs.guard_lines).join(' | ')}); it must review the frozen SHA ${frozenSha} unchanged`, failure_class: 'error' } }
     if (gs && Number(gs.guard_exit) !== 0) return { stop: { stopped: `BLOCKED: secret guard refused the unit's commits at gate round ${round} (exit ${gs.guard_exit}): ${arr(gs.guard_lines).join(' | ') || 'no detail'}`, failure_class: 'guard', decision: `${UNIT}: credential-shaped or filtered path(s) in the unit's commits; remove them from history before the gate` } }
     if (!gs || !SHA_RE.test(String(gs.reviewed_sha || '')) || !Array.isArray(gs.files_since_base) || !Array.isArray(gs.files_since_prev)) {
@@ -1136,7 +1441,7 @@ async function runWave(wi) {
   const wkey = `${UNIT_DIR}/w${wi + 1}`
   // Resume safety: the trusted task base is the wave base the SCRIPT recorded in ${RUN}/state.json (wave_bases), never a
   // value re-read from the run tree's worktree metadata or from any file inside a task worktree.
-  const wb = await agent(`Prepare wave ${wi + 1} of ${UNIT} (rote). 1) If branch ${BR} does not exist: git -C ${LANE} status --porcelain must be empty (else return head "DIRTY"); git -C ${LANE} switch -c ${BR} ${BASE}. If it exists it must be checked out in ${LANE}. 2) FROM: if ${RUN}/state.json has wave_bases[${J(wkey)}] (jq -r --arg k ${J(wkey)} '.wave_bases[$k] // empty' ${RUN}/state.json), this is a resumed wave: FROM = that value, and it must be an ancestor of HEAD (git -C ${LANE} merge-base --is-ancestor <FROM> HEAD; else return head "BASE_MISMATCH"); otherwise FROM=$(git -C ${LANE} rev-parse HEAD). 3) ${wtTasks.length ? `For each task in ${J(wtTasks)}: if ${RUN}/wt/<task> already exists (a resumed run) reuse it as is; otherwise ${GL} worktree add --run-dir ${RUN} --task <task> --base <FROM> --repo ${REPO}. Record base_sha = FROM for every task (never read it from ${RUN}/wt-meta or from any file inside a worktree) and the branch (git -C ${RUN}/wt/<task> rev-parse --abbrev-ref HEAD).` : 'No task worktrees this wave: worktrees=[].'} Return the envelope (head = FROM, full SHA; worktrees[] {task, path, branch, base_sha}).`, { label: wbLabel, phase: 'Build', model: 'haiku', effort: 'low', schema: WB })
+  const wb = await ask(`Prepare wave ${wi + 1} of ${UNIT} (rote). 1) If branch ${BR} does not exist: git -C ${LANE} status --porcelain must be empty (else return head "DIRTY"); git -C ${LANE} switch -c ${BR} ${BASE}. If it exists it must be checked out in ${LANE}. 2) FROM: if ${RUN}/state.json has wave_bases[${J(wkey)}] (jq -r --arg k ${J(wkey)} '.wave_bases[$k] // empty' ${RUN}/state.json), this is a resumed wave: FROM = that value, and it must be an ancestor of HEAD (git -C ${LANE} merge-base --is-ancestor <FROM> HEAD; else return head "BASE_MISMATCH"); otherwise FROM=$(git -C ${LANE} rev-parse HEAD). 3) ${wtTasks.length ? `For each task in ${J(wtTasks)}: if ${RUN}/wt/<task> already exists (a resumed run) reuse it as is; otherwise ${GL} worktree add --run-dir ${RUN} --task <task> --base <FROM> --repo ${REPO}. Record base_sha = FROM for every task (never read it from ${RUN}/wt-meta or from any file inside a worktree) and the branch (git -C ${RUN}/wt/<task> rev-parse --abbrev-ref HEAD).` : 'No task worktrees this wave: worktrees=[].'} Return the envelope (head = FROM, full SHA; worktrees[] {task, path, branch, base_sha}).`, { label: wbLabel, phase: 'Build', model: 'haiku', effort: 'low', schema: WB })
   if (!wb || !SHA_RE.test(String(wb.head || ''))) return { stop: { stopped: `BLOCKED: wave ${wi + 1} base not prepared (${wb ? wb.head : await classify('haiku', wbLabel, 'Build')})` } }
   const FROM = wb.head
   const wtInfo = Object.fromEntries(arr(wb.worktrees).map(w => [w.task, w]))
@@ -1167,7 +1472,7 @@ async function runWave(wi) {
 
 // The skill's mid-milestone meter: the same step-f reading after a wave. null when the meter itself failed.
 async function waveMeter(wi) {
-  const r = await agent(`Rote size meter for ${UNIT} after wave ${wi + 1}. Run exactly: ${METER} — and return prod_loc and test_loc from its SHIP_METER line (line = that line verbatim). If it prints a "SHIP_METER FAIL" line, or exits non-zero, return prod_loc -1 and test_loc -1 with line = that output.`, { label: `wave ${wi + 1} meter`, phase: 'Build', model: 'haiku', effort: 'low', schema: METERS })
+  const r = await ask(`Rote size meter for ${UNIT} after wave ${wi + 1}. Run exactly: ${METER} — and return prod_loc and test_loc from its SHIP_METER line (line = that line verbatim). If it prints a "SHIP_METER FAIL" line, or exits non-zero, return prod_loc -1 and test_loc -1 with line = that output.`, { label: `wave ${wi + 1} meter`, phase: 'Build', model: 'haiku', effort: 'low', schema: METERS })
   if (!r || !Number.isFinite(Number(r.prod_loc)) || !Number.isFinite(Number(r.test_loc)) || Number(r.prod_loc) < 0 || Number(r.test_loc) < 0 || /FAIL/.test(String(r.line || ''))) return null
   return { prod: Number(r.prod_loc), test: Number(r.test_loc) }
 }
@@ -1200,11 +1505,11 @@ Items: ${J(items)}${shippedOpen ? `\nThe operator ships with the final gate NOT 
 Return the ids you wrote, one per line (or "none").`
   const ledger = await callChain(`${UNIT} ledger rows`, ['haiku', 'sonnet'], ledgerP, { label: `${UNIT} ledger + hardening rows`, phase: 'Ship', effort: 'low' })
   if (!ledger.r) return finish({ stopped: `BLOCKED: ledger rows not written (${ledger.class})`, final: cons, failure_class: ledger.class })
-  const gatedHead = lastSha(await agent(`Return only the output of: git -C ${LANE} rev-parse HEAD`, { label: 'gated head', phase: 'Ship', model: 'haiku', effort: 'low' }))
+  const gatedHead = lastSha(await ask(`Return only the output of: git -C ${LANE} rev-parse HEAD`, { label: 'gated head', phase: 'Ship', model: 'haiku', effort: 'low' }))
   if (!gatedHead) return finish({ stopped: 'BLOCKED: gated head unreadable', final: cons })
   if (g.gatedSha && gatedHead !== g.gatedSha) return finish({ stopped: `BLOCKED: lane HEAD ${gatedHead} is not the gated head ${g.gatedSha} (ungated commits)`, final: cons })
   if (shippedOpen && has(A.shipOpenP1Markers)) {
-    await agent(`Comment-only commit in ${LANE} (branch ${BR}), operator decision: ${A.shipOpenP1} Add exactly these shortcut comments, each directly above the code it names, with NO behaviour change and NO user-facing string: ${J(A.shipOpenP1Markers)}. If an accuracy test quotes a shifted line, re-point it by content (never weaken it). Run typecheck, lint and the touched files' tests. ${EDIT_NOTE} Commit via ${GL} commit --cwd ${LANE} --base ${BASE} -m "<summary>" (message ending with the trailer line "${TRAILER}"; report a refusal verbatim). Return: head, files, tests.`, { label: `${UNIT} shortcut markers`, phase: 'Ship', model: 'claude-opus-5-5', effort: 'high' })
+    await ask(`Comment-only commit in ${LANE} (branch ${BR}), operator decision: ${A.shipOpenP1} Add exactly these shortcut comments, each directly above the code it names, with NO behaviour change and NO user-facing string: ${J(A.shipOpenP1Markers)}. If an accuracy test quotes a shifted line, re-point it by content (never weaken it). Run typecheck, lint and the touched files' tests. ${EDIT_NOTE} Commit via ${GL} commit --cwd ${LANE} --base ${BASE} -m "<summary>" (message ending with the trailer line "${TRAILER}"; report a refusal verbatim). Return: head, files, tests.`, { label: `${UNIT} shortcut markers`, phase: 'Ship', model: 'claude-opus-5-5', effort: 'high' })
   }
 
   // /ship as a subagent reading ship/SKILL.md from disk; prepare (no push) -> fact-check -> publish (retro item 8)
@@ -1231,7 +1536,7 @@ Return the ids you wrote, one per line (or "none").`
   // (upstream-only files merged in are not /ship's change). Any package.json change is code (no version-only exemption).
   const flP = `Rote /ship change inventory for ${UNIT}. Write this block verbatim to a temp file with a quoted heredoc, run it with bash (G=${gatedHead} L=${LANE} bash <file>) and copy its output: head = the HEAD line, snap_tree = the SNAP line, files = every FILE line's path ([] when none). An ERROR line, or a non-zero exit: return head "ERROR".
 ${INV_SH}`
-  const flr = await agent(flP, { label: 'ship delta files', phase: 'Ship', model: 'haiku', effort: 'low', schema: FILES })
+  const flr = await ask(flP, { label: 'ship delta files', phase: 'Ship', model: 'haiku', effort: 'low', schema: FILES })
   const fl = flr && SHA_RE.test(String(flr.head || '')) && Array.isArray(flr.files) && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(String(flr.snap_tree || '')) ? flr : null
   if (!fl) return finish({ stopped: 'BLOCKED: /ship delta file inventory unreadable; publication needs positive evidence of what /ship changed', final: cons, failure_class: 'error' })
   // the reviewed-tree snapshot is BOUND to the gated tree: it must equal the tree of /ship's base-merge commit (or of the
@@ -1264,29 +1569,34 @@ ${INV_SH}`
   const lateCode = gd.g.files_since.filter(f => !BOOKKEEP_RE.test(f))
   if (lateCode.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${fl.head}: ${lateCode.join(', ')}`, final: cons })
   const pushHead = gd.g.head
-  const pubP = `Ship ship-unit ${UNIT} from ${LANE}, branch ${BR}, part 2 of 2 (publish). Continue the /ship flow of ${SK}/ship/SKILL.md from its push step and do nothing else: first confirm git -C ${LANE} rev-parse HEAD is exactly ${pushHead} (else return BLOCKED and push nothing); ${pushGuard(rid)} (else return BLOCKED with notes "push URL changed"); push ${BR} to origin (fast-forward; never force), create the PR against the default branch of ${rid.arg}, bind CI. ${ghRule(rid)} Make no new commit.${skip ? ' ' + SHIP_SKIP : ''} PR body ends with "${PR_FOOTER}" and names: ship-unit ${UNIT}, tasks ${IDS.join(', ') || '(prebuilt)'},${opt(A.shipNotes, x => ' ' + x)} the gate verdict ${g.verdict} with members_present ${J(cons.members_present)}, the full gate rounds ${J(rounds.filter(x => x.round).map(x => `r${x.round}:${x.verdict} ${x.members}`))} (delta reviews are not rounds; note every substitution and ABSENT member), and the deferred ledger ids: ${String(ledger.r).trim()}.${shippedOpen ? ' The PR body MUST carry a "Known issues (shipped open)" section naming each kept P1, its ledger id and its upgrade trigger.' : ''}${opt(A.shipExtra, x => ' ' + x)} Do NOT merge. Return the envelope: status PUBLISHED only when git push exited 0 AND the PR exists for ${BR} at head ${pushHead}; otherwise status BLOCKED with the failing command and its error in notes (a pre-existing PR never makes a failed push PUBLISHED); pushed = whether git push exited 0; pr_number; head = git -C ${LANE} rev-parse HEAD.`
+  // the unit script pushes and verifies the push over the forge API; /ship publish only creates the PR and binds CI
+  const ip = await pushAndVerify('ship', 'Ship', rid, pushHead)
+  if (!ip.ok) return finish({ stopped: `BLOCKED: ${ip.why}`, final: cons, push: ip.res, failure_class: 'error' })
+  const pubP = `Ship ship-unit ${UNIT} from ${LANE}, branch ${BR}, part 2 of 2 (publish). Continue the /ship flow of ${SK}/ship/SKILL.md after its push and do nothing else: the unit script has ALREADY pushed exactly ${pushHead} to ${BR} of ${rid.arg} (skip "Push"; never run git push yourself); create the PR against the default branch of ${rid.arg}, bind CI. ${ghRule(rid)} Make no new commit.${skip ? ' ' + SHIP_SKIP : ''} PR body ends with "${PR_FOOTER}" and names: ship-unit ${UNIT}, tasks ${IDS.join(', ') || '(prebuilt)'},${opt(A.shipNotes, x => ' ' + x)} the gate verdict ${g.verdict} with members_present ${J(cons.members_present)}, the full gate rounds ${J(rounds.filter(x => x.round).map(x => `r${x.round}:${x.verdict} ${x.members}`))} (delta reviews are not rounds; note every substitution and ABSENT member), and the deferred ledger ids: ${String(ledger.r).trim()}.${shippedOpen ? ' The PR body MUST carry a "Known issues (shipped open)" section naming each kept P1, its ledger id and its upgrade trigger.' : ''}${opt(A.shipExtra, x => ' ' + x)} Do NOT merge. Return the envelope: status PUBLISHED only when the PR exists for ${BR} at head ${pushHead}; otherwise status BLOCKED with notes = the failing command's name and one error code (http_404, http_401, http_403, network, auth or other; never raw error text, which can carry URLs); pr_number; head = git -C ${LANE} rev-parse HEAD.`
   const pub = await callChain(`${UNIT} /ship publish`, uniq([shipModel, skip ? 'sonnet' : 'claude-opus-4-8']), pubP, { label: `${UNIT} /ship publish`, phase: 'Ship', effort: shipEffort, schema: PUB })
   if (!pub.r) return finish({ stopped: `BLOCKED: /ship publish failed (${pub.class})`, failure_class: pub.class, final: cons })
   // ruling R4: publication needs an explicit success token; a BLOCKED / failed push never counts, even if a PR exists
-  if (pub.r.status !== 'PUBLISHED' || pub.r.pushed !== true || pub.r.head !== pushHead) return finish({ stopped: `BLOCKED: /ship publish not confirmed (status ${pub.r.status}, pushed ${pub.r.pushed}, head ${pub.r.head || '?'}, expected ${pushHead}): ${pub.r.notes || ''}`.slice(0, 400), ship: pub.r, final: cons, failure_class: 'error' })
+  if (pub.r.status !== 'PUBLISHED' || pub.r.head !== pushHead) return finish({ stopped: `BLOCKED: /ship publish not confirmed (status ${pub.r.status}, head ${pub.r.head || '?'}, expected ${pushHead}): ${pub.r.notes || ''}`.slice(0, 400), ship: pub.r, final: cons, failure_class: 'error' })
   // PR identity (parity with PATCH): the PR number the publish step returned, verified in the run's repository by
   // GHX pr view --repo <slug> (slug from the lane's origin remote via repoIdentity, exactly as patchFlow): OPEN, same-repo head, head branch == BR, head SHA == pushed
   // head. Any mismatch or gh failure -> BLOCKED before the PR is recorded or its CI is awaited.
   const prn = Number(pub.r.pr_number)
   if (!(prn > 0)) return finish({ stopped: 'BLOCKED: /ship publish returned no PR number', ship: pub.r, final: cons, failure_class: 'error' })
-  const pr = await agent(`Rote PR identity check for ${UNIT} (run the command and copy its output; use no other gh call). ${GHX} pr view ${prn} --repo '${rid.arg}' --json number,state,isCrossRepository,headRepository,headRepositoryOwner,headRefName,headRefOid,title -> pr = number, state, cross_repo = isCrossRepository, head_repo = headRepositoryOwner.login + "/" + headRepository.name, head_ref = headRefName, head = headRefOid (full SHA), title (exact). If any gh call fails, return pr 0 and the error in notes.${opt(A.shipAttempt, a => ` (ship attempt ${a})`)}`, { label: 'find PR', phase: 'Ship', model: 'haiku', effort: 'low', schema: SHIPPR })
-  if (!pr) return finish({ stopped: `BLOCKED: PR #${prn} identity check did not report`, ship: pub.r, final: cons, failure_class: 'error' })
+  const prl = await ask(`Rote PR identity check for ${UNIT}. Write the block below verbatim to a temp file with a quoted heredoc and run it with: N=${prn} X=${shq(rid.arg)} bash <file> (then delete the file). Run no other command. line = its one PR line, verbatim.${opt(A.shipAttempt, a => ` (ship attempt ${a})`)}
+${PRV_SH}`, { label: 'find PR', phase: 'Ship', model: 'haiku', effort: 'low', schema: LINE })
+  const pr = prLine(prl)
+  if (!pr) return finish({ stopped: `BLOCKED: PR #${prn} identity check did not report a PR line`, ship: pub.r, final: cons, failure_class: 'error' })
   const slug = rid.slug
   const prWhy = Number(pr.pr) !== prn ? `gh pr view returned #${pr.pr || 0}, not the published #${prn}${pr.notes ? ' (' + pr.notes + ')' : ''}`
     : up1(pr.state) !== 'OPEN' ? `PR #${prn} is ${pr.state || 'unknown'}, not OPEN`
-    : pr.cross_repo !== false || String(pr.head_repo || '').toLowerCase() !== slug.toLowerCase() ? `PR #${prn} head lives in ${pr.head_repo || 'unknown'} (cross_repo ${pr.cross_repo}), not ${slug}`
+    : pr.cross_repo !== false || String(pr.head_repo || '').toLowerCase() !== slug ? `PR #${prn} head lives in ${pr.head_repo || 'unknown'} (cross_repo ${pr.cross_repo}), not ${slug}`
     : pr.head_ref !== BR ? `PR #${prn} head branch is ${pr.head_ref || 'unknown'}, not ${BR}`
     : pr.head !== pushHead ? `PR #${prn} head ${pr.head || 'unknown'} is not the guarded head ${pushHead}` : ''
   if (prWhy) return finish({ stopped: `BLOCKED: ${prWhy}`, ship: pub.r, final: cons, pr, failure_class: 'error' })
   // run ownership: record this unit's PR in state.json; a later PATCH proves the PR belongs to this run against it
   if (!(await writeState(`Ship: PR #${pr.pr}`, [], { prs: { [UNIT_DIR]: { pr: pr.pr, branch: BR, head: pushHead, repo: rid.arg } } }))) return finish({ stopped: `BLOCKED: PR #${pr.pr} published but not recorded in state.json prs (a later PATCH could not prove ownership); record it, then resume`, ship: pub.r, final: cons, pr, failure_class: 'error' })
   const ready = await ciWait(pr.pr, pushHead, rid.arg)
-  return finish({ status: ready.status, stopped: ready.status === 'READY' ? undefined : `CI: ${ready.failing_check || ready.notes}`, failure_class: ready.failure_class, integ, final: cons, ship: prep.r, ship_delta: shipDelta, factcheck: fc.r, pr, ready, gated_head: gatedHead, pushed_head: pushHead })
+  return finish({ status: ready.status, stopped: ready.status === 'READY' ? undefined : `CI: ${ready.notes}${ready.checks ? ` (pass ${ready.checks.pass}, fail ${ready.checks.fail}, pending ${ready.checks.pending})` : ''}`, failure_class: ready.failure_class, integ, final: cons, ship: prep.r, ship_delta: shipDelta, factcheck: fc.r, pr, ready, gated_head: gatedHead, pushed_head: pushHead })
 }
 
 async function unitFlow() {
@@ -1299,7 +1609,7 @@ async function unitFlow() {
   }
   for (const t of TASKS) { // rule 1 tier guard, recorded before anything is dispatched
     const g = tierGuard(t)
-    if (g.refused) { incidents.push({ step: `route ${t.id}`, class: 'override_refused', note: `${tierOf(t)} task: model override ${g.refused} refused (no Sonnet / Haiku / Luna for T2/T3); tier default ${routeDesc(t)}` }); log(`${t.id}: model override ${g.refused} refused for ${tierOf(t)}`) }
+    if (g.refused) { incidents.push({ step: `route ${t.id}`, class: 'override_refused', note: `${tierOf(t)} task: model override ${g.refused} refused (no Sonnet / Haiku / Luna for T2/T3); tier default ${routeDesc(t)}` }); say(`${t.id}: model override ${g.refused} refused for ${tierOf(t)}`) }
   }
   enter('Refresh')
   await writeState('Refresh')
@@ -1327,10 +1637,10 @@ async function unitFlow() {
       // the skill's mid-milestone SHIP_METER check: meter after each wave; at the cap stop dispatching feature waves
       const mt = await waveMeter(wi)
       if (!mt) return finish({ stopped: `SHIP_METER STOP: the meter failed after wave ${wi + 1} (a broken meter is a stop, never a 0-LOC reading)`, refresh, built, failure_class: 'error' })
-      log(`SHIP_METER after wave ${wi + 1}: ${mt.prod} prod + ${mt.test} test`)
+      say(`SHIP_METER after wave ${wi + 1}: ${mt.prod} prod + ${mt.test} test`)
       if (mt.prod >= PROD_CAP) {
         meterStop = { after_wave: wi + 1, prod: mt.prod, test: mt.test, unbuilt_waves: WAVES.slice(wi + 1).map(x => arr(x).map(t => t.id)) }
-        log(`SHIP_METER: ${mt.prod} prod LOC >= ${PROD_CAP} after wave ${wi + 1}: no further feature waves; gate and checkpoint what is built`)
+        say(`SHIP_METER: ${mt.prod} prod LOC >= ${PROD_CAP} after wave ${wi + 1}: no further feature waves; gate and checkpoint what is built`)
         // cut the unit's acceptance scope to the built work: the unbuilt tasks leave TASKS / IDS / OWNERS / BRIEFS (so no
         // reviewer, integrator or fix can demand them) and are queued as deferred in state.json for the next unit
         const cut = new Set(meterStop.unbuilt_waves.flat())
@@ -1344,7 +1654,7 @@ async function unitFlow() {
         }
         break
       }
-      if (mt.prod >= PROD_WARN) log(`SHIP_METER WARNING: ${mt.prod} prod LOC after wave ${wi + 1} (warn ${PROD_WARN}, stop ${PROD_CAP})`)
+      if (mt.prod >= PROD_WARN) say(`SHIP_METER WARNING: ${mt.prod} prod LOC after wave ${wi + 1} (warn ${PROD_WARN}, stop ${PROD_CAP})`)
     }
   }
 
@@ -1360,14 +1670,14 @@ async function unitFlow() {
   if (meterStop) integ.meter_stop = meterStop
   const prod = Number(integ.prod_loc), test = Number(integ.test_loc)
   integ.loc = prod + test
-  log(`SHIP_METER: ${prod} prod + ${test} test`)
-  if (test >= TEST_WARN) log(`SHIP_METER WARNING: ${test} test LOC (warn ${TEST_WARN}; never a stop)`)
+  say(`SHIP_METER: ${prod} prod + ${test} test`)
+  if (test >= TEST_WARN) say(`SHIP_METER WARNING: ${test} test LOC (warn ${TEST_WARN}; never a stop)`)
   if (prod >= PROD_CAP) {
     if (integ.linear && prod <= PROD_LINEAR_CAP) {
       integ.meter_exception = `${prod} prod LOC >= ${PROD_CAP} on a green linear branch (<= +20%): gated as one unit; the orchestrator records the reason`
-      log(`SHIP_METER: ${integ.meter_exception}`)
+      say(`SHIP_METER: ${integ.meter_exception}`)
     } else return finish({ stopped: `SHIP_METER STOP: ${prod} prod LOC >= ${PROD_CAP}${integ.linear ? ` (+20% band ends at ${PROD_LINEAR_CAP})` : ' (branch not linear: a base-branch merge after the ship base)'}`, integ, meter_stop: meterStop, decision: `${UNIT}: ${prod} production LOC over the cap: split at a pre-agreed boundary or accept?` })
-  } else if (prod >= PROD_WARN) log(`SHIP_METER WARNING: ${prod} prod LOC (warn ${PROD_WARN}, stop ${PROD_CAP})`)
+  } else if (prod >= PROD_WARN) say(`SHIP_METER WARNING: ${prod} prod LOC (warn ${PROD_WARN}, stop ${PROD_CAP})`)
   if (flow === 'LITE') { // v1.8 decision D-E: LITE = <= liteLocCap prod LOC, T0/T1 only, no sensitive path
     if (prod > LITE_CAP) upgrade(`${prod} prod LOC > LITE cap ${LITE_CAP}`, 0)
     const sens = sensitiveFiles(integ.files)
@@ -1406,15 +1716,19 @@ async function patchFlow() {
   // and the PR's head must live in it (not a fork that happens to use the same branch name)
   const rid = await repoIdentity(`PATCH #${N}`, 'Fix')
   if (rid.why) return finish({ stopped: `BLOCKED: PATCH repository identity unverified: ${rid.why}`, failure_class: 'error' })
-  const st = await agent(`PATCH setup for PR #${N} (${UNIT}, rote: run the commands and copy their output). 0) recorded_pr / recorded_branch = jq -r --arg k ${J(UNIT_DIR)} '.prs[$k].pr // 0', and '.prs[$k].branch // ""', of ${RUN}/state.json; when state.json is missing or has no prs entry for that key, read the same from the archived ${RUN}/state.final.json (0 / "" when neither has it). 1) ${GHX} pr view ${N} --repo '${rid.arg}' --json state,headRefName,isCrossRepository,headRepository,headRepositoryOwner -> state, head_ref (verbatim), cross_repo = isCrossRepository, head_repo = headRepositoryOwner.login + "/" + headRepository.name. 2) The lane ${LANE} must have ${BR} checked out (git -C ${LANE} rev-parse --abbrev-ref HEAD) with an empty git -C ${LANE} status --porcelain; else return head "DIRTY" and notes saying which. 3) git -C ${LANE} fetch origin ${BR}; git -C ${LANE} merge --ff-only origin/${BR} (on failure return head "NOT_FF"). 4) head = git -C ${LANE} rev-parse HEAD; remote_head = git -C ${LANE} rev-parse origin/${BR}. Return the envelope.`, { label: `PATCH #${N} setup`, phase: 'Fix', model: 'haiku', effort: 'low', schema: PSETUP })
-  if (!st) return finish({ stopped: 'BLOCKED: PATCH setup did not report', failure_class: 'error' })
+  const stl = await ask(`PATCH setup for PR #${N} (${UNIT}). Write the block below verbatim to a temp file with a quoted heredoc and run it with: RUN=${shq(RUN)} K=${shq(UNIT_DIR)} N=${N} X=${shq(rid.arg)} L=${shq(LANE)} B=${shq(BR)} bash <file> (then delete the file). Run no other command. line = its one SETUP line, verbatim.
+${PSETUP_SH}`, { label: `PATCH #${N} setup`, phase: 'Fix', model: 'haiku', effort: 'low', schema: LINE })
+  const st = setupLine(stl)
+  if (!st) return finish({ stopped: 'BLOCKED: PATCH setup did not report a SETUP line', failure_class: 'error' })
+  if (/^api_error:/.test(st.reason)) return finish({ stopped: `BLOCKED: PATCH setup: gh pr view failed (${st.reason})`, failure_class: 'error' })
+  if (/^invalid_field:/.test(st.reason)) return finish({ stopped: `BLOCKED: PATCH setup: ${st.reason.slice(14)} has a character outside its allowlist (rejected, never rewritten)`, failure_class: 'error' })
   const slug = rid.slug
   // run ownership: the PR must be the one this run recorded for this unit when it shipped (state.json prs)
   if (Number(st.recorded_pr) !== Number(N) || st.recorded_branch !== BR) return finish({ stopped: `BLOCKED: PR #${N} is not recorded as ${UNIT}'s PR in ${RUN}/state.json (recorded: #${st.recorded_pr || 'none'} on ${st.recorded_branch || 'none'}); PATCH only fixes this run's own PRs` })
-  if (st.cross_repo !== false || String(st.head_repo || '').toLowerCase() !== slug.toLowerCase()) return finish({ stopped: `BLOCKED: PR #${N} head lives in ${st.head_repo || 'unknown'} (cross_repo ${st.cross_repo}), not the run's repository ${slug}` })
+  if (st.cross_repo !== false || String(st.head_repo || '').toLowerCase() !== slug) return finish({ stopped: `BLOCKED: PR #${N} head lives in ${st.head_repo || 'unknown'} (cross_repo ${st.cross_repo}), not the run's repository ${slug}` })
   if (up1(st.state) !== 'OPEN') return finish({ stopped: `BLOCKED: PR #${N} is ${st.state || 'unknown'}, not OPEN`, decision: up1(st.state) === 'MERGED' ? `${UNIT}: PR #${N} is merged; a fix to a merged PR is a new unit (LITE or the hardening batch)` : undefined })
   if (st.head_ref !== BR) return finish({ stopped: `BLOCKED: PR #${N} head branch is ${st.head_ref || 'unknown'}, not ${BR}` })
-  if (!SHA_RE.test(String(st.head || '')) || st.head !== st.remote_head) return finish({ stopped: `BLOCKED: PATCH lane not ready (${st.head || 'no head'}${st.notes ? ': ' + st.notes : ''}; dirty, wrong branch or not fast-forward to origin/${BR})` })
+  if (!SHA_RE.test(String(st.head || '')) || st.head !== st.remote_head) return finish({ stopped: `BLOCKED: PATCH lane not ready (${st.head || 'no head'}; ${st.reason})` })
   const from = st.head
   const findings = `the PATCH request for PR #${N}${opt(A.context, x => `: ${x}`)}`
   const fx = await fixPass(fixes, 'patch', findings, 'Fix')
@@ -1445,19 +1759,56 @@ async function patchFlow() {
   const late = gd.g.files_since.filter(f => !PROSE_RE.test(f))
   if (late.length) return finish({ stopped: `BLOCKED: unreviewed change after the reviewed head ${hf.head}: ${late.join(', ')}`, review })
   const want = gd.g.head
-  const ps = await agent(`Rote PATCH push for PR #${N}. 1) git -C ${LANE} rev-parse HEAD must be exactly ${want}; if not, push nothing and return exit_code 3. ${pushGuard(rid)} (else return exit_code 4). 2) git -C ${LANE} push origin HEAD:refs/heads/${BR} (fast-forward only: never --force, never a new branch, never a new PR, never a version bump); exit_code = its exit status. 3) local_head = git -C ${LANE} rev-parse HEAD; remote_head = the SHA from git -C ${LANE} ls-remote origin refs/heads/${BR}. Return the envelope.`, { label: `PATCH push #${N}`, phase: 'Ship', model: 'haiku', effort: 'low', schema: PUSH })
-  if (!ps || Number(ps.exit_code) !== 0 || ps.local_head !== want || ps.remote_head !== want) return finish({ stopped: `BLOCKED: PATCH push not confirmed (exit ${ps ? ps.exit_code : 'none'}, local ${ps ? ps.local_head : '?'}, remote ${ps ? ps.remote_head : '?'}, expected ${want})`, review, push: ps, failure_class: 'error' })
+  const ip = await pushAndVerify(`PATCH #${N}`, 'Ship', rid, want)
+  if (!ip.ok) return finish({ stopped: `BLOCKED: PATCH ${ip.why}`, review, push: ip.res, failure_class: 'error' })
   const ready = await ciWait(N, want, rid.arg)
-  return finish({ status: ready.status, stopped: ready.status === 'READY' ? undefined : `CI: ${ready.failing_check || ready.notes}`, failure_class: ready.failure_class, pr: N, head: want, review, ready })
+  return finish({ status: ready.status, stopped: ready.status === 'READY' ? undefined : `CI: ${ready.notes}${ready.checks ? ` (pass ${ready.checks.pass}, fail ${ready.checks.fail}, pending ${ready.checks.pending})` : ''}`, failure_class: ready.failure_class, pr: N, head: want, review, ready })
 }
 const up1 = x => String(x || '').toUpperCase()
 
-async function main() {
+// plain-name rule + git check-ref-format --branch rules (no component starting with '.' or ending in '.lock', no '..',
+// no '//' or trailing '/', no trailing '.', no '@{', not 'HEAD', not starting with '-')
+const branchOk = b => /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/.test(b) && b !== 'HEAD' && !/\.\.|\/\/|\/$|\.$|@\{/.test(b) && b.split('/').every(c => c.length > 0 && !c.startsWith('.') && !c.endsWith('.lock'))
+const SAFE_PATH = /^\/[A-Za-z0-9_.\/+@%,=-]*$/ // no ':' either, so no scheme:// or user:pass@ can hide in a path
+// Tokens that end up in shell commands: base (a full commit SHA, as documented), unit and task / owner ids, model and
+// effort names, prNumber, the attempt counters, privtest (an absolute command path). Prose args (context, gateFocus,
+// notes, decisions) are instructions to agents, never interpolated into a command line by this script.
+const ID_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, MODEL_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/
+const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+function argProblem() {
+  if (!SHA_RE.test(String(A.base))) return `base must be a full 40-hex commit SHA`
+  if (!ID_TOKEN.test(String(A.unit))) return `unit must be a plain id (letters, digits, . _ -)`
+  if (FLOW_REQ === 'PATCH' && !/^[1-9][0-9]{0,8}$/.test(String(A.prNumber))) return `prNumber must be a positive integer`
+  for (const k of ['gateAttempt', 'shipAttempt', 'maxRounds', 'extraFixRound', 'liteLocCap']) if (has(A[k]) && !/^[0-9]{1,6}$/.test(String(A[k]))) return `${k} must be a small non-negative integer`
+  if (has(A.privtest) && !SAFE_PATH.test(String(A.privtest))) return `privtest must be an absolute command path`
+  for (const k of ['synModel', 'deltaModel', 'shipModel', 'seatCModel', 'seatXModel']) if (has(A[k]) && !MODEL_TOKEN.test(String(A[k]))) return `${k} must be a plain model id`
+  const jobs = TASKS.map(t => ['waves task', t]).concat(arr(A.extraFixes).map(f => ['extraFixes owner', { id: f && f.owner, model: f && f.model, effort: f && f.effort, impl: f && f.impl }]))
+  for (const [what, t] of jobs) {
+    if (!t || !ID_TOKEN.test(String(t.id))) return `${what} id must be a plain id`
+    if (has(t.model) && !MODEL_TOKEN.test(String(t.model))) return `${what} model must be a plain model id`
+    if (has(t.effort) && !EFFORTS.includes(String(t.effort))) return `${what} effort must be one of ${EFFORTS.join('|')}`
+    if (has(t.impl) && !['claude', 'codex'].includes(String(t.impl))) return `${what} impl must be claude or codex`
+  }
+  return ''
+}
+// every result, early stops included, leaves the script scrubbed
+async function main() { return scrubOut(await runUnit()) }
+// validation failures name the arg and the rule, never the rejected value (it may hold a credential)
+async function runUnit() {
   const missing = REQUIRED.filter(k => !has(A[k]))
   if (missing.length) return { status: 'STOPPED', stopped: `missing required args: ${missing.join(', ')}` }
-  if (!['FULL', 'LITE', 'PATCH'].includes(FLOW_REQ)) return { status: 'STOPPED', stopped: `flow must be FULL, LITE or PATCH (got ${A.flow})` }
-  if (has(A.seatXModel) && A.seatXModel !== 'gpt-6-astra') return { status: 'STOPPED', stopped: `seatXModel must be gpt-6-astra (got ${A.seatXModel}): Seat X always starts on Astra; Sol only substitutes under ruling R1` }
-  if (!['ordinary', 'critical'].includes(GATE_CLASS)) return { status: 'STOPPED', stopped: `gateClass must be ordinary or critical (got ${A.gateClass})` }
+  if (!['FULL', 'LITE', 'PATCH'].includes(FLOW_REQ)) return { status: 'STOPPED', stopped: `flow must be FULL, LITE or PATCH` }
+  // the branch name goes into shell commands and API paths: a plain name that ALSO passes git check-ref-format --branch
+  // (mirrored here so the unit stops before any work; PUSH_SH re-checks it with git itself before pushing)
+  if (!branchOk(String(BR))) return { status: 'STOPPED', stopped: `branch must be a plain, valid git branch name (letters, digits, . _ / -; git check-ref-format --branch rules)` }
+  // every path arg is interpolated into shell commands: absolute and free of whitespace, quotes and shell metacharacters
+  const badPath = ['runDir', 'lane', 'repo', 'briefsDir', 'reportsDir'].find(k => !SAFE_PATH.test(String(A[k])))
+  if (badPath) return { status: 'STOPPED', stopped: `${badPath} must be an absolute path of letters, digits and / . _ - + @ % , = only` }
+  // every other arg that reaches a shell command or a command-shaped prompt line is validated here, before ANY dispatch
+  const badArg = argProblem()
+  if (badArg) return { status: 'STOPPED', stopped: `invalid argument: ${badArg}` }
+  if (has(A.seatXModel) && A.seatXModel !== 'gpt-6-astra') return { status: 'STOPPED', stopped: `seatXModel must be gpt-6-astra: Seat X always starts on Astra; Sol only substitutes under ruling R1` }
+  if (!['ordinary', 'critical'].includes(GATE_CLASS)) return { status: 'STOPPED', stopped: `gateClass must be ordinary or critical` }
   if (FLOW_REQ === 'PATCH') {
     if (!has(A.prNumber)) return { status: 'STOPPED', stopped: 'PATCH flow needs prNumber' }
     return patchFlow()
