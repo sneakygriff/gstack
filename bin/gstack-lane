@@ -253,8 +253,14 @@
 #       when it fits inside a longer guard and after it expired: the early record, a signal or
 #       finalize of the same observation never restarts or extends anything (status
 #       "credit_guard":"expired"). bucket_obs never evicts a LIVE observation nor one expired within
-#       the 6 h replay window; older expired entries are pruned after 8 days and, beyond 64 entries,
-#       evicted oldest deadline first. The guard's exhausted_until is the max over observations, never
+#       its finalize GRACE (GSTACK_LANE_OBS_GRACE_S, 6 h); after the grace an entry MAY be evicted:
+#       older expired entries are pruned after 8 days and, beyond 64, evicted oldest deadline first.
+#       HARD CAP 256 entries, enforced by admission: when the unevictable entries alone fill it, a
+#       new observation is NOT stored, the guard FAILS CLOSED until it and every retained entry passed
+#       their deadlines ("credit_guard":"map_full", WARNING on stderr; the opt-in still lifts it,
+#       visibly). LATE FINALIZE: when this attempt's early record persisted the observation but its
+#       entry is gone (a helper suspended past the grace, or a map_full refusal), finalize recomputes
+#       NOTHING — no restart, no extension ("credit_guard":"late_finalize"). The guard's exhausted_until is the max over observations, never
 #       shortened; an observation not newer than the reading that ended the guard (bucket_cleared_at)
 #       never re-arms it ("credit_guard":"stale"). observed_at = the latest exhausting
 #       observation's ROLLOUT timestamp ("unknown" when undated — sticky). It ends on expiry, or on
@@ -632,7 +638,8 @@
 # GSTACK_LANE_LOCK_WAIT_S (30), GSTACK_LANE_PROBE_RETRY_S (300),
 # GSTACK_LANE_GROK_MODELS_TIMEOUT_S (30), GSTACK_LANE_SNAPSHOT_TIMEOUT_S (30),
 # GSTACK_LANE_BUCKET_FALLBACK_S (86400, floor 60: the credit guard's bounded cooldown when an
-# exhausted snapshot carries no usable resets_at), GSTACK_LANE_TEST_PAUSE (tests only, see above).
+# exhausted snapshot carries no usable resets_at), GSTACK_LANE_OBS_GRACE_S (21600: an observation
+# entry's finalize grace — see CREDIT GUARD), GSTACK_LANE_TEST_PAUSE (tests only, see above).
 # JSON/date handling uses `bun -e` (isolated, above); the lanes lock uses perl (Fcntl flock).
 #
 # Hygiene: bash 3.2 compatible; no `set -e` (many non-zero statuses are captured on
@@ -659,6 +666,7 @@ GL_PROBE_RETRY_S="${GSTACK_LANE_PROBE_RETRY_S:-300}"
 GL_GROK_MODELS_TIMEOUT_S="${GSTACK_LANE_GROK_MODELS_TIMEOUT_S:-30}"
 GL_SNAPSHOT_TIMEOUT_S="${GSTACK_LANE_SNAPSHOT_TIMEOUT_S:-30}"
 GL_BUCKET_FALLBACK_S="${GSTACK_LANE_BUCKET_FALLBACK_S:-86400}"
+GL_OBS_GRACE_S="${GSTACK_LANE_OBS_GRACE_S:-21600}"   # credit guard: finalize grace of an observation entry
 # Tests only: GSTACK_LANE_TEST_PAUSE=<before-record|after-record>:<s> sleeps at that point of every l3
 # invocation (the credit guard's cancel window and delayed-finalize tests). Anything else: no pause.
 GL_TEST_PAUSE="${GSTACK_LANE_TEST_PAUSE:-}"
@@ -668,7 +676,7 @@ GL_GUARD_PENDING_INV=""
 EX_OK=0; EX_ERROR=1; EX_USAGE=2; EX_THROTTLE=3; EX_QUOTA=4; EX_AUTH=5; EX_TIMEOUT=124
 EX_LOCK=75   # internal: the kernel lock could not be acquired within the wait
 
-for _gl_v in "$GL_KILL_GRACE_S" "$GL_BACKOFF_MS" "$GL_THROTTLE_RETRIES" "$GL_LOCK_WAIT_S" "$GL_PROBE_RETRY_S" "$GL_GROK_MODELS_TIMEOUT_S" "$GL_SNAPSHOT_TIMEOUT_S" "$GL_BUCKET_FALLBACK_S"; do
+for _gl_v in "$GL_KILL_GRACE_S" "$GL_BACKOFF_MS" "$GL_THROTTLE_RETRIES" "$GL_LOCK_WAIT_S" "$GL_PROBE_RETRY_S" "$GL_GROK_MODELS_TIMEOUT_S" "$GL_SNAPSHOT_TIMEOUT_S" "$GL_BUCKET_FALLBACK_S" "$GL_OBS_GRACE_S"; do
   case "$_gl_v" in ''|*[!0-9]*) echo "gstack-lane: GSTACK_LANE_* tunables must be non-negative integers" >&2; exit 2 ;; esac
 done
 [ "$GL_BACKOFF_MS" -ge 1 ] || GL_BACKOFF_MS=1
@@ -676,6 +684,8 @@ done
 [ "$GL_SNAPSHOT_TIMEOUT_S" -ge 1 ] || GL_SNAPSHOT_TIMEOUT_S=1
 [ "$GL_BUCKET_FALLBACK_S" -ge 60 ] || GL_BUCKET_FALLBACK_S=60   # floor: the fail-closed fallback is never ~0
 export GL_BUCKET_FALLBACK_S   # every helper-side bun call (lane-get, summary, finalize) uses the same bound
+[ "$GL_OBS_GRACE_S" -ge 1 ] || GL_OBS_GRACE_S=1
+export GL_OBS_GRACE_S
 
 # Whole-string id grammar ([[ =~ ]] anchors the whole value; no newline can match).
 GL_ID_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
@@ -1133,10 +1143,14 @@ function guardOf(e) {
 }
 // observed_at of a guard = the LATEST exhausting observation it retains; "unknown" (an undated one) is sticky.
 const laterObs = (a, b) => (a === U || b === U || !a || !b ? U : (Date.parse(a) >= Date.parse(b) ? a : b));
-// Per-observation deadlines: l3 "bucket_obs" {<obs key>: {u: <deadline ISO>, f: <1 = fallback>}} —
-// kept apart from the guard (it survives the guard's end), bounded: entries whose deadline is older than
-// the 8-day window are pruned and at most OBS_CAP (the latest deadlines) are kept.
+// Per-observation deadlines: l3 "bucket_obs" {<obs key>: {u: <deadline ISO>, f: <1 = fallback>, id}} —
+// kept apart from the guard (it survives the guard's end). OBS_CAP bounds the EVICTABLE part (expired
+// past the grace); OBS_HARD_CAP is the HARD ceiling on the whole map, enforced by ADMISSION: when the
+// unevictable entries (live, or expired within the grace) already fill it, a new observation is NOT
+// stored and the guard fails CLOSED ("map_full") instead — nothing live is ever dropped and the file
+// never grows past the ceiling through the helper.
 const OBS_CAP = 64;
+const OBS_HARD_CAP = 256;
 function obsMap(e) {
   const m = e && e.bucket_obs && typeof e.bucket_obs === "object" && !Array.isArray(e.bucket_obs) ? e.bucket_obs : {};
   const out = {};
@@ -1147,11 +1161,13 @@ function obsMap(e) {
   }
   return out;
 }
-// A LIVE (unexpired) observation is never evicted, whatever the count (live entries are bounded by
-// concurrency) — nor one that expired within the REPLAY window (6 h, longer than any attempt: its own
-// finalize or cancel may still replay it, and must find its fixed deadline). Older expired entries are
-// pruned after the 8-day window, and beyond OBS_CAP the oldest-deadline ones go first.
-const OBS_REPLAY_MS = 6 * 36e5;
+// A LIVE (unexpired) observation is never evicted — nor one that expired within the finalize GRACE
+// (GSTACK_LANE_OBS_GRACE_S, 6 h: its own finalize or cancel may still replay it). After the grace it MAY
+// be evicted: older expired entries are pruned after the 8-day window, and beyond OBS_CAP the
+// oldest-deadline ones go first. A finalize that comes later than that (a helper suspended past the
+// grace) and finds no entry recomputes NOTHING ("late_finalize", see recordGuard).
+const OBS_REPLAY_MS = (Number(E.GL_OBS_GRACE_S) >= 1 ? Number(E.GL_OBS_GRACE_S) : 21600) * 1e3;
+const unevictable = (m) => Object.values(m).filter((v) => Date.parse(v.u) > now - OBS_REPLAY_MS).length;
 function pruneObs(m) {
   const keep = [], old = [];
   for (const [k, v] of Object.entries(m)) {
@@ -1165,17 +1181,32 @@ function pruneObs(m) {
 // Record an exhausted observation. Its OWN deadline is computed once (keyed) and fixed forever — even when
 // it fits inside a longer guard, and after it expired (never restarted). The guard takes the max, never
 // shortened. An observation not newer than the reading that already ended the guard never re-arms it.
-// → { own: {until, fb}, expired?, stale?, guard? }
-function recordGuard(e, snap, key, keyId) {
+// `replay`: this attempt's early record already persisted this observation — if its entry is gone (it
+// was evicted after the grace, or never admitted because the map was full), NOTHING is recomputed.
+// → { own: {until, fb}, expired?, stale?, late?, full?, mapFull?, guard? }
+function recordGuard(e, snap, key, keyId, replay) {
   const m = obsMap(e);
-  let own;
+  let own, mapFull = false;
   if (key && m[key]) own = { until: Date.parse(m[key].u), fb: m[key].f === 1 };
-  else {
+  else if (key && replay) {
+    e.bucket_obs = pruneObs(m);
+    return { late: true, full: unevictable(e.bucket_obs) >= OBS_HARD_CAP }; // already handled: no restart, no extension
+  } else {
     const [u, fb] = guardUntil(snap);
     own = { until: u, fb };
-    if (key) { m[key] = { u: iso(u), f: fb ? 1 : 0, id: keyId || "" }; }
+    if (key && unevictable(m) >= OBS_HARD_CAP) mapFull = true;             // admission refused: fail closed below
+    else if (key) m[key] = { u: iso(u), f: fb ? 1 : 0, id: keyId || "" };
   }
   e.bucket_obs = pruneObs(m);
+  if (mapFull) {
+    // FAIL CLOSED: guarded until this observation AND every retained one have passed their deadlines.
+    const g = guardOf(e);
+    const n = unevictable(e.bucket_obs);
+    const until = Math.max(own.until, g && g.until > now ? g.until : 0, ...Object.values(e.bucket_obs).map((v) => Date.parse(v.u)));
+    e.bucket_guard = { exhausted_until: iso(until), set_at: isoMs(now), observed_at: g && g.until > now ? laterObs(g.observed_at, snap.observed_at) : snap.observed_at,
+                       reason: `${GUARD_REASON} (observation map full: ${n} unevictable entries of ${OBS_HARD_CAP} — guarded until they pass their deadlines)` };
+    return { own, mapFull: true, guard: guardOf(e) };
+  }
   if (own.until <= now) return { own, expired: true };
   const cleared = strictTime(e.bucket_cleared_at);
   if (Number.isFinite(cleared) && snap.observed_at !== U && Date.parse(snap.observed_at) <= cleared) return { own, stale: true };
@@ -1210,7 +1241,8 @@ function guardRecord() {
   const e = lanes.l3 && typeof lanes.l3 === "object" && !Array.isArray(lanes.l3) ? lanes.l3
     : { status: "ok", reason: "credit guard recorded", next_probe_at: null, runtime_model: null, updated_at: iso(now), status_since: isoMs(now),
         last_event_at: null, consecutive_quota: 0, throttle_count: 0 };
-  recordGuard(e, b, b.key, b.keyId);
+  const r = recordGuard(e, b, b.key, b.keyId, false);
+  if (r.mapFull) process.stderr.write(`gstack-lane: WARNING: credit-guard observation map full (${OBS_HARD_CAP}): failing closed\n`);
   lanes.l3 = e;
   writeLanes(E.GL_LANES_FILE, lanes);
   console.log("recorded");
@@ -1271,7 +1303,18 @@ function bucketUpdate(e, prev, bk, newerEvent, prevCoolingNext) {
         && Date.parse(snap.observed_at) > Date.parse(g.observed_at)) { delete e.bucket_guard; e.bucket_cleared_at = snap.observed_at; }
     return;
   }
-  const r = recordGuard(e, snap, bk.key, bk.keyId); // recorded even when opted in (visibility) and over absent
+  const r = recordGuard(e, snap, bk.key, bk.keyId, E.GL_GUARD_PERSISTED === "1"); // recorded even when opted in (visibility) and over absent
+  if (r.late) { // early record persisted it; entry gone: recompute nothing
+    bucketNote.guard = r.full ? "map_full" : "late_finalize";
+    const g0 = guardOf(e); // a still-active (fail-closed) guard reaches `status` with its FIXED deadline
+    if (r.full && g0 && g0.until > now && !optIn()) coolForBucket(e, g0.until, g0.reason, prevCoolingNext, isoMs(now));
+    return;
+  }
+  if (r.mapFull) {
+    bucketNote.guard = "map_full";
+    if (!optIn()) coolForBucket(e, r.guard.until, r.guard.reason, prevCoolingNext, isoMs(now));
+    return;
+  }
   if (r.expired) { bucketNote.guard = "expired"; return; } // this observation's own deadline already passed: no restart
   if (r.stale) { bucketNote.guard = "stale"; return; }     // a newer below-100% reading already ended the guard
   const g = r.guard;
@@ -1432,6 +1475,8 @@ function finalize() {
     if (bucketNote.guard === "cooling") process.stderr.write(`gstack-lane: l3 ${GUARD_REASON}; cooling until ${lane.next_probe_at}\n`);
     else if (bucketNote.guard === "recorded") process.stderr.write(`gstack-lane: l3 ${GUARD_REASON}; recorded in lanes.json bucket_guard\n`);
     else if (bucketNote.guard === "allowed") process.stderr.write("gstack-lane: codex bucket at 100%: running on purchased credits (codex_allow_credit_spend=true)\n");
+    else if (bucketNote.guard === "map_full") process.stderr.write(`gstack-lane: WARNING: credit-guard observation map full (${OBS_HARD_CAP} unevictable entries): this observation was not stored — l3 is GUARDED (fail closed) until the retained deadlines pass${optIn() ? "; lifted by codex_allow_credit_spend=true" : ""}\n`);
+    else if (bucketNote.guard === "late_finalize") process.stderr.write("gstack-lane: warning: credit-guard late finalize — this observation's entry is gone (past its grace); it was already recorded, nothing is recomputed\n");
   }
   if (E.GL_STATUS_FILE) writeAtomic(E.GL_STATUS_FILE, s);
   console.log(lineFor(s));

@@ -491,9 +491,25 @@ with credits, reaching 100% raises NO error — Codex silently keeps running on 
   (the claimed `--out` path relative to `<run-dir>/attempts` — `<task>/<attempt_id>/<file>` — plus the
   invocation and the rollout timestamp or record position), fixed forever for it: never on read, never again by the early record, a
   signal or finalize of the same observation, even when it fit inside a longer guard and after it expired
-  (it never restarts cooling). `bucket_obs` never evicts a live observation nor one expired within the 6 h
-  replay window (longer than any attempt); older expired entries are pruned after 8 days and, beyond 64
-  entries, evicted oldest deadline first — live entries are bounded by concurrency. The guard's
+  (it never restarts cooling). `bucket_obs` never evicts a live observation nor one expired within its
+  finalize grace (`GSTACK_LANE_OBS_GRACE_S`, 6 h, longer than any normal attempt); after the grace an entry
+  MAY be evicted: older expired entries are pruned after 8 days and, beyond 64, evicted oldest deadline
+  first.
+- **Hard ceiling (256 entries), fail closed.** The map never exceeds 256 entries through the helper: the
+  ceiling is enforced at admission. When the unevictable entries (live or within their grace) alone fill
+  it — e.g. many sequential opted-in observations, which all stay live until their reset — a new
+  observation is NOT stored; instead the guard fails CLOSED until that observation and every retained one
+  have passed their deadlines (`credit_guard: map_full`, a WARNING on stderr). Nothing live is ever
+  dropped. The opt-in still lifts the guard, visibly (summary / probe / `--json`). Ordinary churn (entries
+  expiring past their grace) is evicted and never trips it.
+- **Late finalize (trade-off).** The grace is a retention promise, not a clock the helper can enforce: a
+  helper suspended past it (laptop sleep, SIGSTOP) may find that its own entry was evicted. Its early
+  record already persisted the observation (and its guard) when the invocation ended, so a finalize that
+  finds no entry recomputes NOTHING: no restart and no extension (`credit_guard: late_finalize`). The lane
+  then simply follows the current bucket state. The cost: such a late attempt cannot re-derive a deadline
+  that had already passed — which is exactly what must not be restarted. The alternative (recomputing a
+  fallback) fails safe by over-cooling, but restarts cooling for an observation that was already handled.
+ The guard's
   `exhausted_until` is the max over observations and is never shortened; an observation not newer than
   the reading that ended the guard never re-arms it. It ends on expiry, or on a below-100% reading whose ROLLOUT timestamp is real and
   strictly newer than `observed_at` (the latest exhausting observation's rollout timestamp); an undated,
