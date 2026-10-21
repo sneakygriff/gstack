@@ -536,8 +536,9 @@
 # clean up an in-flight codex home (H17).
 #
 # BUN ISOLATION (H2): every helper-side `bun` call runs from the private empty dir above
-# (never the repo/worktree cwd), with --no-env-file and --config=/dev/null (no .env
-# autoload, no bunfig.toml preload) and with every BUN_* variable (BUN_OPTIONS can
+# (never the repo/worktree cwd), running the helper payload from a private file there, with
+# --no-env-file and an empty private --config (no .env autoload, no bunfig.toml preload)
+# and with every BUN_* variable (BUN_OPTIONS can
 # inject --preload), NODE_OPTIONS and NODE_PATH removed from its environment.
 #
 # ARGUMENT HYGIENE (security triage): every externally supplied value is validated before
@@ -640,7 +641,7 @@
 # GSTACK_LANE_BUCKET_FALLBACK_S (86400, floor 60: the credit guard's bounded cooldown when an
 # exhausted snapshot carries no usable resets_at), GSTACK_LANE_OBS_GRACE_S (21600: an observation
 # entry's finalize grace — see CREDIT GUARD), GSTACK_LANE_TEST_PAUSE (tests only, see above).
-# JSON/date handling uses `bun -e` (isolated, above); the lanes lock uses perl (Fcntl flock).
+# JSON/date handling uses bun on a private helper file (isolated, above); the lanes lock uses perl (Fcntl flock).
 #
 # Hygiene: bash 3.2 compatible; no `set -e` (many non-zero statuses are captured on
 # purpose, as in bin/gstack-panel); never `set -x` (would echo env/argv); CDPATH unset.
@@ -704,6 +705,12 @@ GL_CODEX_CONFIG='# gstack-lane hermetic CODEX_HOME — generated and verified on
 approval_policy = "never"
 service_tier = "default"
 '
+# Windows (Git Bash/MSYS/Cygwin): without [windows] sandbox codex has no OS sandbox and rejects
+# EVERY shell command ("blocked by policy"); -s read-only/workspace-write still set the policy.
+case "${OSTYPE:-}" in msys*|cygwin*) GL_CODEX_CONFIG="$GL_CODEX_CONFIG"'
+[windows]
+sandbox = "elevated"
+' ;; esac
 
 # ── bun helper (JSON, classification, dates) ──────────────────────────────────
 read -r -d '' _GL_JS <<'JS'
@@ -1671,15 +1678,26 @@ JS
 # A bare `bun -e` honors <cwd>/bunfig.toml (preload = repo code), auto-loads <cwd>/.env and
 # obeys BUN_OPTIONS (--preload). Every helper-side bun call therefore runs from a private
 # empty dir (created once per helper process, in the MAIN shell, removed at exit), with
-# --no-env-file --config=/dev/null and with BUN_* / NODE_OPTIONS / NODE_PATH unset.
+# --no-env-file, an empty private --config and with BUN_* / NODE_OPTIONS / NODE_PATH unset.
 GL_BUN_CWD=""
 GL_BUN_UNSET=()
-GL_BUN_FLAGS=(--no-env-file --config=/dev/null)
+# An EMPTY private config, not /dev/null: MSYS turns /dev/null into `nul` and bun 1.3.13 panics.
+GL_BUN_CFG=gstack-lane-bunfig.toml
+GL_BUN_FLAGS=(--no-env-file "--config=./$GL_BUN_CFG")
+# Windows caps a command line at 32,767 chars and $_GL_JS is far larger, so `bun -e "$_GL_JS"`
+# fails there ("Argument list too long"). _gl_bun_init writes it ONCE (0600, noclobber) into
+# the private dir; bun runs that file. .cjs = CommonJS (require), exactly as `bun -e` ran it.
+GL_BUN_JS=gstack-lane-helper.cjs
+GL_BUN_JS_OK=0
 _gl_bun_init() {
   local v
   [ -n "$GL_BUN_CWD" ] && return 0
   GL_BUN_CWD="$(mktemp -d "${TMPDIR:-/tmp}/gstack-lane-bun.XXXXXX" 2>/dev/null || true)"
   [ -n "$GL_BUN_CWD" ] && [ -d "$GL_BUN_CWD" ] || GL_BUN_CWD=/
+  case "$GL_BUN_CWD" in */gstack-lane-bun.*)
+    ( umask 077; set -C; printf '%s\n' "$_GL_JS" > "$GL_BUN_CWD/$GL_BUN_JS" && : > "$GL_BUN_CWD/$GL_BUN_CFG" ) 2>/dev/null \
+      && GL_BUN_JS_OK=1 ;;
+  esac
   GL_BUN_UNSET=()
   for v in $(compgen -e); do
     case "$v" in BUN_*|NODE_OPTIONS|NODE_PATH) GL_BUN_UNSET+=(-u "$v") ;; esac
@@ -1687,18 +1705,25 @@ _gl_bun_init() {
 }
 # shellcheck disable=SC2329  # invoked via trap
 _gl_exit_cleanup() {
-  case "$GL_BUN_CWD" in */gstack-lane-bun.*) rmdir "$GL_BUN_CWD" 2>/dev/null ;; esac
+  case "$GL_BUN_CWD" in */gstack-lane-bun.*) rm -f "$GL_BUN_CWD/$GL_BUN_JS" "$GL_BUN_CWD/$GL_BUN_CFG" 2>/dev/null; rmdir "$GL_BUN_CWD" 2>/dev/null ;; esac
   return 0
 }
 trap '_gl_exit_cleanup' EXIT
-# _gl_bun_js: `env -u… bun <flags> -e "$_GL_JS"` from the neutral cwd (GL_* travel in the env).
+# _gl_bun_cd: enter the private dir holding the payload; fail closed (never `/`) without it.
+_gl_bun_cd() {
+  [ "$GL_BUN_JS_OK" = 1 ] && [ -f "$GL_BUN_CWD/$GL_BUN_JS" ] && [ -f "$GL_BUN_CWD/$GL_BUN_CFG" ] &&
+    cd "$GL_BUN_CWD" 2>/dev/null && return 0
+  echo "gstack-lane: bun helper unavailable (private dir, payload or config file missing)" >&2
+  return 1
+}
+# _gl_bun_js: `env -u… bun <flags> ./$GL_BUN_JS` from the neutral cwd (GL_* travel in the env).
 _gl_bun_js() {
-  ( cd "${GL_BUN_CWD:-/}" 2>/dev/null || exit 1
-    exec env ${GL_BUN_UNSET[@]+"${GL_BUN_UNSET[@]}"} bun "${GL_BUN_FLAGS[@]}" -e "$_GL_JS" )
+  ( _gl_bun_cd || exit 1
+    exec env ${GL_BUN_UNSET[@]+"${GL_BUN_UNSET[@]}"} bun "${GL_BUN_FLAGS[@]}" "./$GL_BUN_JS" )
 }
 _gl_bun_js_locked() { # <wait_s> — the same, holding the lanes kernel lock (E8)
-  ( cd "${GL_BUN_CWD:-/}" 2>/dev/null || exit 1
-    _gl_locked "$1" env ${GL_BUN_UNSET[@]+"${GL_BUN_UNSET[@]}"} bun "${GL_BUN_FLAGS[@]}" -e "$_GL_JS" )
+  ( _gl_bun_cd || exit 1
+    _gl_locked "$1" env ${GL_BUN_UNSET[@]+"${GL_BUN_UNSET[@]}"} bun "${GL_BUN_FLAGS[@]}" "./$GL_BUN_JS" )
 }
 _gl_js() { GL_FN="$1" _gl_bun_js; }
 _gl_abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
