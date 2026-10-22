@@ -281,7 +281,8 @@ test('the periodic executor supervises every actual case and retry within its CI
   const manifest = buildRunManifest({ tier: 'periodic', sliceCount: planned.slices,
     evalsAll: true, env: { EVALS_ALL: '1' } });
   const census = manifest.entries.filter(row => row.status === 'planned');
-  expect(census).toHaveLength(73); // fork: +2 outside-voices panel canaries
+  expect(census).toHaveLength(74); // + autobuilder's periodic section-read probe
+  expect(census.some(row => row.file === 'test/carve-section-loading-autobuilder-loop.test.ts')).toBe(true);
   expect(census.find(row => row.file === 'test/skill-llm-eval.test.ts')?.budget?.timeoutMs).toBe(6_480_000);
   const walls = executor.strategy.matrix.slice.map((slice: number) => paidShardWallUpperBoundMs(
     census.filter(row => row.slice === slice).map(row => row.file), active.jobs,
