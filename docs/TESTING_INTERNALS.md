@@ -361,10 +361,10 @@ retry in a 52-minute shard wall, including two minutes for cleanup. No per-case 
 have a 1,830-second minimum shard wall and run without Bun retries; see the
 [overlay contract](OVERLAY_BENCHMARK_CONTRACT.md) for their unchanged work budget.
 
-The quality file reserves 7,180 seconds for all 28 cases and their existing
-retry, plus cleanup. Each still has 120 seconds of model work. Its 17 workflow
+The quality file reserves 6,480 seconds for all 25 cases and their existing
+retry, plus cleanup. Each still has 120 seconds of model work. Its 18 workflow
 judges own their deadline and abort signal, with five seconds for terminal
-recording inside a ten-second Bun grace; the other 11 retain their existing
+recording inside a ten-second Bun grace; the other seven retain their existing
 120-second Bun timeout. Late responses cannot create records or cache passes.
 
 The ship documentation file reserves 10,920 seconds for five 600-second cases and
