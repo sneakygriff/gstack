@@ -8,8 +8,8 @@
       "source_start_line": 28,
       "source_sha256": "5482b091b238dad9a28171d789a0b98b5adacbb05b6caaa4912da7f36c411a97",
       "target": "sections/run-setup.md.tmpl",
-      "target_sha256": "5482b091b238dad9a28171d789a0b98b5adacbb05b6caaa4912da7f36c411a97",
-      "change": "verbatim"
+      "target_sha256": "c5eeb0b61046ed230ce209a953d0bb77214d47c3e45893b1ff492b3b580fd494",
+      "change": "Canonical preamble preserved across root plus run-setup: question format stays always loaded in root; startup resolver removes exactly that same block to avoid duplicate context"
     },
     {
       "id": "round1-4",

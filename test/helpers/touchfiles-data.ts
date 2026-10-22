@@ -402,6 +402,7 @@ export const E2E_TOUCHFILES: Record<string, string[]> = {
   // the selector sets GSTACK_CARVE_SKILL=<name> to scope cost to the changed
   // skill (D-CODEX A). Touching the registry/helper or sections.ts runs all.
   'carve-section-loading':       [
+    'autobuilder-loop/**', 'scripts/resolvers/autobuilder.ts', 'test/carve-section-loading-autobuilder-loop.test.ts',
     'bin/gstack-review-log', 'bin/gstack-review-read', 'lib/review-evidence.ts',
     'bin/gstack-slug', 'bin/gstack-wtree', 'bin/gstack-config', 'bin/gstack-brain-enqueue',
      'test/fixtures/autoplan-amend-input-77.json',
@@ -1496,7 +1497,7 @@ export const E2E_TIERS: Record<string, 'gate' | 'periodic'> = {
  */
 export const LLM_JUDGE_TOUCHFILES: Record<string, string[]> = {
   'autobuilder-loop/SKILL.md workflow': [
-    'autobuilder-loop/**', 'lib/autobuilder-*.ts', 'bin/gstack-autobuilder-ops', 'scripts/resolvers/preamble.ts', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts',
+    'autobuilder-loop/**', 'lib/autobuilder-*.ts', 'bin/gstack-autobuilder-ops', 'scripts/resolvers/preamble.ts', 'scripts/resolvers/preamble/**', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts',
     'plan-eng-review/SKILL.md.tmpl', 'plan-eng-review/sections/review-sections.md.tmpl',
     'review/SKILL.md.tmpl', 'review/checklist.md', 'scripts/resolvers/testing.ts',
     'scripts/resolvers/shared-libs.ts', 'scripts/resolvers/confidence.ts',

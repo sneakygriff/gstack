@@ -15,11 +15,12 @@
  */
 
 import type { TemplateContext, ResolverFn } from './types';
-import { generateAutobuilderSeatC } from './autobuilder';
+import { generateAutobuilderSeatC, generateAutobuilderStartup } from './autobuilder';
 import { outsideVoiceFor, outsideVoiceGuard, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, generateOutsideVoiceRouting } from './outside-voice';
 
 // Domain modules
 import { generatePreamble } from './preamble';
+import { generateAskUserFormat } from './preamble/generate-ask-user-format';
 import { generateTestFailureTriage } from './preamble';
 import { generateDesignMethodology, generateDesignHardRules, generateDesignOutsideVoices, generateDesignReviewLite, generateDesignSketch, generateDesignSetup, generateDesignMockup, generateDesignShotgunLoop, generateTasteProfile, generateUXPrinciples, generateOverusedFonts, generateDesignSlopBullets, generateDesignDetector, generateDesignMdCheck } from './design';
 import { generateTestBootstrap, generateTestCoverageAuditPlan, generateTestCoverageAuditShip, generateTestCoverageGateShip } from './testing';
@@ -45,6 +46,8 @@ import { generateTestValueBar, generateTestValueMessage } from './test-value';
 import { generateQAScope, generateQAExploratory, generateQAFunctional, generateQAResource, generateQAReview, generateQAReviewPreflight, generateQAMethodReads } from './qa';
 
 export const RESOLVERS: Record<string, ResolverFn> = {
+  AUTOBUILDER_STARTUP: generateAutobuilderStartup,
+  AUTOBUILDER_QUESTION_FORMAT: generateAskUserFormat,
   AUTOBUILDER_SEAT_C: generateAutobuilderSeatC,
   AUTOPLAN_PUBLICATION_HOOK: generateAutoplanPublicationHook,
   OUTSIDE_SELF_GUARD: (ctx, args) => outsideVoiceGuard({ ...ctx, host: args?.[0] === 'claude-code' ? 'codex' : 'claude' }),

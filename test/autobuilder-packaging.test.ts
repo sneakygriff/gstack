@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { generateAutobuilderSeatC, extractCanonicalBlock } from '../scripts/resolvers/autobuilder';
+import { generateAskUserFormat } from '../scripts/resolvers/preamble/generate-ask-user-format';
 const root=path.resolve(import.meta.dir,'../autobuilder-loop');
 const read=(p:string)=>fs.readFileSync(path.join(root,p),'utf8');
 const hash=(s:string)=>crypto.createHash('sha256').update(s).digest('hex');
@@ -17,8 +18,12 @@ test('every pre-carve source block retains its mapped bytes with only declared c
  }
 });
 
-test('router has bounded default context and mandatory stage pointers; review gates stay visible',()=>{
- const entry=read('SKILL.md');expect(entry.trim().split(/\s+/).length).toBeLessThanOrEqual(1500);
+test('router stays within 1500 words plus the unchanged mandatory question contract',()=>{
+ const entry=read('SKILL.md');
+ const format=generateAskUserFormat({skillName:'autobuilder-loop',paths:{skillRoot:'~/.claude/skills/gstack'}} as any);
+ expect(entry.split(format)).toHaveLength(2);
+ expect(read('sections/run-setup.md')).not.toContain('## AskUserQuestion Format');
+ expect(entry.replace(format,'').trim().split(/\s+/).length).toBeLessThanOrEqual(1500);
  for(const id of ['run-setup','contracts','build','gate','release','workflow-reference','continuous-queue'])expect(entry).toContain(`sections/${id}.md`);
  for(const text of ['EITHER model FAILs','INVALID never counts as ABSENT','REVIEW_INCOMPLETE','there is no Seat X waiver','BUILT is not','2,500'])expect(entry).toContain(text);
  expect(read('sections/contracts.md.tmpl')).not.toContain('SHIP_METER measurement (`git rev-parse`');

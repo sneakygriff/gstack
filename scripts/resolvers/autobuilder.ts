@@ -2,6 +2,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { TemplateContext } from './types';
+import { generatePreamble } from './preamble';
+import { generateAskUserFormat } from './preamble/generate-ask-user-format';
 import { generateConfidenceCalibration } from './confidence';
 
 export const SEAT_C_SOURCES = [
@@ -25,4 +27,12 @@ export function generateAutobuilderSeatC(ctx: TemplateContext): string {
     const body = extractCanonicalBlock(source, start, end, file).replace('{{CONFIDENCE_CALIBRATION}}', generateConfidenceCalibration({ ...ctx, skillName: 'review' }));
     return `<!-- Canonical source: ${file} | ${start} -->\n${body}`;
   }).join('\n\n');
+}
+
+/** Keep the canonical question contract always loaded, without duplicating it
+ * when the mandatory startup reference is read. Other skills use PREAMBLE unchanged. */
+export function generateAutobuilderStartup(ctx: TemplateContext): string {
+  const preamble = generatePreamble(ctx), format = generateAskUserFormat(ctx);
+  if (preamble.split(format).length !== 2) throw new Error('Autobuilder question contract missing or ambiguous');
+  return preamble.replace(format, '').trim();
 }
