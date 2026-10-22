@@ -1,0 +1,114 @@
+{
+  "source_commit": "6b40634d216e36a3bc6b6342a41985043e406c9b",
+  "source": "autobuilder-loop/SKILL.md.tmpl",
+  "blocks": [
+    {
+      "id": "round1-0",
+      "source_heading": "{{PREAMBLE}}",
+      "source_start_line": 28,
+      "source_sha256": "5482b091b238dad9a28171d789a0b98b5adacbb05b6caaa4912da7f36c411a97",
+      "target": "sections/run-setup.md.tmpl",
+      "target_sha256": "5482b091b238dad9a28171d789a0b98b5adacbb05b6caaa4912da7f36c411a97",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-4",
+      "source_heading": "## The loop",
+      "source_start_line": 251,
+      "source_sha256": "c42a3c633131e2e36cc2e94f496c2822426056f27b3aba790a6c07a851dfa98a",
+      "target": "sections/run-setup.md.tmpl",
+      "target_sha256": "c42a3c633131e2e36cc2e94f496c2822426056f27b3aba790a6c07a851dfa98a",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-1",
+      "source_heading": "# /autobuilder-loop",
+      "source_start_line": 32,
+      "source_sha256": "c1c7f0bd93df51f9a16433770da963fa131c2c9f073af4f2d5aaff52617527fd",
+      "target": "sections/contracts.md.tmpl",
+      "target_sha256": "7ca615f9f0a700f26074c3c461cbc4dac426734674b5006e574ced95055f5382",
+      "change": "G1: remove inline meter permission; explicitly permit contracted host executor chores/checks, keeping judgment, edits and conflict resolution with routed agents"
+    },
+    {
+      "id": "round1-2",
+      "source_heading": "## Model routing",
+      "source_start_line": 98,
+      "source_sha256": "cf98a5e0ab1189fa6dedee791a9274cea90fa5dd33bb14ce9680b259f9d6a042",
+      "target": "sections/contracts.md.tmpl",
+      "target_sha256": "cf98a5e0ab1189fa6dedee791a9274cea90fa5dd33bb14ce9680b259f9d6a042",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-3",
+      "source_heading": "## Measurement and deterministic operations",
+      "source_start_line": 234,
+      "source_sha256": "847d8d55b9f88bc4a395774d699922609e3389562d072a97467f67da1d27f375",
+      "target": "sections/contracts.md.tmpl",
+      "target_sha256": "847d8d55b9f88bc4a395774d699922609e3389562d072a97467f67da1d27f375",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-11",
+      "source_heading": "## Important Rules",
+      "source_start_line": 907,
+      "source_sha256": "a653327e1b9063e76b0173b70c84dfefde7cac2c3b7719f786b20fa5c07e9097",
+      "target": "sections/contracts.md.tmpl",
+      "target_sha256": "a653327e1b9063e76b0173b70c84dfefde7cac2c3b7719f786b20fa5c07e9097",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-5",
+      "source_heading": "### 1. Build the next milestone",
+      "source_start_line": 399,
+      "source_sha256": "9e84973cf43c5d751a9a26ca8dde9b7bba7be5f47c73bdd4daa1ca74c57bb813",
+      "target": "sections/build.md.tmpl",
+      "target_sha256": "9e84973cf43c5d751a9a26ca8dde9b7bba7be5f47c73bdd4daa1ca74c57bb813",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-6",
+      "source_heading": "**c. MILESTONE GATE",
+      "source_start_line": 497,
+      "source_sha256": "5e24ea011cb3bc2bdfb070bb2e5fc57c9ef41b4fe936e804e7fb8a06db9929cf",
+      "target": "sections/gate.md.tmpl",
+      "target_sha256": "5e24ea011cb3bc2bdfb070bb2e5fc57c9ef41b4fe936e804e7fb8a06db9929cf",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-7",
+      "source_heading": "**f. LOC meter",
+      "source_start_line": 610,
+      "source_sha256": "0e29465dba2116f9b6469ef760fbeed058017f5c6306509be40cdca4f2b2cf68",
+      "target": "sections/release.md.tmpl",
+      "target_sha256": "0e29465dba2116f9b6469ef760fbeed058017f5c6306509be40cdca4f2b2cf68",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-8",
+      "source_heading": "### 2. Repeat",
+      "source_start_line": 683,
+      "source_sha256": "528fd51bb007f43824d929c8aec3389f5c1af4820113af4cbbbbf3777af132d4",
+      "target": "sections/release.md.tmpl",
+      "target_sha256": "528fd51bb007f43824d929c8aec3389f5c1af4820113af4cbbbbf3777af132d4",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-9",
+      "source_heading": "## Completion & hand-off",
+      "source_start_line": 705,
+      "source_sha256": "a0535283d0412de46c0064e1335782a26b2af64b8e283ebb6affda81f4e82947",
+      "target": "sections/release.md.tmpl",
+      "target_sha256": "a0535283d0412de46c0064e1335782a26b2af64b8e283ebb6affda81f4e82947",
+      "change": "verbatim"
+    },
+    {
+      "id": "round1-10",
+      "source_heading": "## Quick reference",
+      "source_start_line": 757,
+      "source_sha256": "e2878bb37257bd35393e1505e26be2a989500fec1913a62e0badf8e87de58861",
+      "target": "sections/workflow-reference.md.tmpl",
+      "target_sha256": "e2878bb37257bd35393e1505e26be2a989500fec1913a62e0badf8e87de58861",
+      "change": "verbatim"
+    }
+  ]
+}

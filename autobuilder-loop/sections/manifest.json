@@ -13,6 +13,48 @@
       "file": "seat-c-review.md",
       "title": "Seat C canonical review methods",
       "trigger": "Seat C reviews an immutable range (reviewer reads this reference)"
+    },
+    {
+      "id": "run-setup",
+      "file": "run-setup.md",
+      "title": "Run Setup",
+      "trigger": "starting or resuming a run, before any repository or provider action"
+    },
+    {
+      "id": "contracts",
+      "file": "contracts.md",
+      "title": "Contracts",
+      "trigger": "classifying or dispatching work, selecting a model or resolving an authority question"
+    },
+    {
+      "id": "build",
+      "file": "build.md",
+      "title": "Build",
+      "trigger": "resolving the next milestone or building with the static-wave fallback"
+    },
+    {
+      "id": "gate",
+      "file": "gate.md",
+      "title": "Gate",
+      "trigger": "verifying a completed milestone, including Docker, mutation and either review seat"
+    },
+    {
+      "id": "release",
+      "file": "release.md",
+      "title": "Release",
+      "trigger": "checkpointing, merging, repeating or declaring the whole plan complete"
+    },
+    {
+      "id": "workflow-reference",
+      "file": "workflow-reference.md",
+      "title": "Workflow Reference",
+      "trigger": "launching or resuming Workflow, using PATCH, or diagnosing gate evidence"
+    },
+    {
+      "id": "continuous-queue",
+      "file": "continuous-queue.md",
+      "title": "Host executor and continuous admission",
+      "trigger": "using the experimental continuous queue or shared exploration, including recovery and cancellation"
     }
   ]
 }

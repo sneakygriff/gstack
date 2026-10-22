@@ -1,0 +1,155 @@
+<!-- PRESERVED:round1-0:BEGIN -->
+{{PREAMBLE}}
+
+{{BASE_BRANCH_DETECT}}
+<!-- PRESERVED:round1-0:END -->
+
+<!-- PRESERVED:round1-4:BEGIN -->
+## The loop
+
+<!-- retro-2026-10-19 item 7 --> **The per-unit loop is implemented by
+`~/.claude/skills/gstack/autobuilder-loop/autobuilder-unit.js`.** Launch it once per ship-unit with the
+`Workflow` tool (copy it to the session scratchpad first; the tool refuses a scriptPath outside the
+session — recipe in Quick reference). It runs Refresh → Build (waves) → Integrate + SHIP_METER → Gate
+→ Fix → Ship (or the PATCH flow), writes `$RUN_DIR/state.json` at every phase boundary, and NEVER
+merges. This section is the policy the script encodes plus what it leaves to you: decisions, merges,
+the audit trail, flow sizing, and the hardening batch. Narrate continuously — the user should always
+know what just finished, what is running now, and what is next.
+
+### 0. Set up the run workspace, resolve the plan, probe Fable + lanes
+
+**Run workspace.** Establish a run-scoped state directory (all paths absolute). `gstack-slug`
+sets `$SLUG` and `$BRANCH`:
+
+```bash
+eval "$(~/.claude/skills/gstack/bin/gstack-slug)"
+DATETIME=$(date +%Y%m%d-%H%M%S)
+RUN_DIR="$HOME/.gstack/projects/$SLUG/autobuilder/${BRANCH}-${DATETIME}"
+mkdir -p "$RUN_DIR/briefs" "$RUN_DIR/reports" "$RUN_DIR/gates"
+: > "$RUN_DIR/audit-trail.md"; [ -s "$RUN_DIR/hardening.json" ] || echo '[]' > "$RUN_DIR/hardening.json"
+printf '{"unit":null,"flow":null,"phase":"setup","workflow_run_id":null,"lane_head":null,"ship_base":null,"open_decisions":[],"lanes_roster":null,"round":0,"updated_at":"%s"}\n' "$(date -u +%FT%TZ)" > "$RUN_DIR/state.json"
+_CFG=~/.claude/skills/gstack/bin/gstack-config
+OVERFLOW_DIR=$($_CFG get claude_overflow_dir 2>/dev/null); OVERFLOW_DIR=${OVERFLOW_DIR:-$HOME/.claude-overflow}
+MAX_PARALLEL=$($_CFG get autobuilder_max_parallel 2>/dev/null); MAX_PARALLEL=${MAX_PARALLEL:-6}
+echo "RUN_DIR=$RUN_DIR OVERFLOW_DIR=$OVERFLOW_DIR MAX_PARALLEL=$MAX_PARALLEL"
+```
+
+<!-- retro-2026-10-19 item 11 --> `state.json` (`{unit, flow, phase, workflow_run_id, lane_head,
+ship_base, open_decisions, lanes_roster, round, updated_at}`) is the machine-readable resume point:
+the unit script rewrites it at every phase boundary, you update it at step g, and any resume reads it
+before any narrative checkpoint (Resume paths). Resuming an earlier run → reuse ITS `RUN_DIR`; never
+mint a new one over a run whose `state.json` names a live workflow.
+
+An **R-class Haiku resolver/scribe** subagent authors every brief into `$RUN_DIR/briefs/` and returns
+only its path; every subagent writes its full report into `$RUN_DIR/reports/`. You never author
+briefs and never inline repo/source content into prompts.
+
+**Probe Fable** now (per Model routing) and cache the routing decision for the whole run.
+
+**Probe the lanes.** Run `~/.claude/skills/gstack/bin/gstack-lane probe --run-dir "$RUN_DIR" --lanes l2,l3`
+(top-level Bash; never L4; one line per lane, writes `$RUN_DIR/lanes.json` — `status: ok|cooling|absent`,
+`reason`, `next_probe_at`, `runtime_model`). L2: haiku "reply OK"; L3: `gpt-6-luna` low under the
+hermetic home. <!-- v1.8 decision D-A --> L3's status IS Astra's (Codex models share one quota
+bucket), so no scarce Astra message is spent probing. Print the roster. If L3 is cooling/absent, tell
+the operator ONCE, before the first gate: Seat X is ABSENT, so gates wait for the reset (an ordinary
+gate closes `DEGRADED` only if policy question 6 allows it; critical gates always wait). A cooling/absent
+lane's rows spill to the next lane in the routing table; absent/cooling lanes are re-probed at every
+milestone and gate start. Operator notes, printed
+once, never blocking: **L2 needs a one-time interactive login** (`CLAUDE_CONFIG_DIR=~/.claude-overflow
+claude` → `/login` with the second account; until then L2 is ABSENT and T3 spills to L3 Astra → L1
+Opus 5.5); pooling two subscriptions is the operator's call (plan terms assume individual use).
+
+**Permissions (auto mode).** The operator needs ONE allow rule for `~/.claude/skills/gstack/bin/gstack-lane`.
+A denied lane launch → that lane is ABSENT for the run; spill. NEVER work around the denial (no inlined
+`codex`/`claude -p`, no copied auth files).
+
+**Resolve the plan source.** Dispatch the R-class Haiku resolver. Precedence:
+explicit arg path > newest approved plan under the gstack plans dir > `SPEC.md` / `PLAN.md`
+bearing an approval marker > root `TODOS.md`. The resolver returns
+`{path, approval_evidence, milestone_count}` and writes the full parse to a report file. Do
+NOT read the plan into your own context.
+
+- If more than one candidate matches, AskUserQuestion ONCE (decision-brief format from the
+  preamble) and stop until answered.
+- If NO approval evidence is found, STOP with `BLOCKED` / `NEEDS_CONTEXT` rather than
+  building an unapproved (possibly stale) spec. This skill's premise is that the plan is
+  already approved.
+
+**Chunk into ship-units (BEFORE the freeze — this is a hard requirement, not a preference).**
+<!-- retro-2026-10-19 item 6 --> Unchunked runs balloon: past runs ended at 10-20k lines of diff in one
+deploy, where nobody still holds full context. So: an **orchestration-class** subagent (Fable / Opus
+5.5 / Opus 4.8-max) estimates production LOC per milestone and decides any split — judgment, never R
+work. Group consecutive milestones into **ship-units of ≤2,500 projected production LOC** (tests do
+not count toward the cap). A SINGLE milestone projected over the cap is split here, at resolution,
+with the split shown to the user — never silently, never after the freeze. Pre-agreed cut boundaries
+are recorded now and fire automatically at the meter (policy packet). Each ship-unit ends in a
+**/ship checkpoint** (step f).
+
+Record the ship-unit boundaries AND the meter base commit in the audit trail, and persist the
+base to disk — shell variables do NOT survive across Bash invocations, so the meter base must
+live in a file, and a resume must reuse it rather than silently re-zeroing accumulated LOC:
+
+```bash
+# Project-level, branch-scoped — NOT inside $RUN_DIR (every invocation mints a fresh RUN_DIR, so a
+# run-scoped base would silently re-zero unshipped LOC on every resume).
+SHIP_BASE_FILE="$HOME/.gstack/projects/$SLUG/autobuilder/${BRANCH}-ship-base"
+mkdir -p "$(dirname "$SHIP_BASE_FILE")"
+[ -s "$SHIP_BASE_FILE" ] || git rev-parse HEAD > "$SHIP_BASE_FILE"
+echo "SHIP_BASE=$(cat "$SHIP_BASE_FILE") (file: $SHIP_BASE_FILE)"
+```
+
+A leftover base from a PRIOR completed run would inflate the meter — completion (below)
+deletes the file, and if the recorded base predates the plan's approval commit, tell the
+user and re-init with their confirmation.
+
+**Freeze the milestone set.** The ordered milestone list (with resolution-time splits) is the
+frozen contract; completion (step 2) is defined over it only. New milestones need explicit user
+approval, never silent promotion of follow-ups. Ship-unit boundaries freeze as a CEILING: the meter
+may end a unit early, but never skips a planned checkpoint or merges two units.
+
+**Worktree preflight (ONCE, at kickoff).** Milestone commits stage EVERYTHING in the worktree
+(`gstack-lane commit`'s secret guard catches credential-shaped paths, not arbitrary WIP), so
+unrelated modified/untracked files — secrets, a stray `.env`, someone else's WIP — would ride into
+the first commit and later be published. This is the one point the user is present to catch it. Run `git status --porcelain`; if non-empty, STOP and AskUserQuestion ONCE
+(decision-brief format from the preamble):
+- **A) Stash unrelated changes (recommended)** — a subagent runs
+  `git stash push -u -m "autobuilder-preflight"`; note in the run report to `git stash pop`
+  after the loop finishes.
+- **B) Proceed and include them in milestone commits** — explicit user consent to fold the
+  existing dirty state into this run's commits.
+- **C) Abort** — surface `BLOCKED`.
+A clean `git status --porcelain` needs no question — proceed.
+
+**Environment preflight (ONCE; record each result in the audit trail and `state.json`).**
+<!-- retro-2026-10-19 item 10 --> (a) **Sibling-worktree edit hook:** one probe subagent makes a
+throwaway Edit inside the lane worktree and reverts it (`git status --porcelain` empty again); if a hook
+blocks it, set "Claude lane edits go through Bash" for the run (every Claude implementer brief says so). (b) **Codex cannot write the git index:** the
+helper / the script's wrapper owns git for Codex tasks — never ask Codex to commit. (c) **Keep-awake:**
+start `caffeinate -i` for the run (pid in `$RUN_DIR/caffeinate.pid`) and warn that keep-awake does not
+survive lid close. (d) **Docker watchdog:** an R subagent starts a liveness watchdog — `docker info`
+every 60 s under a 20 s deadline enforced with `kill -9` (Go's docker CLI ignores SIGALRM), exiting on a
+>5 min wall-clock gap (the host slept); a dead Docker VM is reported, never waited on. (e) **Test DB:**
+record the shared test-DB port and the private-DB helper the briefs must use.
+
+**Policy packet (ONCE, after the preflights).** <!-- retro-2026-10-19 item 4 --> Ask the per-unit
+questions up front so the loop never parks on them: decision-brief format, split across calls per the
+preamble's 5+ rule. Record the answers in the audit trail and `state.json`.
+1. **Merge-on-green** — after a CLEAN (or operator-accepted DEGRADED) gate plus green CI, YOU
+   squash-merge (`env -u GH_REPO -u GH_HOST gh pr merge <n> --squash --repo '<prs[unit].repo>'`) and continue: yes / no (no default; ask).
+2. **Max full gate rounds before asking** — default 3, plus ONE automatic 4th round when round 3
+   found a NEW `[P1]` whose fix is in scope.
+3. **Cut rule** — the pre-agreed ship-unit boundaries fire automatically at the meter: yes / ask.
+4. **Copy rule** — a new user-visible string blocks on the operator / is batched into one
+   milestone copy packet.
+5. **Shortcut policy** — ship with open kept `[P1]`s (`shipOpenP1`): never / only by explicit decision.
+6. **Cooling Codex lane on an ORDINARY gate** — wait for the reset (recommended) / close the gate
+   `DEGRADED` and ship it with this answer as the accepted record (`acceptDegraded`). Critical gates
+   always wait.
+
+**Unattended mode.** When no operator message has arrived for **45 minutes** (default) and a
+decision point is reached, take the recommended option, log `auto-decided (unattended): <question>`
+in the audit trail, and continue with the next independent unit. **One-way doors are queued, never
+auto-decided:** merge without CI, force push, any production touch, scope additions, user-visible
+copy. Keep working on anything that does not depend on them; collect every question raised while
+unattended into ONE packet the operator answers in one sitting.
+<!-- PRESERVED:round1-4:END -->

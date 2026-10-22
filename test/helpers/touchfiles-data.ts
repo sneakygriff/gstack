@@ -1496,7 +1496,7 @@ export const E2E_TIERS: Record<string, 'gate' | 'periodic'> = {
  */
 export const LLM_JUDGE_TOUCHFILES: Record<string, string[]> = {
   'autobuilder-loop/SKILL.md workflow': [
-    'autobuilder-loop/**', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts',
+    'autobuilder-loop/**', 'lib/autobuilder-*.ts', 'bin/gstack-autobuilder-ops', 'scripts/resolvers/preamble.ts', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts',
     'plan-eng-review/SKILL.md.tmpl', 'plan-eng-review/sections/review-sections.md.tmpl',
     'review/SKILL.md.tmpl', 'review/checklist.md', 'scripts/resolvers/testing.ts',
     'scripts/resolvers/shared-libs.ts', 'scripts/resolvers/confidence.ts',

@@ -119,7 +119,7 @@ describe('autobuilder-loop forum vs outside-voices panel — divergence pin (M3 
       const entries = fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
       expect(entries.sort()).toEqual(['SKILL.md', 'SKILL.md.tmpl', 'autobuilder-unit.js', 'sections']);
       const manifest = JSON.parse(fs.readFileSync(path.join(sectionDir, 'manifest.json'), 'utf8'));
-      const covered = ['manifest.json', ...manifest.sections.flatMap((entry: { file: string }) => [entry.file, `${entry.file}.tmpl`])];
+      const covered = ['manifest.json', 'preservation.json', ...manifest.sections.flatMap((entry: { file: string }) => [entry.file, `${entry.file}.tmpl`])];
       expect(fs.readdirSync(sectionDir).filter(f => !f.startsWith('.')).sort()).toEqual(covered.sort());
     });
 

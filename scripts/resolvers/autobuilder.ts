@@ -11,14 +11,18 @@ export const SEAT_C_SOURCES = [
   ['review/SKILL.md.tmpl', '## Step 2: Read the checklist', '## Step 2.5:'],
   ['review/SKILL.md.tmpl', 'Apply both checklist passes in order:', '{{SECTION:review-army}}'],
 ] as const;
+export function extractCanonicalBlock(source: string, start: string, end: string, file: string): string {
+  const a = source.indexOf(start), b = source.indexOf(end, a + start.length);
+  if (a < 0 || b < 0 || source.indexOf(start, a + start.length) >= 0 || source.indexOf(end, b + end.length) >= 0)
+    throw new Error(`Seat C source boundary missing or ambiguous: ${file}`);
+  return source.slice(a, b).trim();
+}
 export function generateAutobuilderSeatC(ctx: TemplateContext): string {
   const root = path.resolve(import.meta.dir, '../..');
   return SEAT_C_SOURCES.map(([file, start, end]) => {
     const source = fs.readFileSync(path.join(root, file), 'utf8');
-    const a = source.indexOf(start), b = source.indexOf(end, a + start.length);
-    if (a < 0 || b < 0) throw new Error(`Seat C source boundary missing: ${file}`);
     // Use /review's calibration, not autobuilder's generic confidence variant.
-    const body = source.slice(a, b).trim().replace('{{CONFIDENCE_CALIBRATION}}', generateConfidenceCalibration({ ...ctx, skillName: 'review' }));
+    const body = extractCanonicalBlock(source, start, end, file).replace('{{CONFIDENCE_CALIBRATION}}', generateConfidenceCalibration({ ...ctx, skillName: 'review' }));
     return `<!-- Canonical source: ${file} | ${start} -->\n${body}`;
   }).join('\n\n');
 }
