@@ -4,6 +4,8 @@
 ab_fail() {
   if [ "${1:-}" = meter ]; then
     printf '%s\n' 'SHIP_METER FAIL: operation failed'
+  elif [ "${1:-}" = queue ] || [ "${1:-}" = exploration ]; then
+    printf '%s\n' '{"status":"BLOCKED","reason":"launcher_failed"}'
   else
     printf '%s\n' 'FAILED: state operation failed'
   fi
