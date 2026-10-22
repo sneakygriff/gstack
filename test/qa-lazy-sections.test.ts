@@ -162,8 +162,8 @@ describe('QA-only cross-host lazy rendering', () => {
         expect(fs.readFileSync(path.join(rendered, dir, 'SKILL.md'), 'utf8')).not.toContain(body.split('\n').slice(2).join('\n').trim());
       }
       const outside = generated.artifacts.filter(artifact => artifact.host === host.name && artifact.kind === 'section'
-        && !/^(?:qa|qa-only)\//.test(artifact.relativePath)
-        && !/\/gstack-qa(?:-only)?\//.test(artifact.relativePath));
+        && !/^(?:qa|qa-only|autobuilder-loop)\//.test(artifact.relativePath)
+        && !/\/gstack-(?:qa(?:-only)?|autobuilder-loop)\//.test(artifact.relativePath));
       expect(outside.length > 0).toBe(host.name === 'claude');
       const ctx = context(host.name, 'ship');
       const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'ship/sections/manifest.json'), 'utf8'));

@@ -26,11 +26,13 @@ const ROOT = path.resolve(import.meta.dir, '..');
 const TMPL_PATH = path.join(ROOT, 'autobuilder-loop', 'SKILL.md.tmpl');
 const GENERATED_PATH = path.join(ROOT, 'autobuilder-loop', 'SKILL.md');
 
-const AUTOBUILDER_TMPL = fs.readFileSync(TMPL_PATH, 'utf-8');
-const AUTOBUILDER_GENERATED = fs.readFileSync(GENERATED_PATH, 'utf-8');
+const sectionDir = path.join(ROOT, 'autobuilder-loop', 'sections');
+const sectionText = (suffix: string) => fs.readdirSync(sectionDir).filter(f => f.endsWith(suffix)).sort().map(f => fs.readFileSync(path.join(sectionDir, f), 'utf8')).join('\n');
+const AUTOBUILDER_TMPL = fs.readFileSync(TMPL_PATH, 'utf-8') + sectionText('.md.tmpl');
+const AUTOBUILDER_GENERATED = fs.readFileSync(GENERATED_PATH, 'utf-8') + sectionText('.md');
 
 describe('autobuilder-loop forum vs outside-voices panel — divergence pin (M3 T5)', () => {
-  describe('union-FAIL literals are present verbatim, in both the .tmpl source and the generated SKILL.md', () => {
+  describe('union-FAIL literals are present verbatim, in both composed template and generated sources', () => {
     // "a kept [P1] from EITHER model FAILs the gate" — the cross-model gate rule
     // stated where the forum step is introduced. v1.8 round-1 ruling R3: the
     // gate verdict counts KEPT (post-consolidation) P1s, so the literal says "kept".
@@ -112,10 +114,13 @@ describe('autobuilder-loop forum vs outside-voices panel — divergence pin (M3 
     // autobuilder-unit.js as the third file. This pin still fails loudly
     // (rather than silently under-covering) if a future edit adds a fourth
     // file under autobuilder-loop/ that this test doesn't also scan.
-    test('autobuilder-loop/ contains only SKILL.md.tmpl, the generated SKILL.md and autobuilder-unit.js (no untracked-by-this-test files)', () => {
+    test('all autobuilder entrypoints and sections are included in the policy scan', () => {
       const dir = path.join(ROOT, 'autobuilder-loop');
       const entries = fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
-      expect(entries.sort()).toEqual(['SKILL.md', 'SKILL.md.tmpl', 'autobuilder-unit.js']);
+      expect(entries.sort()).toEqual(['SKILL.md', 'SKILL.md.tmpl', 'autobuilder-unit.js', 'sections']);
+      const manifest = JSON.parse(fs.readFileSync(path.join(sectionDir, 'manifest.json'), 'utf8'));
+      const covered = ['manifest.json', ...manifest.sections.flatMap((entry: { file: string }) => [entry.file, `${entry.file}.tmpl`])];
+      expect(fs.readdirSync(sectionDir).filter(f => !f.startsWith('.')).sort()).toEqual(covered.sort());
     });
 
     // The unit workflow computes the gate verdict in code, so it gets the same

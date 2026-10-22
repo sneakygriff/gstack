@@ -588,6 +588,22 @@ describeIfSelected('Ship & Release skill evals', ['ship/SKILL.md workflow', 'doc
   }, WORKFLOW_JUDGE_TEST_MS);
 });
 
+// Autobuilder's carved references must be judged together with their calling gate policy.
+describeIfSelected('Autobuilder workflow eval', ['autobuilder-loop/SKILL.md workflow'], () => {
+  testIfSelected('autobuilder-loop/SKILL.md workflow', async () => {
+    await runWorkflowJudge({
+      testName: 'autobuilder-loop/SKILL.md workflow',
+      suite: 'Autobuilder workflow eval',
+      skillPath: 'autobuilder-loop/SKILL.md',
+      startMarker: '# /autobuilder-loop',
+      endMarker: null,
+      references: ['review/checklist.md'],
+      judgeContext: 'an approved-plan orchestrator with conditional manual recipes and a generated findings-only Seat C review reference',
+      judgeGoal: 'preserve both review seats, the union of kept P1 blockers, critical Astra requirements, invalid-versus-absent distinction, Docker and mutation checks, and completion evidence; reviewers must load the full focused methods and canonical checklist, never treat missing references as clean; checkpoint metrics describe logical calls and characters rather than billing; only manual gate execution loads manual recipes; extracted planning language must not cause Seat C to ask questions or edit files',
+    });
+  }, WORKFLOW_JUDGE_TEST_MS);
+});
+
 // Block 2: Plan Review skills
 describeIfSelected('Plan Review skill evals', [
   'plan-ceo-review/SKILL.md modes', 'plan-eng-review/SKILL.md sections', 'plan-design-review/SKILL.md passes',

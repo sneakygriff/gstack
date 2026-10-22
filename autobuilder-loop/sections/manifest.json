@@ -1,0 +1,18 @@
+{
+  "skill": "autobuilder-loop",
+  "version": 1,
+  "sections": [
+    {
+      "id": "manual-gate",
+      "file": "manual-gate.md",
+      "title": "Manual gate execution",
+      "trigger": "executing a gate manually without Workflow, or diagnosing gate evidence"
+    },
+    {
+      "id": "seat-c-review",
+      "file": "seat-c-review.md",
+      "title": "Seat C canonical review methods",
+      "trigger": "Seat C reviews an immutable range (reviewer reads this reference)"
+    }
+  ]
+}

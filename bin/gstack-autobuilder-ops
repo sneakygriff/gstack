@@ -1,0 +1,11 @@
+#!/usr/bin/env bun
+import { updateState, measureSize } from '../lib/autobuilder-ops';
+const [op, ...args] = process.argv.slice(2);
+try {
+  if (op === 'state' && args.length === 1) { updateState(JSON.parse(args[0])); console.log('ok'); }
+  else if (op === 'meter' && args.length === 2) console.log(measureSize(args[0], args[1]).line);
+  else throw new Error('usage');
+} catch {
+  console.log(op === 'meter' ? 'SHIP_METER FAIL: operation failed' : 'FAILED: state operation failed');
+  process.exitCode = 1;
+}

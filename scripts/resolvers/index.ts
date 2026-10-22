@@ -15,6 +15,7 @@
  */
 
 import type { TemplateContext, ResolverFn } from './types';
+import { generateAutobuilderSeatC } from './autobuilder';
 import { outsideVoiceFor, outsideVoiceGuard, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, generateOutsideVoiceRouting } from './outside-voice';
 
 // Domain modules
@@ -44,6 +45,7 @@ import { generateTestValueBar, generateTestValueMessage } from './test-value';
 import { generateQAScope, generateQAExploratory, generateQAFunctional, generateQAResource, generateQAReview, generateQAReviewPreflight, generateQAMethodReads } from './qa';
 
 export const RESOLVERS: Record<string, ResolverFn> = {
+  AUTOBUILDER_SEAT_C: generateAutobuilderSeatC,
   AUTOPLAN_PUBLICATION_HOOK: generateAutoplanPublicationHook,
   OUTSIDE_SELF_GUARD: (ctx, args) => outsideVoiceGuard({ ...ctx, host: args?.[0] === 'claude-code' ? 'codex' : 'claude' }),
   OUTSIDE_VOICE_ROUTING: generateOutsideVoiceRouting,

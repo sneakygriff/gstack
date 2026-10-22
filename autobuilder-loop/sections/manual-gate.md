@@ -1,0 +1,133 @@
+<!-- AUTO-GENERATED from manual-gate.md.tmpl — do not edit directly -->
+<!-- Regenerate: bun run gen:skill-docs -->
+# Manual gate execution
+
+These recipes implement the same gate as `autobuilder-unit.js`. Read only when
+executing the gate without Workflow, or diagnosing gate evidence. The entrypoint
+owns policy, diversity floors and final verdicts.
+
+*Gate start — ONE top-level Bash call per gate round (re-run it at the new HEAD after fix commits):*
+
+```bash
+_LANE=~/.claude/skills/gstack/bin/gstack-lane
+# Re-probe lanes that were absent/cooling in the last roster — a repaired login or an expired cooldown
+# must be seen at THIS gate; only `codex_reviews`=disabled persists across gates. (Skip when none.)
+$_LANE probe --run-dir "$RUN_DIR" --lanes <absent/cooling lanes from the last roster, e.g. l2,l3>
+GATE_CLASS=<ordinary|critical>   # critical = the milestone (or a deferred one in its union) contains a T3 task, or it is the FINAL milestone
+# BOTH diff endpoints are IMMUTABLE SHAs — never a moving ref. BASE_SHA is resolved in round 1 only and reused
+# from the gate env after (a fetch must not move the rulings register's diff); REVIEWED_SHA is this round's HEAD.
+BASE_SHA=$(sed -n 's/^BASE_SHA=//p' "$RUN_DIR/gates/<m>/env" 2>/dev/null)
+[ -n "$BASE_SHA" ] || BASE_SHA=$(git rev-parse --verify "origin/<base>^{commit}" 2>/dev/null || git rev-parse --verify "<base>^{commit}") || { echo "gate: base <base> does not resolve — BLOCKED"; exit 1; }
+REVIEWED_SHA=$(git rev-parse --verify "HEAD^{commit}") || { echo "gate: HEAD does not resolve — BLOCKED"; exit 1; }
+mkdir -p "$RUN_DIR/gates/<m>" && printf 'GATE_CLASS=%s\nBASE_SHA=%s\nREVIEWED_SHA=%s\n' "$GATE_CLASS" "$BASE_SHA" "$REVIEWED_SHA" > "$RUN_DIR/gates/<m>/env"
+[ -s "$RUN_DIR/gates/<m>/rulings.json" ] || echo '[]' > "$RUN_DIR/gates/<m>/rulings.json"   # the rulings register survives rounds + resume
+for _mem in codex claude; do   # one disposable detached worktree PER seat — never shared
+  $_LANE worktree add --run-dir "$RUN_DIR" --task "gate-<m>-$_mem" --base "$REVIEWED_SHA" --detach >/dev/null || echo "gate: worktree for $_mem failed — that seat is ABSENT this round"
+done
+echo "gate <m>: class=$GATE_CLASS base_sha=$BASE_SHA reviewed_sha=$REVIEWED_SHA"
+```
+
+*Adjudication is mechanical — `gstack-lane adjudicate` decides Seat X; you only branch on its line.*
+It applies INVALID-before-ABSENT: `tainted` (any class), any helper `class: error` (a `rejected`
+refusal, a crash, a non-zero exit — even with `[P1]`s in the body), an empty body, an attempt or
+`reviewed_sha` mismatch, and a `runtime_model` that is null or not policy-compatible (`critical` →
+`gpt-6-astra`; `ordinary` → `gpt-6-astra` or the substituting `gpt-6.1-sol`) ⇒ `INVALID`, a FAIL that
+NEVER maps to ABSENT. `auth` / `quota` / `timeout` / `throttle` / skipped ⇒ `ABSENT`. A body whose last
+non-empty line is not `REVIEW_COMPLETE: findings=<n>` is INVALID (reason=no-completion-marker), so an
+"unable to review" reply never counts as clean. Otherwise it counts `[P1]`/`[P0]` tags that lead a line
+(or follow a list marker) → `PRESENT_P1` or `PRESENT_CLEAN`. The skill adds exactly two ABSENT mappings
+of its own: a seat disabled by config, and a helper that never ran (denied / missing: exit 126/127 or
+no `VERDICT=` line). An R/Haiku worker may only run `adjudicate` and relay its line verbatim; reading
+finding text beyond `p1_count` — e.g. briefing the fix round — is synthesis-tier work. Every invocation
+uses a FRESH attempt dir `$RUN_DIR/attempts/gate-<m>-<member>/<attempt_id>/` (`run` refuses an
+existing `--out`).
+
+*Seat X — Codex `gpt-6-astra` high under the hermetic `CODEX_HOME` the helper keeps OUTSIDE the run
+tree. Substitution rule: on an ORDINARY gate whose Astra attempt ended `timeout` (after its medium
+retry) or `error`, ONE `gpt-6.1-sol` high run substitutes, recorded `substituted: astra->sol (<class>)`.
+Never on `auth`, `quota`/cooling or a disabled seat: L3 cools lane-wide (`run` refuses a cooling lane),
+so Sol cannot run after an Astra `quota` — Seat X is ABSENT and the gate waits for the reset (Resume
+paths 2), unless policy question 6 lets an ordinary gate close `DEGRADED`. A CRITICAL gate never
+substitutes and always waits — never Sol, never `CLEAN` without Astra:*
+
+```bash
+# `auth` or codex_reviews disabled → ABSENT, never a gate FAIL alone. Only disabled is run-durable; run this
+# full recipe at EVERY gate. Gate on the EXPLICIT negative only (live failure 2026-08-15: `!= "on"`).
+_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
+# Helper-run ladders, never `ultra`: TIMEOUT -> ONE retry, stepping down to medium under --retry-timeout;
+# THROTTLE -> backoff inside the deadline; QUOTA -> lane cools until next_probe_at, ABSENT for THIS gate only.
+_LANE=~/.claude/skills/gstack/bin/gstack-lane
+. "$RUN_DIR/gates/<m>/env"   # GATE_CLASS + BASE_SHA + REVIEWED_SHA from the gate-start block
+{ echo "Already adjudicated in this unit (do not re-file without new facts):"; cat "$RUN_DIR/gates/<m>/rulings.json"; echo
+cat <<EOF
+IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.
+
+Review the commits $BASE_SHA...$REVIEWED_SHA (this checkout is at $REVIEWED_SHA). Run git diff $BASE_SHA...$REVIEWED_SHA to see the diff and review only those changes. Think like an attacker and a chaos engineer: edge cases, races, security holes, failure modes. Tag every finding [P1] (ship-blocker) or [P2] (lower severity), one finding per line with the tag first. CHANGELOG/docs prose is never [P1]. If there are no [P1] issues, say so explicitly. End your review with exactly this final line and nothing after it: REVIEW_COMPLETE: findings=<n> (n = the number of [P1]/[P2] findings you listed; 0 if none) — but ONLY if you actually read and reviewed the diff; if you could not, end instead with REVIEW_INCOMPLETE: <reason>.
+EOF
+} > "$RUN_DIR/briefs/gate-<m>-codex.prompt"
+_CODEX_STATUS=ABSENT; _V=""; _PREV=""
+if [ "$_CODEX_ENABLED" = "disabled" ] || [ "$_CODEX_ENABLED" = "off" ]; then
+  _CODEX_STATUS=disabled   # the config gate must actually GATE — a computed-but-untested flag is dead code
+  echo "Codex seat disabled (codex_reviews=$_CODEX_ENABLED) — ABSENT by user config (the one run-durable skip)."
+else
+  for _CM in gpt-6-astra gpt-6.1-sol; do
+    if [ "$_CM" = gpt-6.1-sol ]; then   # substitution: ordinary gate + Astra timeout/error ONLY (never auth/quota/cooling)
+      [ "$GATE_CLASS" = ordinary ] || break
+      case "$_V" in *" reason=timeout "*|*" reason=class_error "*|*" reason=rejected "*) ;; *) break ;; esac
+      echo "codex substituted: astra->sol ($_V)"; _PREV=$_CODEX_STATUS
+    fi
+    case "$_CM" in gpt-6-astra) _to=900; _rto=420 ;; *) _to=600; _rto=300 ;; esac
+    _AID=$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM; _ADIR="$RUN_DIR/attempts/gate-<m>-codex/$_AID"; _OUT="$_ADIR/review.md"
+    if ! mkdir -p "$_ADIR" || [ -e "$_OUT" ]; then echo "Codex attempt dir not fresh ($_ADIR) — ABSENT; never reuse a prior attempt's evidence."; _CODEX_STATUS=ABSENT; continue; fi
+    # The helper enforces the deadline on the whole process tree; there is NO unwrapped fallback — a missing/denied
+    # helper never adjudicates (exit 126/127, no VERDICT line) and maps to ABSENT, never to an unbounded run.
+    $_LANE run --run-dir "$RUN_DIR" --lane l3 --mode review --model "$_CM" --effort high \
+      --timeout "$_to" --retry-timeout "$_rto" --cwd "$RUN_DIR/wt/gate-<m>-codex" \
+      --prompt-file "$RUN_DIR/briefs/gate-<m>-codex.prompt" --out "$_OUT" >/dev/null 2>&1
+    $_LANE summary --out "$_OUT" 2>/dev/null
+    _V=$($_LANE adjudicate --out "$_OUT" --seat codex --gate-class "$GATE_CLASS" --reviewed-sha "$REVIEWED_SHA" --requested-model "$_CM" 2>/dev/null); _RC=$?
+    echo "codex ${_V:-VERDICT=ABSENT reason=no_verdict_line adjudicate_exit=$_RC}"
+    case "$_RC" in 0) _CODEX_STATUS=PRESENT_CLEAN ;; 10) _CODEX_STATUS=PRESENT_P1 ;; 11) _CODEX_STATUS=INVALID ;; *) _CODEX_STATUS=ABSENT ;; esac
+    case "$_CODEX_STATUS" in PRESENT_*) break ;; esac
+  done
+  [ "$_CODEX_STATUS:$_PREV" = ABSENT:INVALID ] && _CODEX_STATUS=INVALID   # an ABSENT Sol (any path) never launders Astra's INVALID
+fi
+case "$_CODEX_STATUS" in
+  PRESENT_CLEAN|PRESENT_P1) : ;;   # PRESENT — p1_count on the VERDICT line decides; the findings text is read only by a synthesis-tier fix dispatch
+  disabled) : ;;                   # already reported above
+  INVALID)  echo "Codex INVALID — never ABSENT: critical gate → BLOCKED; ordinary gate → re-run this seat clean before the gate can pass." ;;
+  *) case "$_V" in
+       *" reason=quota"*) echo "Codex ABSENT (quota/cooling) for THIS gate — WAIT: auto-resume at the reset +2 min with gateAttempt +1; an ordinary gate closes DEGRADED only under policy question 6." ;;
+       *) echo "Codex ABSENT for THIS gate ONLY ($GATE_CLASS) — critical: WAIT for Astra (auto-resume); ordinary: DEGRADED. The next gate re-probes and re-attempts; never a run-wide skip." ;;
+     esac ;;
+esac
+```
+
+*Seat C — ONE Claude subagent, both review methodologies in one pass (run in parallel with Seat X):*
+```
+Agent (subagent_type: general-purpose):
+  model: fable            # fallback ONLY on unavailable/quota: claude-opus-5-5 (L1), then L2 claude-opus-5-5
+  effort: "high"          #   via gstack-lane run --lane l2 --mode review (no Bash: its brief names a diff
+                          #   file an R worker wrote). NEVER Fable via `claude -p`.
+  prompt: |
+    Read your brief: <ABS_BRIEF_PATH> (review target, acceptance criteria, the rulings register
+    prepended as "Already adjudicated in this unit (do not re-file without new facts)").
+    Review ONLY git diff $BASE_SHA...$REVIEWED_SHA in <$RUN_DIR/wt/gate-<m>-claude>.
+    Read ~/.claude/skills/gstack/autobuilder-loop/sections/seat-c-review.md and its required
+    checklist from disk; apply every engineering dimension AND both checklist passes in ONE pass.
+    Missing/unreadable rubric or checklist means REVIEW_INCOMPLETE, never clean. SKIP:
+    Preamble/AskUserQuestion format/telemetry/base-branch detect, Scope gate, Design Doc Check,
+    office-hours offer, Readiness Dashboard, Plan File Review Report, Outside Voice, Review Army,
+    the Adversarial/Codex step, Fix-First/Step 5 and any commit, Greptile, review-log persist.
+    Anything those skills would ask the user: apply the recommended option; taste calls → follow_ups.
+    Tag findings [P1]/[P2] (CHANGELOG/docs prose is never [P1]); write the report to <ABS_REPORT_PATH>,
+    last line REVIEW_COMPLETE: findings=<n>. Return only: STATUS, actual_model, final_line (the report's
+    last non-empty line, verbatim), p1_count, p2_count, report_path, follow_ups.
+```
+Seat C is PRESENT only when `final_line` is the marker and `actual_model` is on the exact allowlist
+(`claude-fable-5-1`/`fable`, `claude-opus-5-5`, `claude-opus-4-8`; same check on L1 and L2); otherwise
+INVALID; a limit on every fallback → ABSENT.
+
+After both seats return: `gstack-lane worktree rm --run-dir "$RUN_DIR" --task gate-<m>-codex`
+(and `-claude`; `--force` for a tainted one — it is evidence of a bad review, not work).
+

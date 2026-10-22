@@ -1495,6 +1495,14 @@ export const E2E_TIERS: Record<string, 'gate' | 'periodic'> = {
  * LLM-judge test touchfiles — keyed by test description string.
  */
 export const LLM_JUDGE_TOUCHFILES: Record<string, string[]> = {
+  'autobuilder-loop/SKILL.md workflow': [
+    'autobuilder-loop/**', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts',
+    'plan-eng-review/SKILL.md.tmpl', 'plan-eng-review/sections/review-sections.md.tmpl',
+    'review/SKILL.md.tmpl', 'review/checklist.md', 'scripts/resolvers/testing.ts',
+    'scripts/resolvers/shared-libs.ts', 'scripts/resolvers/confidence.ts',
+    'scripts/resolvers/index.ts', 'scripts/gen-skill-docs.ts',
+    'test/skill-llm-eval.test.ts', 'test/helpers/workflow-judge-input.ts',
+  ],
   'review/SKILL.md workflow': ['review/**', 'qa/**', 'scripts/resolvers/qa.ts', 'scripts/resolvers/review-army.ts', 'scripts/resolvers/review.ts', 'scripts/resolvers/sections.ts', 'test/skill-llm-eval.test.ts', 'test/helpers/workflow-judge-input.ts', 'test/helpers/workflow-judge-cache.ts', 'test/fixtures/eval-baselines.json', 'test/helpers/cookie-workflow-judge-input.ts', 'test/helpers/cookie-workflow-manual-review.ts', 'test/helpers/llm-judge.ts', 'test/helpers/workflow-excerpt.ts'],
   'setup-browser-cookies/SKILL.md workflow': ['setup-browser-cookies/SKILL.md.tmpl', 'setup-browser-cookies/SKILL.md', 'BROWSER.md', 'test/helpers/cookie-workflow-judge-input.ts',  'test/helpers/cookie-workflow-manual-review.ts',  'test/helpers/manual-judge-review-fixture.ts', '.github/cookie-workflow-manual-review.json', 'test/helpers/workflow-judge-input.ts', 'test/skill-llm-eval.test.ts', 'test/fixtures/eval-baselines.json', 'test/helpers/llm-judge.ts', 'test/helpers/workflow-excerpt.ts', 'test/helpers/workflow-judge-cache.ts'],
   'browse/SKILL.md reference':        ['browse/sections/**', 'browse/SKILL.md', 'browse/SKILL.md.tmpl', 'browse/src/**', 'test/skill-llm-eval.test.ts', 'SKILL.md', 'SKILL.md.tmpl', 'gstack/llms.txt', 'test/fixtures/eval-baselines.json', 'test/helpers/cookie-workflow-judge-input.ts', 'test/helpers/cookie-workflow-manual-review.ts', 'test/helpers/llm-judge.ts', 'test/helpers/workflow-excerpt.ts', 'test/helpers/workflow-judge-cache.ts', 'test/helpers/workflow-judge-input.ts'],

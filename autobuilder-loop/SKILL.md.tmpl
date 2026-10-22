@@ -1,7 +1,7 @@
 ---
 name: autobuilder-loop
 preamble-tier: 3
-version: 1.8.0
+version: 1.8.2
 description: |
   Use when asked to "autobuilder", "build loop", "auto-build", "keep building
   automatically", "drive the plan to completion", or "run the build loop" on an
@@ -35,11 +35,6 @@ You are a Staff Engineer running the build. An approved plan exists; your job is
 it to completion without becoming the person who writes the code. You dispatch, gate, and
 verify. Every line of real work — reading, writing, testing, reviewing — happens in a
 subagent. You hold the thread, keep score, and refuse to declare "done" on faith.
-
-The stakes: the user is about to run their own business reviews on top of whatever this
-loop produces. If you hand back a plan that was marked complete on momentum instead of
-evidence, you build their decisions on a false foundation. Verified, review-clean, or not
-done.
 
 ---
 
@@ -78,7 +73,7 @@ Read/Write/Edit/Glob/Grep because you are physically not the worker. So:
 - **Top-level `Bash` is limited to: `~/.claude/skills/gstack/bin/gstack-lane` (`probe` / `run`
   / `summary` / `adjudicate` / `commit` / `worktree` — the external-lane launcher; the forum recipes
   are built on it and only its one-line outputs enter your context, never a transcript),
-  `gstack-review-log` / telemetry, step 0's run-workspace setup and preflight, `state.json` writes,
+  `gstack-autobuilder-ops` (`state` / `meter` only), `gstack-review-log` / telemetry, step 0's run-workspace setup and preflight, `state.json` writes,
   copying the unit script to the session scratchpad, a policy-approved merge (step 0, policy 1), and the
   SHIP_METER measurement (`git rev-parse` / `git diff --shortstat` / `git ls-files` — number-emitting
   commands that carry no file content).** Every repo read, build, and file mutation happens inside a
@@ -235,6 +230,23 @@ second-account `claude` CLIs through `gstack-lane run` (top-level Bash or the un
 summary returns. Never a Claude subagent told to "act as codex" — same-model theater.
 
 ---
+
+## Measurement and deterministic operations
+
+The unit workflow records `measurement` in each phase checkpoint and its final result:
+logical dispatches and explicit prompt/response characters. The final result adds requested-model totals.
+These include Workflow cache replays; they exclude loaded files, schemas, nested CLI usage,
+and tool output. Tokens, cache hits and durations are unknown, never estimated as billed usage.
+Checkpoint snapshots precede their own relay; the returned result includes the final relay.
+Compare equivalent units and gate outcomes before claiming savings. Preserve the final result
+in the run report; state.json contains only the latest unit's checkpoint, not a run-wide sum.
+
+`gstack-autobuilder-ops state '<JSON>'` owns atomic checkpoint updates;
+`gstack-autobuilder-ops meter <absolute-lane> <ship-base>` owns SHIP_METER arithmetic.
+The Workflow VM lacks direct I/O, so an R Haiku relays each command and its exact result.
+Missing helpers/nonzero exits fail closed; never replace them with agent-authored bookkeeping.
+Direct command-capable hosts may call these helpers within the existing top-level Bash boundary.
+Review adjudication, worktree/commit operations and all gate decisions retain their current owners.
 
 ## The loop
 
@@ -602,22 +614,12 @@ matching `test/`, `__tests__/`, `*.test.*`, `*.spec.*`, `e2e*/`. Noise is exclud
 (lockfiles, build output, committed codegen, migration snapshots, test snapshots):
 
 ```bash
-# Pathspecs INLINE, individually quoted (zsh never word-splits an unquoted $VAR; proven live 2026-07-29).
-# LC_ALL=C pins git's English words; untracked lines count in ONE `cat | wc -l` stream; the base is
-# project-level. Fails closed: a bad base or ANY git error → `SHIP_METER FAIL: <reason>`, exit 1, no numbers.
+# Run from the unit lane; paths and base are arguments, never shell-evaluated.
 eval "$(~/.claude/skills/gstack/bin/gstack-slug)" 2>/dev/null || true
 SHIP_BASE_FILE="$HOME/.gstack/projects/$SLUG/autobuilder/${BRANCH}-ship-base"
 SHIP_BASE=$(cat "$SHIP_BASE_FILE" 2>/dev/null)
-_fail() { echo "SHIP_METER FAIL: $1. A broken meter is a stop condition, never a 0-LOC reading: fix it BEFORE dispatching any further coding task."; exit 1; }
-{ [ -n "$SHIP_BASE" ] && git rev-parse -q --verify "${SHIP_BASE}^{commit}" >/dev/null 2>&1; } || _fail "meter base missing/invalid ($SHIP_BASE_FILE); re-establish it (step 0 init)"
-_T=$(mktemp) || _fail "mktemp"
-_d() { _o=$(LC_ALL=C git diff --shortstat "$SHIP_BASE" -- "$@" ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap') || return 1
-  printf '%s\n' "$_o" | awk '{for(n=1;n<NF;n++) if($(n+1)~/^(insertion|deletion)/) t+=$n} END{print t+0}'; }
-_n() { git ls-files --others --exclude-standard -z -- "$@" ':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap' > "$_T" || return 1
-  xargs -0 cat < "$_T" 2>/dev/null | wc -l | awk '{print $1+0}'; }
-_A=$(_d .) && _B=$(_n .) && _C=$(_d ':(glob)**/test/**' ':(glob)**/__tests__/**' ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/e2e*/**') && _E=$(_n ':(glob)**/test/**' ':(glob)**/__tests__/**' ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/e2e*/**') || { rm -f "$_T"; _fail "git error (git's message above)"; }
-rm -f "$_T"
-echo "SHIP_METER: $(( _A + _B - _C - _E )) prod + $(( _C + _E )) test LOC since last checkpoint"
+~/.claude/skills/gstack/bin/gstack-autobuilder-ops meter "$PWD" "$SHIP_BASE"
+# Nonzero exit or SHIP_METER FAIL: STOP before another coding task; repair the meter first.
 ```
 
 - **Production ≥ 2,500 — HARD STOP** (default; operator to confirm). No further coding task; the
@@ -752,42 +754,6 @@ not run them." Finish with a Completion Status (`DONE` / `DONE_WITH_CONCERNS` / 
 
 ---
 
-## Clean-context discipline
-
-The rules below are non-negotiable. Each has a rationalization that will feel reasonable in
-the moment — and each is wrong.
-
-### Rationalization table
-
-| You'll be tempted to think… | Reality | Do instead |
-|---|---|---|
-| "I need to understand the codebase first — let me just read the key files myself real quick." | Raw file contents poison every downstream routing/gate decision and force early compaction. | Dispatch a scoped-read subagent; receive a distilled summary. |
-| "This is a trivial two-line change; a subagent is pure overhead." | The trivial-edit exception has no boundary; the edit also skips routing and review. | Dispatch it. Every edit goes through a subagent. |
-| "I'm already Opus and perfectly capable — routing is a nice-to-have." | That is the centralizing instinct the user forbade; it burns the root quota and idles the lanes. | Classify the tier, then route every dispatch through the lane table. |
-| "Tests are green and it looks clean — I'll batch one gate at the end." | Deferred gates let defects compound; an author's self-check is not independent review. | Gate every milestone (Seat C + Seat X). Batch at most ONE small, non-sensitive milestone forward and say so. |
-| "Only P2s left — one more full round to be safe." | Full rounds on P2s were half the last run's gate cost and blocked nothing. | Zero kept `[P1]` is `CLEAN`; P2s go through one fix pass + the scoped delta review. |
-| "Unit tests pass and the code is obviously correct — Docker is just packaging." | Wiring, env vars, networking, migrations and startup are what only a real bring-up catches. | Bring the stack up in Docker and exercise it; "should work" ≠ verified. |
-| "Shipping mid-run breaks my flow — I'll ship everything together at the end." | That is how runs balloon to 10-20k lines. | Hard checkpoint: /ship each ≤2,500-production-LOC unit (warn at 2,000), reset the meter, continue. |
-| "I'm right here with context — I'll run the business reviews too." | The user reserved office-hours / design-review / ceo-review for themselves. | Suggest them. Never auto-run. |
-| "Let the subagent report the full diff and logs so I can trust it." | Context pollution comes back through the return channel. | Require the compact envelope; the full report stays on disk. |
-| "I've internalized the plan; re-reading TODOS.md every step is wasteful." | Working from memory lets scope drift and drops milestones and gates. | Re-read the next milestone from disk (via subagent) each iteration. |
-| "Everything's been going smoothly — I'm confident it works. Let me report done." | Confidence is not evidence; premature "done" hands the user broken work. | Require evidence per acceptance criterion + a live Docker run before "done." |
-
-### Red flags — if you catch yourself thinking any of these, STOP
-
-- "I'll just read this one file."
-- "I'll run the suite / sweep the grep myself." (dispatch an R Haiku)
-- "One quick inline fix."
-- "Skip the gate, it's trivial."
-- "Seat X is out of quota, call it CLEAN anyway."
-- "The build probably works, mark it done."
-- "I'll run ceo-review too while I'm here."
-
-Each is the entry point to a baseline failure. Route it back to a subagent, a gate, a
-Docker run, or the user.
-
----
-
 ## Quick reference
 
 **Claude subagent dispatch (fill `<model>`/effort from the routing table):**
@@ -875,129 +841,14 @@ self-contained call — substitute `$RUN_DIR`, `<m>` and `<base>` with literals 
 PASS|FAIL|INVALID|ABSENT, p1_count, substituted}` — Seat X's copied from the helper's `VERDICT=` and
 `summary` lines, never composed from review text. The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]` that consolidation keeps.
 
-*Gate start — ONE top-level Bash call per gate round (re-run it at the new HEAD after fix commits):*
+The unit workflow executes these recipes. When executing a gate manually or diagnosing its
+evidence, load the following section; routine Workflow execution does not need this recipe text.
 
-```bash
-_LANE=~/.claude/skills/gstack/bin/gstack-lane
-# Re-probe lanes that were absent/cooling in the last roster — a repaired login or an expired cooldown
-# must be seen at THIS gate; only `codex_reviews`=disabled persists across gates. (Skip when none.)
-$_LANE probe --run-dir "$RUN_DIR" --lanes <absent/cooling lanes from the last roster, e.g. l2,l3>
-GATE_CLASS=<ordinary|critical>   # critical = the milestone (or a deferred one in its union) contains a T3 task, or it is the FINAL milestone
-# BOTH diff endpoints are IMMUTABLE SHAs — never a moving ref. BASE_SHA is resolved in round 1 only and reused
-# from the gate env after (a fetch must not move the rulings register's diff); REVIEWED_SHA is this round's HEAD.
-BASE_SHA=$(sed -n 's/^BASE_SHA=//p' "$RUN_DIR/gates/<m>/env" 2>/dev/null)
-[ -n "$BASE_SHA" ] || BASE_SHA=$(git rev-parse --verify "origin/<base>^{commit}" 2>/dev/null || git rev-parse --verify "<base>^{commit}") || { echo "gate: base <base> does not resolve — BLOCKED"; exit 1; }
-REVIEWED_SHA=$(git rev-parse --verify "HEAD^{commit}") || { echo "gate: HEAD does not resolve — BLOCKED"; exit 1; }
-mkdir -p "$RUN_DIR/gates/<m>" && printf 'GATE_CLASS=%s\nBASE_SHA=%s\nREVIEWED_SHA=%s\n' "$GATE_CLASS" "$BASE_SHA" "$REVIEWED_SHA" > "$RUN_DIR/gates/<m>/env"
-[ -s "$RUN_DIR/gates/<m>/rulings.json" ] || echo '[]' > "$RUN_DIR/gates/<m>/rulings.json"   # the rulings register survives rounds + resume
-for _mem in codex claude; do   # one disposable detached worktree PER seat — never shared
-  $_LANE worktree add --run-dir "$RUN_DIR" --task "gate-<m>-$_mem" --base "$REVIEWED_SHA" --detach >/dev/null || echo "gate: worktree for $_mem failed — that seat is ABSENT this round"
-done
-echo "gate <m>: class=$GATE_CLASS base_sha=$BASE_SHA reviewed_sha=$REVIEWED_SHA"
-```
+{{SECTION:manual-gate}}
 
-*Adjudication is mechanical — `gstack-lane adjudicate` decides Seat X; you only branch on its line.*
-It applies INVALID-before-ABSENT: `tainted` (any class), any helper `class: error` (a `rejected`
-refusal, a crash, a non-zero exit — even with `[P1]`s in the body), an empty body, an attempt or
-`reviewed_sha` mismatch, and a `runtime_model` that is null or not policy-compatible (`critical` →
-`gpt-6-astra`; `ordinary` → `gpt-6-astra` or the substituting `gpt-6.1-sol`) ⇒ `INVALID`, a FAIL that
-NEVER maps to ABSENT. `auth` / `quota` / `timeout` / `throttle` / skipped ⇒ `ABSENT`. A body whose last
-non-empty line is not `REVIEW_COMPLETE: findings=<n>` is INVALID (reason=no-completion-marker), so an
-"unable to review" reply never counts as clean. Otherwise it counts `[P1]`/`[P0]` tags that lead a line
-(or follow a list marker) → `PRESENT_P1` or `PRESENT_CLEAN`. The skill adds exactly two ABSENT mappings
-of its own: a seat disabled by config, and a helper that never ran (denied / missing: exit 126/127 or
-no `VERDICT=` line). An R/Haiku worker may only run `adjudicate` and relay its line verbatim; reading
-finding text beyond `p1_count` — e.g. briefing the fix round — is synthesis-tier work. Every invocation
-uses a FRESH attempt dir `$RUN_DIR/attempts/gate-<m>-<member>/<attempt_id>/` (`run` refuses an
-existing `--out`).
-
-*Seat X — Codex `gpt-6-astra` high under the hermetic `CODEX_HOME` the helper keeps OUTSIDE the run
-tree. Substitution rule: on an ORDINARY gate whose Astra attempt ended `timeout` (after its medium
-retry) or `error`, ONE `gpt-6.1-sol` high run substitutes, recorded `substituted: astra->sol (<class>)`.
-Never on `auth`, `quota`/cooling or a disabled seat: L3 cools lane-wide (`run` refuses a cooling lane),
-so Sol cannot run after an Astra `quota` — Seat X is ABSENT and the gate waits for the reset (Resume
-paths 2), unless policy question 6 lets an ordinary gate close `DEGRADED`. A CRITICAL gate never
-substitutes and always waits — never Sol, never `CLEAN` without Astra:*
-
-```bash
-# `auth` or codex_reviews disabled → ABSENT, never a gate FAIL alone. Only disabled is run-durable; run this
-# full recipe at EVERY gate. Gate on the EXPLICIT negative only (live failure 2026-08-15: `!= "on"`).
-_CODEX_ENABLED=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
-# Helper-run ladders, never `ultra`: TIMEOUT -> ONE retry, stepping down to medium under --retry-timeout;
-# THROTTLE -> backoff inside the deadline; QUOTA -> lane cools until next_probe_at, ABSENT for THIS gate only.
-_LANE=~/.claude/skills/gstack/bin/gstack-lane
-. "$RUN_DIR/gates/<m>/env"   # GATE_CLASS + BASE_SHA + REVIEWED_SHA from the gate-start block
-{ echo "Already adjudicated in this unit (do not re-file without new facts):"; cat "$RUN_DIR/gates/<m>/rulings.json"; echo
-cat <<EOF
-IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.
-
-Review the commits $BASE_SHA...$REVIEWED_SHA (this checkout is at $REVIEWED_SHA). Run git diff $BASE_SHA...$REVIEWED_SHA to see the diff and review only those changes. Think like an attacker and a chaos engineer: edge cases, races, security holes, failure modes. Tag every finding [P1] (ship-blocker) or [P2] (lower severity), one finding per line with the tag first. CHANGELOG/docs prose is never [P1]. If there are no [P1] issues, say so explicitly. End your review with exactly this final line and nothing after it: REVIEW_COMPLETE: findings=<n> (n = the number of [P1]/[P2] findings you listed; 0 if none) — but ONLY if you actually read and reviewed the diff; if you could not, end instead with REVIEW_INCOMPLETE: <reason>.
-EOF
-} > "$RUN_DIR/briefs/gate-<m>-codex.prompt"
-_CODEX_STATUS=ABSENT; _V=""; _PREV=""
-if [ "$_CODEX_ENABLED" = "disabled" ] || [ "$_CODEX_ENABLED" = "off" ]; then
-  _CODEX_STATUS=disabled   # the config gate must actually GATE — a computed-but-untested flag is dead code
-  echo "Codex seat disabled (codex_reviews=$_CODEX_ENABLED) — ABSENT by user config (the one run-durable skip)."
-else
-  for _CM in gpt-6-astra gpt-6.1-sol; do
-    if [ "$_CM" = gpt-6.1-sol ]; then   # substitution: ordinary gate + Astra timeout/error ONLY (never auth/quota/cooling)
-      [ "$GATE_CLASS" = ordinary ] || break
-      case "$_V" in *" reason=timeout "*|*" reason=class_error "*|*" reason=rejected "*) ;; *) break ;; esac
-      echo "codex substituted: astra->sol ($_V)"; _PREV=$_CODEX_STATUS
-    fi
-    case "$_CM" in gpt-6-astra) _to=900; _rto=420 ;; *) _to=600; _rto=300 ;; esac
-    _AID=$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM; _ADIR="$RUN_DIR/attempts/gate-<m>-codex/$_AID"; _OUT="$_ADIR/review.md"
-    if ! mkdir -p "$_ADIR" || [ -e "$_OUT" ]; then echo "Codex attempt dir not fresh ($_ADIR) — ABSENT; never reuse a prior attempt's evidence."; _CODEX_STATUS=ABSENT; continue; fi
-    # The helper enforces the deadline on the whole process tree; there is NO unwrapped fallback — a missing/denied
-    # helper never adjudicates (exit 126/127, no VERDICT line) and maps to ABSENT, never to an unbounded run.
-    $_LANE run --run-dir "$RUN_DIR" --lane l3 --mode review --model "$_CM" --effort high \
-      --timeout "$_to" --retry-timeout "$_rto" --cwd "$RUN_DIR/wt/gate-<m>-codex" \
-      --prompt-file "$RUN_DIR/briefs/gate-<m>-codex.prompt" --out "$_OUT" >/dev/null 2>&1
-    $_LANE summary --out "$_OUT" 2>/dev/null
-    _V=$($_LANE adjudicate --out "$_OUT" --seat codex --gate-class "$GATE_CLASS" --reviewed-sha "$REVIEWED_SHA" --requested-model "$_CM" 2>/dev/null); _RC=$?
-    echo "codex ${_V:-VERDICT=ABSENT reason=no_verdict_line adjudicate_exit=$_RC}"
-    case "$_RC" in 0) _CODEX_STATUS=PRESENT_CLEAN ;; 10) _CODEX_STATUS=PRESENT_P1 ;; 11) _CODEX_STATUS=INVALID ;; *) _CODEX_STATUS=ABSENT ;; esac
-    case "$_CODEX_STATUS" in PRESENT_*) break ;; esac
-  done
-  [ "$_CODEX_STATUS:$_PREV" = ABSENT:INVALID ] && _CODEX_STATUS=INVALID   # an ABSENT Sol (any path) never launders Astra's INVALID
-fi
-case "$_CODEX_STATUS" in
-  PRESENT_CLEAN|PRESENT_P1) : ;;   # PRESENT — p1_count on the VERDICT line decides; the findings text is read only by a synthesis-tier fix dispatch
-  disabled) : ;;                   # already reported above
-  INVALID)  echo "Codex INVALID — never ABSENT: critical gate → BLOCKED; ordinary gate → re-run this seat clean before the gate can pass." ;;
-  *) case "$_V" in
-       *" reason=quota"*) echo "Codex ABSENT (quota/cooling) for THIS gate — WAIT: auto-resume at the reset +2 min with gateAttempt +1; an ordinary gate closes DEGRADED only under policy question 6." ;;
-       *) echo "Codex ABSENT for THIS gate ONLY ($GATE_CLASS) — critical: WAIT for Astra (auto-resume); ordinary: DEGRADED. The next gate re-probes and re-attempts; never a run-wide skip." ;;
-     esac ;;
-esac
-```
-
-*Seat C — ONE Claude subagent, both review methodologies in one pass (run in parallel with Seat X):*
-```
-Agent (subagent_type: general-purpose):
-  model: fable            # fallback ONLY on unavailable/quota: claude-opus-5-5 (L1), then L2 claude-opus-5-5
-  effort: "high"          #   via gstack-lane run --lane l2 --mode review (no Bash: its brief names a diff
-                          #   file an R worker wrote). NEVER Fable via `claude -p`.
-  prompt: |
-    Read your brief: <ABS_BRIEF_PATH> (review target, acceptance criteria, the rulings register
-    prepended as "Already adjudicated in this unit (do not re-file without new facts)").
-    Review ONLY git diff $BASE_SHA...$REVIEWED_SHA in <$RUN_DIR/wt/gate-<m>-claude>.
-    Read ~/.claude/skills/gstack/plan-eng-review/SKILL.md and ~/.claude/skills/gstack/review/SKILL.md
-    from disk; apply the eng-review methodology AND the /review checklist passes in ONE pass. SKIP:
-    Preamble/AskUserQuestion format/telemetry/base-branch detect, Scope gate, Design Doc Check,
-    office-hours offer, Readiness Dashboard, Plan File Review Report, Outside Voice, Review Army,
-    the Adversarial/Codex step, Fix-First/Step 5 and any commit, Greptile, review-log persist.
-    Anything those skills would ask the user: apply the recommended option; taste calls → follow_ups.
-    Tag findings [P1]/[P2] (CHANGELOG/docs prose is never [P1]); write the report to <ABS_REPORT_PATH>,
-    last line REVIEW_COMPLETE: findings=<n>. Return only: STATUS, actual_model, final_line (the report's
-    last non-empty line, verbatim), p1_count, p2_count, report_path, follow_ups.
-```
-Seat C is PRESENT only when `final_line` is the marker and `actual_model` is on the exact allowlist
-(`claude-fable-5-1`/`fable`, `claude-opus-5-5`, `claude-opus-4-8`; same check on L1 and L2); otherwise
-INVALID; a limit on every fallback → ABSENT.
-
-After both seats return: `gstack-lane worktree rm --run-dir "$RUN_DIR" --task gate-<m>-codex`
-(and `-claude`; `--force` for a tainted one — it is evidence of a bad review, not work).
+Seat C reads `~/.claude/skills/gstack/autobuilder-loop/sections/seat-c-review.md` plus its required
+canonical checklist. Both methodologies, severity, completion markers and runtime-model checks
+remain mandatory; a missing reference means an incomplete review, never clean.
 
 **Forum fallback and the diversity floor.** Each seat resolves to PRESENT (valid completed
 review), INVALID (completed but unusable) or ABSENT (missing / disabled / quota / timeout /
