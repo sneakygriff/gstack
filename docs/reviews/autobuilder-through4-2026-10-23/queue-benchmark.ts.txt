@@ -1,0 +1,29 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {queueInit,queueNext,queueBind,queueComplete,queueStatus,type Contract} from '../lib/autobuilder-queue';
+const git=(cwd:string,...args:string[])=>{const r=spawnSync('git',['-C',cwd,...args],{encoding:'utf8',timeout:10000});if(r.status)throw Error(r.stderr);return r.stdout.trim();};
+const results=[];
+for(const mode of ['waves','continuous','continuous','waves'] as const){
+ const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'abq-bench-'))),repo=path.join(root,'repo'),lane=path.join(root,'lane'),runDir=path.join(root,'run');
+ fs.mkdirSync(repo);fs.mkdirSync(runDir);git(repo,'init','-q');git(repo,'config','user.name','fixture');git(repo,'config','user.email','fixture@example.invalid');fs.writeFileSync(path.join(repo,'base.txt'),'base\n');git(repo,'add','base.txt');git(repo,'commit','-qm','base');const base=git(repo,'rev-parse','HEAD');git(repo,'worktree','add','-b','integration',lane,base);
+ const check={name:'acceptance',argv:[process.execPath,'-e',"const f=require('fs');for(const id of ['A','B','C']){if(f.existsSync(id+'.txt')&&f.readFileSync(id+'.txt','utf8')!==id+'\\n')process.exit(1)}if(f.existsSync('C.txt')&&!f.existsSync('A.txt'))process.exit(2)"],timeoutMs:5000};
+ const tasks=['A','B','C'].map(id=>{const brief=path.join(root,id+'.md');fs.writeFileSync(brief,`Add ${id}.txt containing ${id}; C requires integrated A.`);return{id,dependencies:id==='C'?['A']:[],writes:[id+'.txt'],resources:[],brief,checks:[check],tier:'T1' as const,impl:'claude' as const};});
+ const c:Contract={version:1,unit:'bench',repo,lane,runDir,base,shipBase:base,branch:'integration',tasks,maxWorkers:2,mode,integrationChecks:[check]};
+ const start=performance.now(),events:any[]=[],active=new Map<string,Promise<any>>();let helperCalls=0;
+ const stamp=(event:string,task?:string)=>events.push({event,task,ms:Math.round(performance.now()-start)});
+ queueInit(c);helperCalls++;
+ while(queueStatus(runDir).status==='BUILDING'){
+  const {admitted}=queueNext(runDir);helperCalls++;
+  for(const job of admitted){queueBind(runDir,job.id,job.attempt,'scripted-'+job.id);helperCalls++;stamp('dispatch',job.id);
+   active.set(job.id,new Promise(resolve=>setTimeout(()=>{fs.writeFileSync(path.join(job.cwd,job.id+'.txt'),job.id+'\n');git(job.cwd,'add',job.id+'.txt');git(job.cwd,'commit','-qm',job.id);stamp('worker_completed',job.id);resolve({...job,head:git(job.cwd,'rev-parse','HEAD')});},{A:500,B:5000,C:3500}[job.id]!)));
+  }
+  if(!active.size)throw Error('no progress');
+  const job=await Promise.race(active.values());active.delete(job.id);stamp('integration_started',job.id);await queueComplete(runDir,job.id,job.attempt,job.head);helperCalls++;stamp('integrated',job.id);
+ }
+ for(const id of ['A','B','C'])if(fs.readFileSync(path.join(lane,id+'.txt'),'utf8')!==id+'\n')throw Error('bad final artifact');
+ const result={mode,base_tree:git(repo,'rev-parse',base+'^{tree}'),result_tree:git(lane,'rev-parse','HEAD^{tree}'),elapsed_ms:Math.round(performance.now()-start),scripted_worker_delays_ms:{A:500,B:5000,C:3500},helper_calls_excluding_status:helperCalls,model_calls:0,review_required:queueStatus(runDir).review_required,events};results.push(result);console.log(JSON.stringify(result));fs.rmSync(root,{recursive:true,force:true});
+}
+fs.writeFileSync('.context/queue-benchmark.json',JSON.stringify({kind:'scripted real-Git scheduling probe, not provider benchmark',source_sha256:crypto.createHash('sha256').update(fs.readFileSync('lib/autobuilder-queue.ts')).digest('hex'),runs:results},null,2)+'\n');

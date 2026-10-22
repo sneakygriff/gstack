@@ -1,0 +1,14 @@
+{
+  "method": "Compare unique case labels, ignoring fixture paths; not a proof of failure causes or exact-base reproduction. Named nested-child cases are not summed into outer failure counts.",
+  "no_longer_reported": [
+    "AUQ format is always-loaded (token-reduction safety net) > autobuilder-loop (carved): AUQ format block lives in the skeleton, not only sections/",
+    "carve-guard completeness (gate, free) > filesystem carved set == CARVE_GUARDS set, and every entry is consistent",
+    "guard timeout receipts survive a blocked output pipe without extending command execution",
+    "new regression and changed preamble sources select all Design and Eng owners"
+  ],
+  "newly_reported": [
+    "CSO retained snapshot identity > withholds a large regular source file without aborting the bounded snapshot",
+    "compiled CSO command workflow > wallet-shaped source paths remain addressable through stable opaque handles",
+    "the periodic executor supervises every actual case and retry within its CI wall"
+  ]
+}

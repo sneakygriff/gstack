@@ -1,0 +1,310 @@
+{
+  "kind": "scripted real-Git scheduling probe, not provider benchmark",
+  "source_sha256": "fc3b8d2633502b2d255b010ccb5bc6ffc2ed3284e05ab79d2ab33004911b9605",
+  "runs": [
+    {
+      "mode": "waves",
+      "base_tree": "4b36dfd79db36d8c59d1fb032de66b57f0457b65",
+      "result_tree": "14ef9862d9b1166ab6a25d8108dd3d42ddcb7efc",
+      "elapsed_ms": 11651,
+      "scripted_worker_delays_ms": {
+        "A": 500,
+        "B": 5000,
+        "C": 3500
+      },
+      "helper_calls_excluding_status": 10,
+      "model_calls": 0,
+      "review_required": true,
+      "events": [
+        {
+          "event": "dispatch",
+          "task": "A",
+          "ms": 304
+        },
+        {
+          "event": "dispatch",
+          "task": "B",
+          "ms": 304
+        },
+        {
+          "event": "worker_completed",
+          "task": "A",
+          "ms": 876
+        },
+        {
+          "event": "integration_started",
+          "task": "A",
+          "ms": 893
+        },
+        {
+          "event": "integrated",
+          "task": "A",
+          "ms": 2129
+        },
+        {
+          "event": "worker_completed",
+          "task": "B",
+          "ms": 5381
+        },
+        {
+          "event": "integration_started",
+          "task": "B",
+          "ms": 5398
+        },
+        {
+          "event": "integrated",
+          "task": "B",
+          "ms": 6659
+        },
+        {
+          "event": "dispatch",
+          "task": "C",
+          "ms": 6741
+        },
+        {
+          "event": "worker_completed",
+          "task": "C",
+          "ms": 10318
+        },
+        {
+          "event": "integration_started",
+          "task": "C",
+          "ms": 10334
+        },
+        {
+          "event": "integrated",
+          "task": "C",
+          "ms": 11622
+        }
+      ]
+    },
+    {
+      "mode": "continuous",
+      "base_tree": "4b36dfd79db36d8c59d1fb032de66b57f0457b65",
+      "result_tree": "14ef9862d9b1166ab6a25d8108dd3d42ddcb7efc",
+      "elapsed_ms": 7980,
+      "scripted_worker_delays_ms": {
+        "A": 500,
+        "B": 5000,
+        "C": 3500
+      },
+      "helper_calls_excluding_status": 10,
+      "model_calls": 0,
+      "review_required": true,
+      "events": [
+        {
+          "event": "dispatch",
+          "task": "A",
+          "ms": 296
+        },
+        {
+          "event": "dispatch",
+          "task": "B",
+          "ms": 296
+        },
+        {
+          "event": "worker_completed",
+          "task": "A",
+          "ms": 877
+        },
+        {
+          "event": "integration_started",
+          "task": "A",
+          "ms": 894
+        },
+        {
+          "event": "integrated",
+          "task": "A",
+          "ms": 2151
+        },
+        {
+          "event": "dispatch",
+          "task": "C",
+          "ms": 2231
+        },
+        {
+          "event": "worker_completed",
+          "task": "B",
+          "ms": 5379
+        },
+        {
+          "event": "integration_started",
+          "task": "B",
+          "ms": 5395
+        },
+        {
+          "event": "worker_completed",
+          "task": "C",
+          "ms": 6068
+        },
+        {
+          "event": "integrated",
+          "task": "B",
+          "ms": 6694
+        },
+        {
+          "event": "integration_started",
+          "task": "C",
+          "ms": 6728
+        },
+        {
+          "event": "integrated",
+          "task": "C",
+          "ms": 7956
+        }
+      ]
+    },
+    {
+      "mode": "continuous",
+      "base_tree": "4b36dfd79db36d8c59d1fb032de66b57f0457b65",
+      "result_tree": "14ef9862d9b1166ab6a25d8108dd3d42ddcb7efc",
+      "elapsed_ms": 8085,
+      "scripted_worker_delays_ms": {
+        "A": 500,
+        "B": 5000,
+        "C": 3500
+      },
+      "helper_calls_excluding_status": 10,
+      "model_calls": 0,
+      "review_required": true,
+      "events": [
+        {
+          "event": "dispatch",
+          "task": "A",
+          "ms": 256
+        },
+        {
+          "event": "dispatch",
+          "task": "B",
+          "ms": 256
+        },
+        {
+          "event": "worker_completed",
+          "task": "A",
+          "ms": 837
+        },
+        {
+          "event": "integration_started",
+          "task": "A",
+          "ms": 854
+        },
+        {
+          "event": "integrated",
+          "task": "A",
+          "ms": 2111
+        },
+        {
+          "event": "dispatch",
+          "task": "C",
+          "ms": 2207
+        },
+        {
+          "event": "worker_completed",
+          "task": "B",
+          "ms": 5337
+        },
+        {
+          "event": "integration_started",
+          "task": "B",
+          "ms": 5353
+        },
+        {
+          "event": "worker_completed",
+          "task": "C",
+          "ms": 6028
+        },
+        {
+          "event": "integrated",
+          "task": "B",
+          "ms": 6751
+        },
+        {
+          "event": "integration_started",
+          "task": "C",
+          "ms": 6790
+        },
+        {
+          "event": "integrated",
+          "task": "C",
+          "ms": 8057
+        }
+      ]
+    },
+    {
+      "mode": "waves",
+      "base_tree": "4b36dfd79db36d8c59d1fb032de66b57f0457b65",
+      "result_tree": "14ef9862d9b1166ab6a25d8108dd3d42ddcb7efc",
+      "elapsed_ms": 11589,
+      "scripted_worker_delays_ms": {
+        "A": 500,
+        "B": 5000,
+        "C": 3500
+      },
+      "helper_calls_excluding_status": 10,
+      "model_calls": 0,
+      "review_required": true,
+      "events": [
+        {
+          "event": "dispatch",
+          "task": "A",
+          "ms": 260
+        },
+        {
+          "event": "dispatch",
+          "task": "B",
+          "ms": 261
+        },
+        {
+          "event": "worker_completed",
+          "task": "A",
+          "ms": 844
+        },
+        {
+          "event": "integration_started",
+          "task": "A",
+          "ms": 862
+        },
+        {
+          "event": "integrated",
+          "task": "A",
+          "ms": 2129
+        },
+        {
+          "event": "worker_completed",
+          "task": "B",
+          "ms": 5334
+        },
+        {
+          "event": "integration_started",
+          "task": "B",
+          "ms": 5351
+        },
+        {
+          "event": "integrated",
+          "task": "B",
+          "ms": 6618
+        },
+        {
+          "event": "dispatch",
+          "task": "C",
+          "ms": 6697
+        },
+        {
+          "event": "worker_completed",
+          "task": "C",
+          "ms": 10254
+        },
+        {
+          "event": "integration_started",
+          "task": "C",
+          "ms": 10272
+        },
+        {
+          "event": "integrated",
+          "task": "C",
+          "ms": 11566
+        }
+      ]
+    }
+  ]
+}
