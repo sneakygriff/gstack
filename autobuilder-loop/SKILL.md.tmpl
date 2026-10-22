@@ -823,6 +823,11 @@ STOPPED with a classified cause, or BLOCKED; it never merges.
    any narrative checkpoint. A `workflow_run_id` still running → watch that run, never relaunch it.
    A stopped one → relaunch with `resumeFromRunId` and the same args, changing only what the fix needs
    (e.g. `synModel` + `synGateFrom` after a Fable `quota`).
+   If the helper reports `lock_held`, investigate `$RUN_DIR/.state.lock` and the active
+   writer first. Preserve `state.json`; manual lock cleanup requires confirming that
+   no writer is active and inspecting any pending checkpoint. Never auto-delete the lock
+   or increase the existing retry limit to bypass it. Other helper failures report a
+   bounded reason code on stderr; repair the cause before resuming.
 2. **Known reset time** (a 429 body or the CLI's limit message) → schedule an auto-resume at reset
    + 2 minutes and say so; never wait for a manual "try again". Unknown reset → probe on the lane's
    `next_probe_at`. A gate that waited on Astra resumes with `resumeFromRunId` and `gateAttempt: <n+1>`

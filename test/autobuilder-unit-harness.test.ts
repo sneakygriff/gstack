@@ -9,6 +9,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { spawnSync } from 'node:child_process'
+// The Workflow runtime compiles this file's body rather than importing it as a JS module.
+// Import its actual bytes for the source checks, and bind the harness loader to those same bytes below.
+import workflowSource from '../autobuilder-loop/autobuilder-unit.js' with { type: 'text' }
 
 const ROOT = path.join(import.meta.dir, '..')
 const SCRIPT = path.join(ROOT, 'autobuilder-loop', 'autobuilder-unit.js')
@@ -25,17 +28,19 @@ const { runStable } = await import(path.join(FIX, 'stable.mjs'))
 const { loadScript, shellBlock, realPush, realApi, realIdTrap, realGhBlock, realCiCleanup, ciStopGuard, survivors, hasTimeout, hasZsh, hasJq, gitEnv, withTmp, SUB_TIMEOUT_MS, fake } = await import(path.join(FIX, 'lib.mjs'))
 
 describe('autobuilder-unit.js static checks', () => {
+  test('harness executes the same production source imported by the static checks', () => {
+    expect(loadScript(SCRIPT).src).toBe(workflowSource)
+  })
   test('runtime-equivalent parse: the body after meta compiles as an async function body', () => {
     const { body } = loadScript(SCRIPT)
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
     expect(() => new AsyncFunction('args', 'agent', 'parallel', 'phase', 'log', body)).not.toThrow()
   })
   test('no project-specific names and no Grok', () => {
-    const src = fs.readFileSync(SCRIPT, 'utf8')
-    expect(src.match(/beneficii|bookingsystem|SU-[0-9]|grok/gi)).toBeNull()
+    expect(workflowSource.match(/beneficii|bookingsystem|SU-[0-9]|grok/gi)).toBeNull()
   })
   test('no bare `git push origin`, no merges, no credit billing', () => {
-    const src = fs.readFileSync(SCRIPT, 'utf8').split('\n').filter(l => !l.trim().startsWith('//')).join('\n') // code + prompts, not comments
+    const src = workflowSource.split('\n').filter(l => !l.trim().startsWith('//')).join('\n') // code + prompts, not comments
     expect(src).not.toContain('git push origin')
     expect(src).not.toMatch(/push --force|push -f\b/)
     expect(src).not.toContain('gh pr merge')
@@ -404,6 +409,82 @@ describe.skipIf(!POSIX)('autobuilder-unit.js mock harness scenarios', () => {
       const r = await runScenario(name, SCRIPT)
       if (!r.ok) throw new Error(r.detail)
       expect(r.ok).toBe(true)
+    })
+  }
+})
+
+// Scripted reviewer responses exercise the real L2 decoder and the workflow's gate transitions.
+// This is a free policy/transport regression, not evidence of live model instruction compliance.
+describe.skipIf(!POSIX || !hasJq())('Seat C L2 required-reference failures', () => {
+  for (const input of [
+    { name: 'missing rubric blocks after retry', broken: 'rubric', unreadable: false, recover: false, critical: false },
+    { name: 'unreadable checklist blocks after retry', broken: 'checklist', unreadable: true, recover: false, critical: false },
+    { name: 'restored rubric permits a completed retry', broken: 'rubric', unreadable: false, recover: true, critical: false },
+    { name: 'missing checklist blocks a critical gate immediately', broken: 'checklist', unreadable: false, recover: false, critical: true },
+  ]) {
+    test(input.name, async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abu-l2-ref-'))
+      const scenarioName = `l2-reference-${input.name}`
+      let attempts = 0
+      try {
+        for (const ref of ['rubric', 'checklist']) {
+          const file = path.join(dir, ref)
+          if (ref !== input.broken) fs.writeFileSync(file, 'Required review criteria.\n')
+          // A directory fails readFileSync deterministically even when tests run as root.
+          else if (input.unreadable) fs.mkdirSync(file)
+        }
+        scenarios[scenarioName] = {
+          args: { maxRounds: 1, autoFourth: false, acceptDegraded: 'operator accepts absent seats', shipOpenP1: 'operator accepts open findings', gateClass: input.critical ? 'critical' : 'ordinary' },
+          override(label: string, opts: { model: string }, prompt: string) {
+            if (/seat C \(L2/.test(label)) {
+              attempts++
+              expect(prompt).toContain('If the rubric or checklist is missing or unreadable, return REVIEW_INCOMPLETE, never clean.')
+              expect(prompt).toContain('If the required rubric or checklist is missing or unreadable, end with REVIEW_INCOMPLETE: <reason>')
+              expect(prompt).toContain('never substitute remembered methodology or emit REVIEW_COMPLETE')
+              expect(prompt).not.toContain('apply the methodology named here from your own knowledge')
+              if (input.recover && attempts === 2) fs.writeFileSync(path.join(dir, input.broken), 'Restored review criteria.\n')
+              let review = 'No findings.\nREVIEW_COMPLETE: findings=0\n'
+              for (const ref of ['rubric', 'checklist']) {
+                try { fs.readFileSync(path.join(dir, ref), 'utf8') }
+                catch { review = `REVIEW_INCOMPLETE: ${ref} missing or unreadable\n`; break }
+              }
+              const out = path.join(dir, 'review.json')
+              fs.writeFileSync(out, JSON.stringify({ result: review }))
+              fs.writeFileSync(`${out}.status.json`, JSON.stringify({ class: 'ok', exit: 0, exit_code: 0, runtime_model: 'claude-opus-5-5', tainted: false }))
+              // Execute the adjudication block actually supplied to the L2 relay, not a copied validator.
+              const block = prompt.match(/\n(S="\$OUT\.status\.json"; TXT="\$ADIR\/review\.txt"[\s\S]*?)\n6\. cp/)
+              expect(block).not.toBeNull()
+              const adjudicated = spawnSync('bash', ['-c', block![1]], { encoding: 'utf8', env: { ...process.env, OUT: out, ADIR: dir }, timeout: SUB_TIMEOUT_MS })
+              expect(adjudicated.status).toBe(0)
+              expect(adjudicated.stderr).toBe('')
+              const verdictLine = adjudicated.stdout.trim()
+              expect(verdictLine).toContain(review.startsWith('REVIEW_INCOMPLETE') ? 'status=INVALID class=ok reason=no-completion-marker' : 'status=PRESENT class=ok reason=complete')
+              // Even an optimistic relay cannot turn the real INVALID line into a PASS.
+              return { member: 'seat_c', status: 'PRESENT', verdict: 'PASS', class: 'ok', verdict_line: verdictLine }
+            }
+            if (/seat C/.test(label) && opts.model !== 'haiku') return null // both L1 accounts unavailable
+          },
+          expect: () => true,
+        }
+        const run = await runScenario(scenarioName, SCRIPT)
+        if (!run.ok) throw new Error(run.detail)
+        const rounds = run.res.rounds.filter((round: { round?: number }) => round.round)
+        expect(rounds[0].members_present.seat_c).toBe('INVALID')
+        expect(attempts).toBe(input.critical ? 1 : 2)
+        expect(rounds[0].verdict).toBe(input.critical ? 'BLOCKED' : 'RERUN_INVALID')
+        if (input.recover) {
+          expect(run.res.status).toBe('READY')
+          expect(rounds[1].members_present.seat_c).toBe('PRESENT')
+          expect(rounds[1].verdict).toBe('CLEAN')
+        } else {
+          expect(run.res.status).toBe('BLOCKED')
+          expect(run.res.stopped).toContain(input.critical ? 'INVALID on a critical gate' : 'INVALID again')
+          expect(run.calls.some((call: { label: string }) => /\/ship| push$/.test(call.label))).toBe(false)
+        }
+      } finally {
+        delete scenarios[scenarioName]
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
     })
   }
 })

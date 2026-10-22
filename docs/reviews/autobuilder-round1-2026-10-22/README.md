@@ -1,5 +1,12 @@
 # Autobuilder round 1 - external review handoff
 
+Latest follow-up: [remaining evaluator-count and harness-validation blockers resolved](blockers-followup.md)
+(23 October 2026). The complete free suite remains failing; see the report for scope and evidence.
+
+Follow-up: [F1, F2 and F4 implementation and validation](fixes-f1-f2-f4.md).
+The original review record below is preserved; the follow-up records subsequent
+changes and the failing full-suite acceptance result separately.
+
 Both requested reviews completed on 22 October 2026. This commit records reviews and host verification only. No implementation fixes, active installation changes, push, PR, merge or deployment were performed.
 
 ## Exact review target

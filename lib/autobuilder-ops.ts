@@ -4,33 +4,56 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const TIMEOUT_MS = 30_000;
+// Only these locally-defined codes may cross the CLI boundary. Never serialize
+// Error.message, filesystem paths, requests, or child-process stderr.
+const REASONS = [
+  'usage', 'invalid_request_json', 'invalid_request', 'lock_held', 'lock_unavailable',
+  'invalid_state_or_roster', 'unsafe_state_or_roster', 'invalid_decisions', 'invalid_extra',
+  'git_failed', 'invalid_meter_input', 'unreadable_untracked', 'inconsistent_meter',
+  'filesystem_failed', 'operation_failed',
+] as const;
+type Reason = typeof REASONS[number];
+export class AutobuilderOpsError extends Error {
+  constructor(readonly reason: Reason) { super(reason); }
+}
+export function failureReason(error: unknown): Reason {
+  return error instanceof AutobuilderOpsError && REASONS.includes(error.reason) ? error.reason : 'operation_failed';
+}
+function filesystem<T>(fn: () => T): T {
+  try { return fn(); } catch { throw new AutobuilderOpsError('filesystem_failed'); }
+}
 export const EXCLUSIONS = ['*.lock', 'package-lock.json', 'pnpm-lock.yaml', 'bun.lockb', '*dist/*', '*build/*', '*.gen.ts', '*generated/*', '*drizzle/meta/*', '*__snapshots__/*', '*.snap'].map(p => `:(exclude)${p}`);
 export const TEST_PATHS = ['**/test/**', '**/__tests__/**', '**/*.test.*', '**/*.spec.*', '**/e2e*/**'].map(p => `:(glob)${p}`);
 function git(cwd: string, args: string[]): string {
   const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' } });
-  if (r.error || r.status !== 0) throw new Error('git_failed'); // never relay repo paths or stderr
+  if (r.error || r.status !== 0) throw new AutobuilderOpsError('git_failed'); // never relay repo paths or stderr
   return r.stdout;
 }
 function object(x: unknown): x is Record<string, any> { return !!x && typeof x === 'object' && !Array.isArray(x); }
 function readObject(file: string, optional = false): Record<string, any> {
   try {
-    if (!fs.lstatSync(file).isFile()) throw new Error('not_regular_file');
+    if (!fs.lstatSync(file).isFile()) throw new AutobuilderOpsError('unsafe_state_or_roster');
     const x = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!object(x)) throw new Error('not_object');
+    if (!object(x)) throw new AutobuilderOpsError('invalid_state_or_roster');
     return x;
-  } catch (e: any) { if (optional && e.code === 'ENOENT') return {}; throw new Error('invalid_state_or_roster'); }
+  } catch (e: any) {
+    if (optional && e.code === 'ENOENT') return {};
+    if (e instanceof AutobuilderOpsError) throw e;
+    throw new AutobuilderOpsError('invalid_state_or_roster');
+  }
 }
 export function updateState(r: Record<string, any>): void {
   if (!object(r) || typeof r.runDir !== 'string' || !path.isAbsolute(r.runDir) || typeof r.lane !== 'string' || !path.isAbsolute(r.lane)
       || !['unit', 'flow', 'phase', 'base'].every(k => typeof r[k] === 'string') || !Number.isInteger(r.round) || r.round < 0
-      || !Array.isArray(r.decisions) || !r.decisions.every((d: unknown) => typeof d === 'string') || !object(r.extra)) throw new Error('invalid_request');
-  const root = fs.realpathSync(r.runDir), file = path.join(root, 'state.json'), lock = path.join(root, '.state.lock');
+      || !Array.isArray(r.decisions) || !r.decisions.every((d: unknown) => typeof d === 'string') || !object(r.extra)) throw new AutobuilderOpsError('invalid_request');
+  const root = filesystem(() => fs.realpathSync(r.runDir)), file = path.join(root, 'state.json'), lock = path.join(root, '.state.lock');
   // Exclusive, fail closed. Never guess whether a leftover lock belongs to a live writer.
-  fs.mkdirSync(lock, { mode: 0o700 });
+  try { fs.mkdirSync(lock, { mode: 0o700 }); }
+  catch (e: any) { throw new AutobuilderOpsError(e.code === 'EEXIST' ? 'lock_held' : 'lock_unavailable'); }
   const tmp = path.join(lock, 'state.json');
   try {
     const old = readObject(file, true), roster = readObject(path.join(root, 'lanes.json'), true);
-    if (old.open_decisions !== undefined && (!Array.isArray(old.open_decisions) || !old.open_decisions.every((d: unknown) => typeof d === 'string'))) throw new Error('invalid_decisions');
+    if (old.open_decisions !== undefined && (!Array.isArray(old.open_decisions) || !old.open_decisions.every((d: unknown) => typeof d === 'string'))) throw new AutobuilderOpsError('invalid_decisions');
     let head: string | null = null;
     try { head = git(r.lane, ['rev-parse', '--verify', 'HEAD']).trim(); } catch { /* historical contract: null on error */ }
     const next = { ...old, workflow_run_id: old.workflow_run_id ?? null, unit: r.unit, flow: r.flow, phase: r.phase,
@@ -39,17 +62,17 @@ export function updateState(r: Record<string, any>): void {
       updated_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), open_decisions: [...new Set([...(old.open_decisions || []), ...r.decisions])] } as Record<string, any>;
     const reserved = new Set(['__proto__', 'constructor', 'prototype', 'workflow_run_id', 'unit', 'flow', 'phase', 'round', 'ship_base', 'lane_head', 'lanes_roster', 'updated_at', 'open_decisions']);
     for (const [k, v] of Object.entries(r.extra)) {
-      if (reserved.has(k) || !object(v) || (old[k] !== undefined && !object(old[k]))) throw new Error('invalid_extra');
+      if (reserved.has(k) || !object(v) || (old[k] !== undefined && !object(old[k]))) throw new AutobuilderOpsError('invalid_extra');
       next[k] = { ...(old[k] || {}), ...v };
     }
-    fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    filesystem(() => fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { mode: 0o600, flag: 'wx' }));
     readObject(tmp); // validate before atomic replace; failed writes preserve prior checkpoint
-    fs.renameSync(tmp, file);
-  } finally { fs.rmSync(tmp, { force: true }); fs.rmdirSync(lock); }
+    filesystem(() => fs.renameSync(tmp, file));
+  } finally { filesystem(() => { fs.rmSync(tmp, { force: true }); fs.rmdirSync(lock); }); }
 }
 export function measureSize(lane: string, base: string) {
-  if (!path.isAbsolute(lane) || !base || base.startsWith('-') || /[\x00-\x1f]/.test(base)) throw new Error('invalid_meter_input');
-  const root = fs.realpathSync(lane);
+  if (typeof lane !== 'string' || !path.isAbsolute(lane) || typeof base !== 'string' || !base || base.startsWith('-') || /[\x00-\x1f]/.test(base)) throw new AutobuilderOpsError('invalid_meter_input');
+  const root = filesystem(() => fs.realpathSync(lane));
   const sha = git(root, ['rev-parse', '--verify', '--end-of-options', `${base}^{commit}`]).trim();
   function count(paths: string[]): number {
     // shortstat preserves existing binary-file and insertion+deletion semantics.
@@ -58,13 +81,15 @@ export function measureSize(lane: string, base: string) {
     const untracked = git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', ...paths, ...EXCLUSIONS]).split('\0').filter(Boolean);
     for (const f of untracked) {
       const full = path.resolve(root, f);
-      if (!full.startsWith(root + path.sep) || !fs.lstatSync(full).isFile() || fs.realpathSync(full) !== full) throw new Error('unreadable_untracked');
-      // Match wc -l: count newline bytes, including binary files; never follow symlinks.
-      for (const b of fs.readFileSync(full)) if (b === 10) n++;
+      try {
+        if (!full.startsWith(root + path.sep) || !fs.lstatSync(full).isFile() || fs.realpathSync(full) !== full) throw new AutobuilderOpsError('unreadable_untracked');
+        // Match wc -l: count newline bytes, including binary files; never follow symlinks.
+        for (const b of fs.readFileSync(full)) if (b === 10) n++;
+      } catch { throw new AutobuilderOpsError('unreadable_untracked'); }
     }
     return n;
   }
   const all = count(['.']), test = count(TEST_PATHS), prod = all - test;
-  if (prod < 0) throw new Error('inconsistent_meter');
+  if (prod < 0) throw new AutobuilderOpsError('inconsistent_meter');
   return { prod_loc: prod, test_loc: test, line: `SHIP_METER: ${prod} prod + ${test} test` };
 }

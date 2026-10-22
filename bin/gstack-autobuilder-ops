@@ -1,11 +1,36 @@
-#!/usr/bin/env bun
-import { updateState, measureSize } from '../lib/autobuilder-ops';
-const [op, ...args] = process.argv.slice(2);
-try {
-  if (op === 'state' && args.length === 1) { updateState(JSON.parse(args[0])); console.log('ok'); }
-  else if (op === 'meter' && args.length === 2) console.log(measureSize(args[0], args[1]).line);
-  else throw new Error('usage');
-} catch {
-  console.log(op === 'meter' ? 'SHIP_METER FAIL: operation failed' : 'FAILED: state operation failed');
-  process.exitCode = 1;
+#!/usr/bin/env bash
+# Isolate Bun startup from the unreviewed lane, following gstack-lane's H2 boundary.
+# Invoke this executable directly; `bun bin/gstack-autobuilder-ops` bypasses the shim.
+ab_fail() {
+  if [ "${1:-}" = meter ]; then
+    printf '%s\n' 'SHIP_METER FAIL: operation failed'
+  else
+    printf '%s\n' 'FAILED: state operation failed'
+  fi
+  printf '%s\n' 'AUTOBUILDER_OPS_ERROR: launcher_failed' >&2
+  exit 1
 }
+
+ab_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)" || ab_fail "${1:-}"
+ab_entry="$ab_root/lib/autobuilder-ops-cli.ts"
+[ -f "$ab_entry" ] || ab_fail "${1:-}"
+# Resolve a relative PATH entry before changing cwd; the configured runtime remains
+# the runtime selected by the caller, rather than one found in the neutral directory.
+ab_bun="$(type -P bun)" || ab_fail "${1:-}"
+case "$ab_bun" in /*) ;; *) ab_bun="$PWD/$ab_bun" ;; esac
+[ -x "$ab_bun" ] || ab_fail "${1:-}"
+
+ab_unset=()
+while IFS= read -r ab_var; do
+  case "$ab_var" in BUN_*|NODE_OPTIONS|NODE_PATH) ab_unset+=(-u "$ab_var") ;; esac
+done < <(compgen -e)
+
+# No fallback to the caller's cwd if isolation cannot be created.
+ab_cwd="$(mktemp -d "${TMPDIR:-/tmp}/gstack-autobuilder-bun.XXXXXX" 2>/dev/null)" || ab_fail "${1:-}"
+[ -n "$ab_cwd" ] && [ -d "$ab_cwd" ] || ab_fail "${1:-}"
+trap 'rmdir -- "$ab_cwd" 2>/dev/null || true' EXIT
+(
+  cd -- "$ab_cwd" 2>/dev/null || ab_fail "${1:-}"
+  exec env ${ab_unset[@]+"${ab_unset[@]}"} "$ab_bun" --no-env-file --config=/dev/null "$ab_entry" "$@"
+)
+exit $?
