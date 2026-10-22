@@ -1,0 +1,77 @@
+{
+  "base": "ba1a3153b3e39701f5966a2c805e876eec3f8d45",
+  "head": "d218a7a552dd2e30565e21dce405a3aac6bdbbff",
+  "fable_session_id": "666eac91-9225-4d3d-8cc2-62e7c7b3dd0c",
+  "date": "2026-10-22",
+  "branch": "codex/autobuilder-efficiency-round1",
+  "packet": {
+    "local_path": ".context/external-review/review-packet.txt",
+    "bytes": 541324,
+    "sha256": "457bbc3289f36ff0a43217a92b024577299b875689bc873e86747b09e7b73c28",
+    "contents": "Review brief, complete no-ext-diff base..head, then line-numbered head source files",
+    "context_files": [
+      "autobuilder-loop/autobuilder-unit.js",
+      "lib/autobuilder-ops.ts",
+      "bin/gstack-autobuilder-ops",
+      "scripts/resolvers/autobuilder.ts",
+      "scripts/resolvers/sections.ts",
+      "scripts/measure-autobuilder.ts",
+      "test/autobuilder-ops.test.ts",
+      "test/autobuilder-efficiency.test.ts",
+      "autobuilder-loop/sections/seat-c-review.md",
+      "plan-eng-review/SKILL.md.tmpl",
+      "plan-eng-review/sections/review-sections.md.tmpl",
+      "review/SKILL.md.tmpl",
+      "review/checklist.md",
+      "docs/designs/AUTOBUILDER_EFFICIENCY_ROUND1.md"
+    ]
+  },
+  "diff_sha256": "2bfb283f82dbeb1567450eba7d4902dc79757765856a0a260515d61c35fcd7fa",
+  "grok": {
+    "transport": "authenticated grok.com web session",
+    "model_selector": "Auto",
+    "backend_model": null,
+    "conversation_url": "https://grok.com/c/51770b91-bc95-413c-a929-aa15be3e096f",
+    "response_id": "231885fb-3fef-4e7a-b06e-84fc64660817",
+    "completion": "completed; Copy response available",
+    "observed_ui_duration": "2m 10s",
+    "provider_usage": null,
+    "paid_api_or_credit_override": false,
+    "coverage_limit": "Reviewer reports partial tests and key blocks rather than line-by-line generated reference inspection; see verbatim review.",
+    "response_sha256": "8c3eb51cbe389831ed66050a8daaf2761d44cdfb6a433fa95566a4ac93602a46",
+    "captured_response_sha256": "241c7dd2a8f6a54ee35defe68c404fece06791c2c98c1267cb9c072113e7a7b8",
+    "text_normalization": "Trailing Markdown whitespace removed and final newline added; wording unchanged."
+  },
+  "fable": {
+    "transport": "interactive Claude Code CLI",
+    "auth_method": "claude.ai",
+    "subscription_type": "max",
+    "displayed_model": "Fable 5.1",
+    "observed_model": "claude-fable-5-1",
+    "headless_print_mode": false,
+    "paid_api_or_credit_override": false,
+    "tools": [
+      "Read",
+      "Grep",
+      "Glob"
+    ],
+    "permission_mode": "dontAsk",
+    "slash_commands_disabled": true,
+    "mcp_servers": [],
+    "hooks_disabled": true,
+    "completion": "end_turn",
+    "completed_at": "2026-10-22T20:08:09.457Z",
+    "session_id": "666eac91-9225-4d3d-8cc2-62e7c7b3dd0c",
+    "observed_models": [
+      "claude-fable-5-1"
+    ],
+    "fallback_credit_values": [
+      null
+    ],
+    "usage_file": "fable-usage.json",
+    "coverage_limit": "Reviewer self-reports uninspected workflow regions and install paths; see verbatim review. Some reported line numbers and file count are inaccurate; corrected in handoff.",
+    "response_sha256": "cf93519b2de97c4dc99d89bacb8ac9d3e0b7ed266f732bb0fad40df67e81c8c1",
+    "session_closed": true
+  },
+  "host_verification": "verification.json"
+}

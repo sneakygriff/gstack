@@ -1,0 +1,26 @@
+{
+  "reviewed_head": "d218a7a552dd2e30565e21dce405a3aac6bdbbff",
+  "runtime": "Bun 1.4.0",
+  "scope": "Host verification in a new disposable Git repository; production source unchanged. No provider tests. Preload prints only a harmless marker. Temp fixture removed.",
+  "cases": [
+    {
+      "case": "bare helper with lane bunfig preload",
+      "returncode": 0,
+      "stdout": "REVIEW_FIXTURE_PRELOAD_EXECUTED\nSHIP_METER: 2 prod + 0 test\n",
+      "stderr": "",
+      "preload_executed": true
+    },
+    {
+      "case": "untracked symlink, no preload",
+      "returncode": 1,
+      "stdout": "SHIP_METER FAIL: operation failed\n",
+      "stderr": ""
+    },
+    {
+      "case": "existing checkpoint lock",
+      "returncode": 1,
+      "stdout": "FAILED: state operation failed\n",
+      "stderr": ""
+    }
+  ]
+}
