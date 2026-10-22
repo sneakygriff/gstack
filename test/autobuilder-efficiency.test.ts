@@ -15,6 +15,8 @@ test('measurement matches observed logical calls and prompt sizes, including fin
   expect(r.res.measurement.actual_tokens).toBeNull(); expect(r.res.measurement.duration_ms).toBeNull();
   const sum = Object.values(r.res.measurement.by_model).reduce((n: number, b: any) => n + b.logical_dispatches, 0);
   expect(sum).toBe(r.calls.length);
+  expect(Object.values(r.res.measurement.by_phase).reduce((n: number, b: any) => n + b.logical_dispatches, 0)).toBe(r.calls.length);
+  expect(Object.keys(r.res.measurement.by_phase).every(k => ['refresh', 'build', 'integrate', 'gate', 'fix', 'ship', 'patch', 'other'].includes(k))).toBe(true);
   const stateCalls = r.calls.filter((c: any) => c.label.startsWith('state:'));
   expect(stateCalls.length).toBeGreaterThan(0);
   expect(stateCalls.every((c: any) => c.prompt.includes('gstack-autobuilder-ops state'))).toBe(true);

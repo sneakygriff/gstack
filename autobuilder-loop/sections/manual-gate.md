@@ -130,4 +130,3 @@ INVALID; a limit on every fallback → ABSENT.
 
 After both seats return: `gstack-lane worktree rm --run-dir "$RUN_DIR" --task gate-<m>-codex`
 (and `-claude`; `--force` for a tainted one — it is evidence of a bad review, not work).
-

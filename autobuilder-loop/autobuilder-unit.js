@@ -487,9 +487,9 @@ const strictSchema = s => s === IDL || s === LINE || s === PUSHR
 const PATH_FIELDS = new Map([[FILES, ['files']], [GS, ['files_since_base', 'files_since_prev']], [GUARD, ['files_since', 'tree_delta']], [INT, ['files']]])
 // Logical requests include Workflow replay: these are NOT billable-call or token counters.
 // Only string lengths/counts persist. No prompts, reports, paths or provider credentials.
-const measurement = { version: 1, logical_dispatches: 0, prompt_chars: 0, response_chars: 0, null_results: 0, thrown_calls: 0, by_model: {} }
+const measurement = { version: 1, logical_dispatches: 0, prompt_chars: 0, response_chars: 0, null_results: 0, thrown_calls: 0, by_model: {}, by_phase: {} }
 function checkpointMeasurement() {
-  const { by_model, ...counts } = measurement
+  const { by_model, by_phase, ...counts } = measurement
   return { ...counts, actual_tokens: null, duration_ms: null }
 }
 function measurementSnapshot() {
@@ -503,6 +503,10 @@ const ask = async (prompt, opts) => {
   const key = String((opts && opts.model) || 'unspecified')
   const bucket = measurement.by_model[key] || (measurement.by_model[key] = { logical_dispatches: 0, prompt_chars: 0 })
   bucket.logical_dispatches++; bucket.prompt_chars += String(prompt).length
+  // Fixed vocabulary prevents phase descriptions or unit names entering telemetry.
+  const phaseKey = ((String((opts && opts.phase) || '').match(/^(Refresh|Build|Integrate|Gate|Fix|Ship|PATCH)\b/) || [])[1] || 'other').toLowerCase()
+  const phaseBucket = measurement.by_phase[phaseKey] || (measurement.by_phase[phaseKey] = { logical_dispatches: 0, prompt_chars: 0 })
+  phaseBucket.logical_dispatches++; phaseBucket.prompt_chars += String(prompt).length
   let r
   try { r = await agent(prompt, opts) } catch (e) { measurement.thrown_calls++; throw e }
   if (r == null) measurement.null_results++

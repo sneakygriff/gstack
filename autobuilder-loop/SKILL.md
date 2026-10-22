@@ -644,7 +644,7 @@ summary returns. Never a Claude subagent told to "act as codex" — same-model t
 ## Measurement and deterministic operations
 
 The unit workflow records `measurement` in each phase checkpoint and its final result:
-logical dispatches and explicit prompt/response characters. The final result adds requested-model totals.
+logical dispatches and explicit prompt/response characters. The final result adds requested-model and phase totals.
 These include Workflow cache replays; they exclude loaded files, schemas, nested CLI usage,
 and tool output. Tokens, cache hits and durations are unknown, never estimated as billed usage.
 Checkpoint snapshots precede their own relay; the returned result includes the final relay.

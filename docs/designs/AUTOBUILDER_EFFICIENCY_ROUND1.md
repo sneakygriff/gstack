@@ -20,7 +20,7 @@ requirements below are satisfied.
   Git shortstat semantics; untracked bytes retain newline-count semantics.
 - Workflow `ask()` counts logical requests and explicit UTF-16 prompt/response
   characters. Phase checkpoints store compact totals; the final result also
-  groups requests by requested model. It stores no prompt/report content.
+  groups requests by requested model and a fixed phase vocabulary. It stores no prompt/report content.
 - Seat C loads a generated methodology reference and the unchanged canonical
   `review/checklist.md`. The reference extracts authoritative source blocks;
   edits to those sources flow through the existing document generator.
@@ -92,3 +92,45 @@ Before installation: resolve any final free-suite failures, run the selected pai
 checks, and trial an equivalent small unit with measurement enabled. Keep the
 current install until those checks pass. Worktree rollback is simply abandoning
 this branch; no production state or active install is modified by implementation.
+
+## Observed local results (2026-10-22)
+
+All sizes below are characters, not billed tokens. Measurements use the Claude
+entrypoint and the script's direct-read definition, against `ba1a3153`.
+
+| Measurement | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Main entrypoint | 118,059 | 104,045 | 11.9% |
+| Seat C direct required reading | 137,514 | 44,959 | 67.3% |
+| Clean fixture explicit prompts | 67,620 | 63,353 | 6.3% |
+| Clean fixture state relays | 7,025 | 4,240 | 39.6% |
+
+The clean fixture still has 33 logical dispatches. All four comparison fixtures
+preserve dispatch labels, models and terminal outcomes. This is a mock/runtime
+regression comparison, not a live provider-quality or latency benchmark.
+
+Validation evidence in this worktree's ignored `.context/` directory:
+
+- `build.log`: full build succeeds with a locally downloaded Bun 1.4.0, matching CI.
+- `autobuilder-final.log`: 315 autobuilder/helper/regression tests passed.
+- `phase-counters.log`: 265 focused tests passed after adding phase totals.
+- `portable-repair.log`: 155 cross-host rendering and workflow-cache tests passed.
+- `coverage-repair.log`: 190 recipe/dependency-inventory tests passed after moving
+  their source reads and registering the complete judge dependency closure.
+- `free-prepared.log`: repository-wide acceptance attempt, not green. It found
+  stale source-location assertions and missing new-judge dependencies, repaired
+  and verified above. Broader failures remain unresolved; no full-green claim.
+- `base-environment.log`: five failures reproduced on detached `ba1a3153` with
+  the same Bun version and a sibling checkout: unquoted build path, two file-URL
+  expectations, macOS UID observation and native terminal capture. This establishes
+  baseline behavior for those five only, not every remaining full-suite failure.
+
+The first broad attempt used system Bun 1.3.14 and an unbuilt checkout; it was
+stopped, the environment was corrected, and the prepared attempt above replaced
+it. macOS temporary paths were canonicalized for tests to avoid `/var` versus
+`/private/var` identity differences. No global runtime upgrade was performed.
+
+Paid judges were not run: this environment has no `ANTHROPIC_API_KEY`. The paid
+selection is registered and still fails closed to full coverage where required.
+The current active skill installation is unchanged. This branch is implemented
+and reviewable, but rollout acceptance remains pending.
