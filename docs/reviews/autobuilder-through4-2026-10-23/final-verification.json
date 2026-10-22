@@ -594,5 +594,10 @@
   "installed_skill_state": {
     "head": "ba1a3153b3e39701f5966a2c805e876eec3f8d45",
     "status_porcelain": ""
+  },
+  "retro_status": "completed; read-only recommendations",
+  "committed_branch_credential_scan": {
+    "high": 0,
+    "advisory": 0
   }
 }
