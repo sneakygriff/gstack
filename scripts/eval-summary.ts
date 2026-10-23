@@ -52,13 +52,14 @@ const avgE2ETurns = e2eTurns.length > 0
   : 0;
 
 // Per-test efficiency stats (avg turns + duration across runs)
-const testEfficiency = new Map<string, { turns: number[]; durations: number[]; costs: number[] }>();
+const testEfficiency = new Map<string, { turns: number[]; durations: number[]; costs: number[]; observations: number }>();
 for (const r of e2eRuns) {
   for (const t of r.tests) {
     if (!testEfficiency.has(t.name)) {
-      testEfficiency.set(t.name, { turns: [], durations: [], costs: [] });
+      testEfficiency.set(t.name, { turns: [], durations: [], costs: [], observations: 0 });
     }
     const stats = testEfficiency.get(t.name)!;
+    stats.observations++;
     if (t.turns_used !== undefined) stats.turns.push(t.turns_used);
     if (t.duration_ms > 0) stats.durations.push(t.duration_ms);
     if (t.cost_usd != null) stats.costs.push(t.cost_usd);
@@ -162,7 +163,7 @@ if (testEfficiency.size > 0 && e2eRuns.length >= 2) {
   for (const [name, stats] of sorted) {
     const avgT = Math.round(stats.turns.reduce((a, b) => a + b, 0) / stats.turns.length);
     const avgD = Math.round(stats.durations.reduce((a, b) => a + b, 0) / stats.durations.length / 1000);
-    const avgC = stats.costs.length !== stats.turns.length ? 'unknown' : costText(stats.costs.reduce((a, b) => a + b, 0) / stats.costs.length);
+    const avgC = stats.costs.length !== stats.observations ? 'unknown' : costText(stats.costs.reduce((a, b) => a + b, 0) / stats.costs.length);
     const label = name.length > 30 ? name.slice(0, 27) + '...' : name.padEnd(30);
     console.log(`    ${label}  ${avgC}  ${avgT}t  ${avgD}s  (${stats.turns.length} runs)`);
   }
