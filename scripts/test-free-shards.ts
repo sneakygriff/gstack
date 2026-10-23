@@ -1041,6 +1041,7 @@ interface FileProgress {
  * attribution still runs so the epilogue works in every mode).
  */
 export class FreeRunReporter {
+  private readonly printedFiles = new Set<string>();
   private readonly decoders: Record<StreamOrigin, StringDecoder> = {
     stdout: new StringDecoder('utf8'),
     stderr: new StringDecoder('utf8'),
@@ -1111,6 +1112,12 @@ export class FreeRunReporter {
     };
   }
 
+  /** Exact cwd-resolved headers for callers that certify explicit file selections. */
+  observedFiles(rootDir: string): string[] {
+    return [...new Set([...this.printedFiles].map(file =>
+      normalizeRelativePath(path.relative(rootDir, path.resolve(rootDir, file)))))].sort();
+  }
+
   private handleLine(rawLine: string, origin: StreamOrigin): void {
     // GitHub Actions: bun wraps each file's section in ::group::<header>.
     // Without stripping, the real header fails FILE_HEADER_RE, failures get
@@ -1141,6 +1148,7 @@ export class FreeRunReporter {
 
     const header = FILE_HEADER_RE.exec(line);
     if (header) {
+      this.printedFiles.add(header[1]);
       const file = this.canonicalize(header[1]);
       // A new header ends the previous file's chunk — that file is no longer
       // a wedge suspect. (Bun 1.3.x prints NO (pass) lines, so chunk
@@ -1350,6 +1358,18 @@ export interface FreeShardOutcome {
    * hole the strict classifier exists to close.
    */
   unattributedFailures: number;
+  /** Additive execution evidence for focused receipts; legacy fixtures may omit it. */
+  evidence?: {
+    logPath: string;
+    observedFiles: string[];
+    captureComplete: boolean;
+    logRetained: boolean;
+    cleanupError: string | null;
+    cancellationSignal: 'SIGINT' | 'SIGTERM' | null;
+    passedTests: number;
+    skippedTests: number;
+    failedTests: number;
+  };
 }
 
 export interface ShardCommand {
@@ -1991,6 +2011,9 @@ export async function runFreeShard(
   const outcome: FreeShardOutcome = {
     shard: shardNumber, files, status, exitCode, elapsedMs: Date.now() - startedAt, groupPid, failingFiles, unattributedFailures,
     summary: { testsRan: report.testsRan, filesRan: report.filesRan, sawTerminalSummary: report.sawTerminalSummary },
+    evidence: { logPath, observedFiles: reporter.observedFiles(rootDir), captureComplete: captureFailures.size === 0,
+      logRetained: !logWriteFailed, cleanupError, cancellationSignal: forwarding.receivedSignal,
+      passedTests: summary.passedTests, skippedTests: summary.skippedTests, failedTests: summary.failedTests },
   };
   log(shardEpilogue(outcome, totalShards));
   for (const line of buildRunEpilogue(status, report, outcome.elapsedMs, logPath)) log(line);
