@@ -45,7 +45,8 @@ console.log(JSON.stringify({type:'result',subtype:write.status===0&&read.status=
   fs.writeFileSync(script, `import {mock,describe,expect} from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-mock.module(${JSON.stringify(path.join(root,'test/helpers/eval-store.ts'))},()=>({getProjectEvalDir:()=>${JSON.stringify(path.join(dir,'evals'))}}));
+const store = await import(${JSON.stringify(path.join(root,'test/helpers/eval-store.ts'))});
+mock.module(${JSON.stringify(path.join(root,'test/helpers/eval-store.ts'))},()=>({...store,getProjectEvalDir:()=>${JSON.stringify(path.join(dir,'evals'))}}));
 const capture=await import(${JSON.stringify(source)});
 const actualCapture=capture.captureSectionReads;
 mock.module(${JSON.stringify(path.join(root,'test/helpers/e2e-gate.ts'))},()=>({describeE2ETier:()=>describe}));
@@ -145,7 +146,8 @@ console.log(JSON.stringify({type:'result',subtype:'success',result:'Request deli
 `, { mode: 0o755 });
   const script = path.join(dir, 'run.ts');
   fs.writeFileSync(script, `import {mock} from 'bun:test';
-mock.module(${JSON.stringify(helper('eval-store'))},()=>({getProjectEvalDir:()=>${JSON.stringify(path.join(dir, 'evals'))}}));
+const store = await import(${JSON.stringify(helper('eval-store'))});
+mock.module(${JSON.stringify(helper('eval-store'))},()=>({...store,getProjectEvalDir:()=>${JSON.stringify(path.join(dir, 'evals'))}}));
 const {captureSectionReads}=await import(${JSON.stringify(helper('auq-sdk-capture'))});
 const fs=await import('node:fs');
 const results=[];
@@ -217,7 +219,8 @@ console.log(JSON.stringify({type:'result',subtype:'success',result:'Request deli
 `, { mode: 0o755 });
   const script = path.join(dir, 'run.ts');
   fs.writeFileSync(script, `import {mock} from 'bun:test';
-mock.module(${JSON.stringify(helper('eval-store'))}, () => ({getProjectEvalDir:()=>${JSON.stringify(path.join(dir, 'evals'))}}));
+const store = await import(${JSON.stringify(helper('eval-store'))});
+mock.module(${JSON.stringify(helper('eval-store'))}, () => ({...store,getProjectEvalDir:()=>${JSON.stringify(path.join(dir, 'evals'))}}));
 const {captureSectionReads,LONG_SECTION_CAPTURE_MS}=await import(${JSON.stringify(helper('auq-sdk-capture'))});
 const {CEO_SECTION_CACHE_PLAN,CEO_SECTION_DECISION_POLICY}=await import(${JSON.stringify(helper('ceo-section-loading-fixture'))});
 await Bun.write('PLAN.md',CEO_SECTION_CACHE_PLAN);
@@ -270,7 +273,8 @@ console.log(JSON.stringify({type:'result',subtype:'success',result:'Review repor
   const literal = 'Use Read.\nKeep "quotes", $(printf unsafe), and `literal` as text.';
   const script = path.join(dir, 'run.ts');
   fs.writeFileSync(script, `import {mock} from 'bun:test';
-mock.module(${JSON.stringify(helper('eval-store'))}, () => ({getProjectEvalDir:()=>${JSON.stringify(path.join(dir, 'evals'))}}));
+const store = await import(${JSON.stringify(helper('eval-store'))});
+mock.module(${JSON.stringify(helper('eval-store'))}, () => ({...store,getProjectEvalDir:()=>${JSON.stringify(path.join(dir, 'evals'))}}));
 const {runSkillTest}=await import(${JSON.stringify(helper('session-runner'))});
 const {captureSectionReads}=await import(${JSON.stringify(helper('auq-sdk-capture'))});
 const base={workingDirectory:${JSON.stringify(dir)},model:'fake-model',maxTurns:7,timeout:3000,allowedTools:['Read','Bash']};
@@ -348,7 +352,8 @@ console.log(JSON.stringify({type:'result',subtype:'success',result:'Finished',nu
   const literal = 'Keep "quotes", $(printf unsafe), and `literal` as text.';
   fs.writeFileSync(script, `import {mock} from 'bun:test';
 let setupMs=0; const setups=[];
-mock.module(${JSON.stringify(helper('eval-store'))},()=>({getProjectEvalDir:()=>${JSON.stringify(path.join(dir,'evals'))}}));
+const store = await import(${JSON.stringify(helper('eval-store'))});
+mock.module(${JSON.stringify(helper('eval-store'))},()=>({...store,getProjectEvalDir:()=>${JSON.stringify(path.join(dir,'evals'))}}));
 mock.module(${JSON.stringify(helper('hermetic-env'))},()=>({isHermeticEnabled:()=>true,hermeticChildEnv:extra=>{const start=Date.now();Bun.sleepSync(setupMs);setups.push({start,end:Date.now()});return {...process.env,...extra};}}));
 const {runSkillTest}=await import(${JSON.stringify(helper('session-runner'))});
 const base={workingDirectory:${JSON.stringify(dir)},model:'fake-model',maxTurns:7,tools:['Read','Bash'],allowedTools:['Read','Bash'],timeout:2000};

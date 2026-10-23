@@ -8,6 +8,7 @@ import { FreeRunReporter } from './test-free-shards';
 import { BunTestOutputClassifier, installChildSignalForwarding } from './test-strict-output';
 import { evalEntryOutcome } from '../test/helpers/eval-store';
 import { readUsageReport } from './autobuilder-usage';
+import { inspectNativeBinding } from './native-eval-binding';
 
 type Check = { id: string; kind?: 'focused' | 'native-eval'; cases?: string[]; files: string[]; inputs: string[]; environment: string[];
   scope: { status: 'declared-complete' | 'unknown'; note: string; unresolved: string[] }; record?: string; wallTimeoutSeconds?: number };
@@ -18,7 +19,7 @@ const engineRoot = path.resolve(import.meta.dir, '..');
 const engineFiles = ['scripts/autobuilder-acceptance.ts', 'scripts/test-focused.ts', 'scripts/test-free-shards.ts',
   'scripts/test-strict-output.ts', 'test/helpers/paid-test-set.ts', 'test/helpers/touchfiles.ts',
   'test/helpers/touchfiles-data.ts', 'test/helpers/test-selection.ts', 'scripts/autobuilder-usage.ts',
-  'test/helpers/eval-store.ts', 'test/helpers/cookie-workflow-manual-review.ts'];
+  'test/helpers/eval-store.ts', 'test/helpers/cookie-workflow-manual-review.ts', 'scripts/native-eval-binding.ts'];
 const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 function strings(value: unknown): value is string[] {
@@ -190,12 +191,12 @@ function inspectNative(plan: Plan, check: Check) {
     const native = readJSON(check.record);
     const nonempty = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
     const numeric = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-    if (![1, 2].includes(native.schema_version) || !['e2e', 'llm-judge'].includes(native.tier)
+    if (![1, 2, 3].includes(native.schema_version) || !['e2e', 'llm-judge'].includes(native.tier)
       || !['version', 'branch', 'git_sha', 'timestamp', 'hostname'].every(key => nonempty(native[key]))
       || !Number.isFinite(Date.parse(native.timestamp)) || !Array.isArray(native.tests) || !native.tests.length
       || !native.tests.every((entry: any) => nonempty(entry.name) && nonempty(entry.suite)
         && ['e2e', 'llm-judge'].includes(entry.tier) && typeof entry.passed === 'boolean'
-        && numeric(entry.duration_ms) && numeric(entry.cost_usd)
+        && numeric(entry.duration_ms) && (native.schema_version === 3 && entry.cost_usd === null || numeric(entry.cost_usd))
         && (entry.execution == null || ['executed', 'reused'].includes(entry.execution))))
       throw new Error('Invalid native EvalResult metadata');
     const passed = native.tests.filter((entry: any) => evalEntryOutcome(entry) === 'passed').length;
@@ -207,27 +208,48 @@ function inspectNative(plan: Plan, check: Check) {
     result.provenance = { ...result.provenance, revision: native.git_sha, timestamp: native.timestamp,
       claudeCliVersion: native.claude_cli_version ?? null, tier: native.tier,
       entries: native.tests.map((entry: any) => ({ name: entry.name, outcome: evalEntryOutcome(entry),
-        attempt: entry.attempt ?? null, execution: entry.execution ?? 'executed', reusedFrom: entry.reused_from ?? null })) };
+        attempt: entry.attempt ?? null, execution: entry.execution ?? 'executed', reusedFrom: entry.reused_from ?? null,
+        model: entry.model ?? null, modelSource: entry.model_source ?? 'unspecified', providerModel: entry.provider_model ?? null })) };
     if (native.total_tests !== native.tests.length || native.passed !== passed || native.failed !== failed
       || (native.manual_accepted_tests ?? 0) !== manual
       || native.executed_tests != null && native.executed_tests !== executed
       || native.reused_tests != null && native.reused_tests !== reused
       || native.total_duration_ms !== native.tests.reduce((sum: number, entry: any) => sum + entry.duration_ms, 0)
-      || native.total_cost_usd !== Math.round(native.tests.reduce((sum: number, entry: any) => sum + entry.cost_usd, 0) * 100) / 100)
+      || native.total_cost_usd !== (native.tests.some((entry: any) => entry.cost_usd === null) ? null
+        : Math.round(native.tests.reduce((sum: number, entry: any) => sum + entry.cost_usd, 0) * 100) / 100))
       throw new Error('Native evaluation counters contradict its entries');
-    result.status = failed ? 'failed' : manual ? 'incomplete' : 'passed';
+    // Native harness retry policy uses the final attempt of each case. Retain
+    // every failed attempt in counters/provenance instead of erasing its cost.
+    const finalEntries = [...new Map<string, any>(native.tests.map((entry: any) => [entry.name, entry])).values()];
+    result.status = finalEntries.some(entry => evalEntryOutcome(entry) === 'failed') ? 'failed'
+      : finalEntries.some(entry => evalEntryOutcome(entry) === 'manual-review') ? 'incomplete' : 'passed';
     if (!equal([...new Set(native.tests.map((entry: any) => entry.name))].sort(), [...check.cases!].sort()))
       result.reasons.push('Native evaluation cases do not match the declared selection');
     if (native._partial) result.reasons.push('Native evaluation is partial, not finalized');
-    if (native.tests.some((entry: any) => !nonempty(entry.model))) result.reasons.push('Native evaluation lacks observed model identity');
+    if (native.tests.some((entry: any) => !nonempty(entry.model))) result.reasons.push('Native evaluation lacks model request/identity metadata');
+    if (native.tests.some((entry: any) => !nonempty(entry.prompt))) result.reasons.push('Native evaluation lacks retained model input prompt');
+    if (native.acceptance) {
+      const attempts = new Map<string, number>();
+      for (const entry of native.tests) {
+        const expected = (attempts.get(entry.name) ?? 0) + 1;
+        if (entry.attempt !== expected) result.reasons.push('Native attempt history is incomplete or out of order');
+        attempts.set(entry.name, expected);
+      }
+      const retries = [...attempts].filter(([, count]) => count > 1).map(([name, count]) => ({ name, attempts: count }));
+      if (!equal(native.flaky_retries ?? [], retries)) result.reasons.push('Native retry ledger contradicts its attempts');
+    }
     if (native.tests.some((entry: any) => entry.execution === 'reused'
       && (!entry.reused_from?.input_key || !entry.reused_from?.run_id || !entry.reused_from?.revision || !entry.reused_from?.completed_at)))
       result.reasons.push('Native reused entry lacks original provenance');
     if (check.scope.status !== 'declared-complete' || check.scope.unresolved.length) result.reasons.push('Consumed input scope remains unknown');
-    // EvalCollector v1/v2 has no complete input/runtime manifest. Today's hashes
-    // or a cache input_key alone cannot retroactively establish consumption.
-    result.reasons.push('Native evaluation lacks consumed source/instruction fingerprints',
-      'Native evaluation lacks complete runtime and environment binding');
+    if (reused) result.reasons.push('Native entry-level reuse lacks a validated complete origin binding');
+    const binding = inspectNativeBinding(plan.root, check, native);
+    result.reasons.push(...binding.reasons);
+    result.applicability = binding.applicability === 'stale' ? 'stale' : result.reasons.length ? 'incomplete' : 'applicable';
+    if (native.acceptance) Object.assign(result.provenance, { runId: native.acceptance.runId,
+      startedAt: native.acceptance.startedAt, completedAt: native.acceptance.completedAt });
+    result.coverageCredit = result.applicability === 'applicable' && result.status === 'passed' && passed > 0;
+    result.reused = result.applicability === 'applicable';
   } catch (error) { result.status = 'incomplete'; result.reasons.push(error instanceof Error ? error.message : 'Invalid native evidence'); }
   return result;
 }

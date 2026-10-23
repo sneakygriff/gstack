@@ -1581,6 +1581,7 @@ export const GLOBAL_TOUCHFILES = [
   'test/helpers/session-drain-policy.ts',
   'test/helpers/hermetic-env.ts',    // Changes every E2E child's environment
   'test/helpers/eval-store.ts',      // All E2E tests store results here
+  'scripts/native-eval-binding.ts', // Opt-in collector input/runtime evidence
   'test/helpers/test-selection.ts',  // Selection logic itself — a bug here mis-selects every test
   'test/helpers/touchfiles.ts',      // The facade is executable selection-path code; an edit must run everything (it should never change, so the cost is ~zero)
   'test/helpers/e2e-helpers.ts',     // Shared harness every paid test imports (selection wiring, preflight, describeIfSelected) — an edit here changes every test's behavior
@@ -1599,6 +1600,8 @@ export const GLOBAL_TOUCHFILES = [
  * CARVE_GUARDS rather than a second skill list.
  */
 export const FREE_TOUCHFILES: Record<string, string[]> = {
+  'test/autobuilder-acceptance.test.ts': ['scripts/autobuilder-acceptance.ts', 'scripts/native-eval-binding.ts', 'scripts/autobuilder-usage.ts', 'test/helpers/eval-store.ts'],
+  'test/helpers/eval-store.test.ts': ['test/helpers/eval-store.ts', 'scripts/native-eval-binding.ts'],
   'test/generated-content-freshness.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'scripts/gen-skill-docs.ts', 'scripts/discover-skills.ts', 'scripts/host-config.ts', 'hosts/**', 'review/checklist.md'],
   'test/auq-format-always-loaded.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**'],
   'test/section-manifest-consistency.test.ts': ['*/SKILL.md*', '*/sections/**', 'scripts/resolvers/sections.ts', 'test/helpers/carve-guards.ts'],

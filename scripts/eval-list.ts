@@ -54,7 +54,7 @@ interface RunSummary {
   passed: number;
   manual: Array<{ name: string; approvedBy: string; approvalUrl: string }>;
   total: number;
-  cost: number;
+  cost: number | null;
   duration: number;
   turns: number;
 }
@@ -80,7 +80,7 @@ for (const file of files) {
       passed: tests ? tests.filter((t: any) => evalEntryOutcome(t) === 'passed').length : data.passed || 0,
       manual,
       total: data.total_tests || 0,
-      cost: data.total_cost_usd || 0,
+      cost: data.total_cost_usd ?? null,
       duration: data.total_duration_ms || 0,
       turns: totalTurns,
     });
@@ -114,7 +114,7 @@ for (const run of displayed) {
   const date = run.timestamp.replace('T', ' ').slice(0, 16);
   const branch = run.branch.length > 23 ? run.branch.slice(0, 20) + '...' : run.branch.padEnd(25);
   const pass = `${run.passed}/${run.total}`.padEnd(8);
-  const cost = `$${run.cost.toFixed(2)}`.padEnd(8);
+  const cost = (run.cost == null ? 'unknown' : `$${run.cost.toFixed(2)}`).padEnd(8);
   const turns = run.turns > 0 ? `${run.turns}t`.padEnd(7) : ''.padEnd(7);
   const dur = run.duration > 0 ? `${Math.round(run.duration / 1000)}s`.padEnd(10) : ''.padEnd(10);
   const manual = run.manual.map(entry => `MANUAL/unscored ${entry.name}: approved by ${entry.approvedBy} (${entry.approvalUrl})`).join('; ');
@@ -123,9 +123,9 @@ for (const run of displayed) {
 
 console.log('─'.repeat(105));
 
-const totalCost = runs.reduce((s, r) => s + r.cost, 0);
+const totalCost = runs.some(r => r.cost == null) ? null : runs.reduce((s, r) => s + r.cost!, 0);
 const totalDur = runs.reduce((s, r) => s + r.duration, 0);
 const totalTurns = runs.reduce((s, r) => s + r.turns, 0);
-console.log(`  ${runs.length} runs | $${totalCost.toFixed(2)} total | ${totalTurns} turns | ${Math.round(totalDur / 1000)}s | Showing: ${displayed.length}`);
+console.log(`  ${runs.length} runs | ${totalCost == null ? 'unknown' : `$${totalCost.toFixed(2)}`} total | ${totalTurns} turns | ${Math.round(totalDur / 1000)}s | Showing: ${displayed.length}`);
 console.log(`  Dir: ${EVAL_DIR}`);
 console.log('');

@@ -33,7 +33,7 @@ interface TestSeries {
   manualAccepted: number;
   retriedPasses: number;
   totalAttempts: number;
-  totalCostUsd: number;
+  totalCostUsd: number | null;
   totalDurationMs: number;
   lastSeen: string;
 }
@@ -69,7 +69,7 @@ export function aggregate(evalFiles: string[]): Map<string, TestSeries> {
         if (outcome === 'passed' && entries.length > 1) s.retriedPasses += 1;
       }
       for (const e of entries) {
-        s.totalCostUsd += e.cost_usd || 0;
+        s.totalCostUsd = s.totalCostUsd == null || e.cost_usd == null ? null : s.totalCostUsd + e.cost_usd;
         s.totalDurationMs += e.duration_ms || 0;
       }
       if (run.timestamp > s.lastSeen) s.lastSeen = run.timestamp;

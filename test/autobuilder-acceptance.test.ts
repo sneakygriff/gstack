@@ -29,6 +29,122 @@ function run(...args: string[]) {
 }
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
+test('a contemporaneously bound native collector run earns scoped credit and retains its original identity', () => {
+  const f = fixture();
+  Object.assign(f.plan.checks[0], { kind: 'native-eval', cases: ['controlled judge'] });
+  const driver = path.join(f.root, 'driver.ts');
+  fs.writeFileSync(driver, `import {EvalCollector} from ${JSON.stringify(path.resolve(import.meta.dir, 'helpers/eval-store.ts'))};
+    const collector = new EvalCollector('llm-judge', ${JSON.stringify(f.root)});
+    collector.addTest({name:'controlled judge',suite:'fixture',tier:'llm-judge',passed:true,
+      duration_ms:1,cost_usd:0,model:'controlled-model',prompt:'Controlled input',error:undefined});
+    console.log(JSON.stringify({record:await collector.finalize()}));`);
+  f.plan.checks[0].inputs.push('driver.ts');
+  f.save();
+  const child = Bun.spawnSync([process.execPath, driver], { stdout: 'pipe', stderr: 'pipe', timeout: 10000,
+    env: { ...process.env, GSTACK_ACCEPTANCE_PLAN: f.planPath, GSTACK_ACCEPTANCE_CHECK: 'focused' } });
+  expect(child.exitCode, child.stderr.toString()).toBe(0);
+  f.plan.checks[0].record = JSON.parse(child.stdout.toString()).record;
+  f.save();
+  const native = JSON.parse(fs.readFileSync(f.plan.checks[0].record, 'utf8'));
+  const result = run('assemble', f.planPath);
+  expect(result.code, result.stderr).toBe(0);
+  expect(result.json.checks[0]).toMatchObject({ status: 'passed', applicability: 'applicable',
+    coverageCredit: true, reused: true, provenance: { runId: native.acceptance.runId } });
+  fs.writeFileSync(path.join(f.root, 'unrelated.md'), 'Unconsumed documentation');
+  expect(run('assemble', f.planPath).json.checks[0].provenance.runId).toBe(native.acceptance.runId);
+});
+
+test('native bindings reject changed inputs, runtime, environment and result bytes', () => {
+  const f = fixture();
+  Object.assign(f.plan.checks[0], { kind: 'native-eval', cases: ['controlled judge'] });
+  const driver = path.join(f.root, 'driver.ts');
+  fs.writeFileSync(driver, `import {EvalCollector} from ${JSON.stringify(path.resolve(import.meta.dir, 'helpers/eval-store.ts'))};
+    const collector = new EvalCollector('llm-judge', ${JSON.stringify(f.root)});
+    collector.addTest({name:'controlled judge',suite:'fixture',tier:'llm-judge',passed:true,duration_ms:1,cost_usd:0,model:'fixture',prompt:'Controlled input'});
+    console.log(JSON.stringify({record:await collector.finalize()}));`);
+  f.plan.checks[0].inputs.push('driver.ts');
+  f.save();
+  const child = Bun.spawnSync([process.execPath, driver], { stdout: 'pipe', stderr: 'pipe', timeout: 10000,
+    env: { ...process.env, GSTACK_ACCEPTANCE_PLAN: f.planPath, GSTACK_ACCEPTANCE_CHECK: 'focused' } });
+  expect(child.exitCode, child.stderr.toString()).toBe(0);
+  f.plan.checks[0].record = JSON.parse(child.stdout.toString()).record;
+  f.save();
+  const original = fs.readFileSync(f.plan.checks[0].record, 'utf8');
+  const source = fs.readFileSync(path.join(f.root, 'source.ts'), 'utf8');
+  fs.appendFileSync(path.join(f.root, 'source.ts'), '// changed');
+  expect(run('assemble', f.planPath).json.checks[0]).toMatchObject({ applicability: 'stale', coverageCredit: false });
+  fs.writeFileSync(path.join(f.root, 'source.ts'), source);
+  const changedEnvironment = Bun.spawnSync([process.execPath, command, 'assemble', f.planPath], {
+    stdout: 'pipe', stderr: 'pipe', timeout: 10000, env: { ...process.env, ACCEPTANCE_FIXTURE: 'different' } });
+  expect(JSON.parse(changedEnvironment.stdout.toString()).checks[0]).toMatchObject({ applicability: 'stale', coverageCredit: false });
+  for (const change of ['runtime', 'result', 'during-run']) {
+    const record = JSON.parse(original);
+    if (change === 'runtime') record.acceptance.before.runtime.bun = record.acceptance.after.runtime.bun = 'different';
+    if (change === 'result') record.tests[0].model = 'altered-after-finalize';
+    if (change === 'during-run') record.acceptance.after.inputs[0].sha256 = '0'.repeat(64);
+    fs.writeFileSync(f.plan.checks[0].record, JSON.stringify(record));
+    expect(run('assemble', f.planPath).json.checks[0]).toMatchObject({
+      applicability: change === 'runtime' ? 'stale' : 'incomplete', coverageCredit: false });
+  }
+});
+
+test('invalid or late native opt-in cannot label an already started execution as bound', () => {
+  const f = fixture();
+  Object.assign(f.plan.checks[0], { kind: 'native-eval', cases: ['controlled judge'] });
+  const driver = path.join(f.root, 'driver.ts');
+  fs.writeFileSync(driver, `import {EvalCollector} from ${JSON.stringify(path.resolve(import.meta.dir, 'helpers/eval-store.ts'))};
+    import fs from 'node:fs';
+    const collector = new EvalCollector('llm-judge', ${JSON.stringify(f.root)});
+    fs.writeFileSync(${JSON.stringify(path.join(f.root, 'model-started'))},'yes');
+    process.env.GSTACK_ACCEPTANCE_PLAN=${JSON.stringify(f.planPath)};process.env.GSTACK_ACCEPTANCE_CHECK='focused';
+    collector.addTest({name:'controlled judge',suite:'fixture',tier:'llm-judge',passed:true,duration_ms:1,cost_usd:0,model:'fixture',prompt:'Controlled input'});
+    console.log(JSON.stringify({record:await collector.finalize()}));`);
+  f.plan.checks[0].inputs.push('driver.ts');
+  f.save();
+  for (const check of ['', 'missing-check']) {
+    const child = Bun.spawnSync([process.execPath, driver], { stdout: 'pipe', stderr: 'pipe', timeout: 10000,
+      env: { ...process.env, GSTACK_ACCEPTANCE_PLAN: f.planPath, GSTACK_ACCEPTANCE_CHECK: check } });
+    expect(child.exitCode).not.toBe(0);
+    expect(fs.existsSync(path.join(f.root, 'model-started'))).toBe(false);
+  }
+  const late = Bun.spawnSync([process.execPath, driver], { stdout: 'pipe', stderr: 'pipe', timeout: 10000,
+    env: { ...process.env, GSTACK_ACCEPTANCE_PLAN: undefined, GSTACK_ACCEPTANCE_CHECK: undefined } });
+  expect(late.exitCode, late.stderr.toString()).toBe(0);
+  f.plan.checks[0].record = JSON.parse(late.stdout.toString()).record;
+  f.save();
+  expect(run('assemble', f.planPath).json.checks[0]).toMatchObject({ applicability: 'incomplete', coverageCredit: false,
+    reasons: expect.arrayContaining(['Native evaluation lacks consumed source/instruction fingerprints']) });
+});
+
+test('bound native attempts preserve final retry policy, failures, missing cases and unsupported entry reuse', () => {
+  for (const scenario of ['retry', 'failure', 'missing-case', 'missing-prompt', 'reused']) {
+    const f = fixture();
+    Object.assign(f.plan.checks[0], { kind: 'native-eval', cases: scenario === 'missing-case' ? ['controlled judge', 'unstarted judge'] : ['controlled judge'] });
+    const driver = path.join(f.root, 'driver.ts');
+    fs.writeFileSync(driver, `import {EvalCollector} from ${JSON.stringify(path.resolve(import.meta.dir, 'helpers/eval-store.ts'))};
+      const collector = new EvalCollector('llm-judge', ${JSON.stringify(f.root)});
+      const entry = {name:'controlled judge',suite:'fixture',tier:'llm-judge',passed:true,duration_ms:1,cost_usd:0,model:'fixture',prompt:'Controlled input'};
+      if (${JSON.stringify(scenario)} === 'retry') collector.addTest({...entry,passed:false});
+      if (${JSON.stringify(scenario)} === 'missing-prompt') delete entry.prompt;
+      collector.addTest({...entry,passed:${scenario !== 'failure'},${scenario === 'reused' ? "execution:'reused',reused_from:{input_key:'key',run_id:'old',revision:'old',completed_at:'old'}," : ''}});
+      console.log(JSON.stringify({record:await collector.finalize()}));`);
+    f.plan.checks[0].inputs.push('driver.ts');
+    f.save();
+    const child = Bun.spawnSync([process.execPath, driver], { stdout: 'pipe', stderr: 'pipe', timeout: 10000,
+      env: { ...process.env, GSTACK_ACCEPTANCE_PLAN: f.planPath, GSTACK_ACCEPTANCE_CHECK: 'focused' } });
+    expect(child.exitCode, child.stderr.toString()).toBe(0);
+    f.plan.checks[0].record = JSON.parse(child.stdout.toString()).record;
+    f.save();
+    const result = run('assemble', f.planPath);
+    if (scenario === 'retry') {
+      expect(result.json.checks[0]).toMatchObject({ status: 'passed', coverageCredit: true, counts: { passed: 1, failed: 1 },
+        provenance: { entries: [{ outcome: 'failed', attempt: 1 }, { outcome: 'passed', attempt: 2 }] } });
+    } else if (scenario === 'failure') expect(result.json.checks[0]).toMatchObject({ status: 'failed', coverageCredit: false });
+    else expect(result.json.checks[0]).toMatchObject({ applicability: 'incomplete', coverageCredit: false,
+      ...(scenario === 'missing-prompt' ? { reasons: expect.arrayContaining(['Native evaluation lacks retained model input prompt']) } : {}) });
+  }
+}, 30000);
+
 test('native collector outcomes are reconciled but cannot certify missing consumed inputs or runtime', async () => {
   const f = fixture();
   const collector = new EvalCollector('llm-judge', f.root);
