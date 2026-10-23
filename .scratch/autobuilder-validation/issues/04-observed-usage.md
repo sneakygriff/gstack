@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] Use stable event/attempt identity to deduplicate; retain phase, role, source/instruction fingerprints and original evidence references.
 - [ ] Report tokens, cache, retries and duration only when available; unknown is not zero.
