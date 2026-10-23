@@ -25,9 +25,12 @@
     }
   ],
   "claude_effective_identity_comparison": {
-    "same_email_and_org": false,
+    "same_email_and_org": null,
     "distinct_verified_pools": 1,
-    "raw_identifiers_retained": false
+    "comparison_state": "unresolved at final capture: default unauthenticated, overflow authenticated",
+    "initial_comparison_same_email_and_org": true,
+    "raw_identifiers_retained": false,
+    "reason": "Initial authenticated outputs matched. Final capture cannot compare identities because default has no authenticated identity; false from comparing missing values would not establish different pools. Whether temporal or invocation-environment drift caused the difference is unverified."
   },
   "grok_auth": {
     "exit_code": 0,
@@ -73,7 +76,7 @@
     "session_id": "a2e5f95c-4559-42ed-9996-245dbfcebf4b",
     "requested_model": "haiku",
     "observed_model": "claude-haiku-5-5",
-    "auth": "claude.ai",
+    "auth": "earlier status reported claude.ai; probe result does not independently identify authentication method",
     "cli_exit": 0,
     "result_subtype": "success",
     "num_turns": 2,
@@ -96,7 +99,8 @@
     "cost_basis": "list",
     "invoice_charge_verified": false,
     "fallback_credit": null,
-    "usage_evidence": "CLI result plus allowlisted public Read tool records from session transcript; no hidden reasoning copied"
+    "usage_evidence": "CLI result plus allowlisted public Read tool records from session transcript; no hidden reasoning copied",
+    "configuration_context": "No per-command CLAUDE_CONFIG_DIR override; explicit default-directory capture later returned unauthenticated"
   },
   "codex_transport": {
     "cli_model_probe": "not run",
@@ -114,5 +118,24 @@
     "observed_model": null,
     "requested_default_catalog": "grok-4.7",
     "ticket06_dispatched": false
+  },
+  "claude_profiles_observation_context": "Final capture explicitly set CLAUDE_CONFIG_DIR to each profile directory. Preserve these outputs as observed; they differ from earlier CLI calls.",
+  "claude_initial_observations": {
+    "observed_order": "before OAuth started at 2026-10-23T04:17:21Z; exact auth-check timestamps not retained",
+    "source": "tool-returned claude auth status outputs in this worker conversation",
+    "default_invocation": "claude auth status (no per-command CLAUDE_CONFIG_DIR override)",
+    "overflow_invocation": "CLAUDE_CONFIG_DIR=/Users/stefanandrei/.claude-overflow claude auth status",
+    "default": {
+      "logged_in": true,
+      "auth_method": "claude.ai",
+      "subscription_type": "max"
+    },
+    "overflow": {
+      "logged_in": true,
+      "auth_method": "claude.ai",
+      "subscription_type": "max"
+    },
+    "same_email_and_org": true,
+    "raw_identifiers_retained": false
   }
 }
