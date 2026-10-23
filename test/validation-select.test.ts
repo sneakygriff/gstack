@@ -69,6 +69,15 @@ test('unrelated documentation selects no model or free checks and gives no cover
     ignoredFiles: ['docs/unrelated-notes.md'], unknownFiles: [] });
 });
 
+test('paid exemptions cannot silently discard unknown free helper or golden coverage', () => {
+  for (const source of ['test/helpers/auq-parallel-worker.ts', 'test/fixtures/golden/claude-ship-SKILL.md']) {
+    const result = run(['--run-free', '--', source], root, true);
+    expect(result.code, result.stderr).toBe(2);
+    expect(JSON.parse(result.text)).toMatchObject({ status: 'blocked', model: [], coverageCredit: false,
+      ignoredFiles: [], unknownFiles: [source], uncertainties: [{ file: source, reason: expect.stringContaining('coverage is unknown') }] });
+  }
+});
+
 test('unknown source and changed dependency registry remain blocked before any free or paid launch', () => {
   for (const source of ['lib/new-unregistered-helper.ts', 'test/helpers/touchfiles-data.ts']) {
     const result = run(['--run-free', '--', 'scripts/test-focused.ts', source], root, true);
