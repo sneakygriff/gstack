@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] Reject nonexistent or invalid selectors before any test child starts; exact paths, spaces, duplicates and empty selection have explicit behavior.
 - [ ] Expose a side-effect-free plan and a structured receipt through the public command.
