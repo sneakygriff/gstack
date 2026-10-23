@@ -25,7 +25,11 @@ function filesystem<T>(fn: () => T): T {
 export const EXCLUSIONS = ['*.lock', 'package-lock.json', 'pnpm-lock.yaml', 'bun.lockb', '*dist/*', '*build/*', '*.gen.ts', '*generated/*', '*drizzle/meta/*', '*__snapshots__/*', '*.snap'].map(p => `:(exclude)${p}`);
 export const TEST_PATHS = ['**/test/**', '**/__tests__/**', '**/*.test.*', '**/*.spec.*', '**/e2e*/**'].map(p => `:(glob)${p}`);
 function git(cwd: string, args: string[]): string {
-  const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' } });
+  // The requested lane, not ambient Git overrides, owns the measurement/checkpoint.
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+  Object.assign(env, { LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
+  const r = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', cwd, ...args], { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
   if (r.error || r.status !== 0) throw new AutobuilderOpsError('git_failed'); // never relay repo paths or stderr
   return r.stdout;
 }

@@ -63,8 +63,28 @@ test('invalid base, non-repo and option-like base cannot become zero LOC', () =>
   expect(() => measureSize(tmp(), 'HEAD')).toThrow();
 });
 function cli(...args: string[]) {
-  return spawnSync(path.join(root, 'bin/gstack-autobuilder-ops'), args, { encoding: 'utf8', timeout: 10_000 });
+  return cliWithEnv(process.env, ...args);
 }
+function cliWithEnv(env: NodeJS.ProcessEnv, ...args: string[]) {
+  return spawnSync(path.join(root, 'bin/gstack-autobuilder-ops'), args, { encoding: 'utf8', timeout: 10_000, env });
+}
+test('CLI meter ignores inherited Git repository and index overrides', () => {
+  const lane = repo(), other = repo();
+  fs.writeFileSync(path.join(lane, 'app.ts'), 'old\n' + 'extra\n'.repeat(5));
+  const normal = cli('meter', lane, 'HEAD');
+  expect(normal.status).toBe(0); expect(normal.stdout.trim()).toBe('SHIP_METER: 5 prod + 0 test');
+  const redirected = cliWithEnv({ ...process.env, GIT_DIR: path.join(other, '.git'), GIT_WORK_TREE: other, GIT_INDEX_FILE: path.join(other, '.git', 'index') }, 'meter', lane, 'HEAD');
+  expect(redirected.status).toBe(0); expect(redirected.stdout).toBe(normal.stdout); expect(redirected.stderr).toBe('');
+});
+test('CLI meter never executes repository fsmonitor hooks', () => {
+  const lane = repo(), outside = tmp(), marker = path.join(outside, 'called'), hook = path.join(outside, 'fsmonitor');
+  fs.writeFileSync(hook, '#!/bin/sh\nprintf called >> "$(dirname "$0")/called"\nprintf "token\\n"\n', { mode: 0o700 });
+  git(lane, 'config', 'core.fsmonitor', hook);
+  fs.writeFileSync(path.join(lane, 'app.ts'), 'old\nextra\n');
+  const result = cli('meter', lane, 'HEAD');
+  expect(result.status).toBe(0); expect(result.stdout.trim()).toBe('SHIP_METER: 1 prod + 0 test');
+  expect(fs.existsSync(marker)).toBe(false);
+});
 function expectFailure(r: ReturnType<typeof cli>, op: 'state' | 'meter', reason: string) {
   expect(r.status).toBe(1);
   expect(r.stdout.trim()).toBe(op === 'meter' ? 'SHIP_METER FAIL: operation failed' : 'FAILED: state operation failed');
