@@ -1660,7 +1660,7 @@ async function main(): Promise<number> {
     // Source: the finalized eval-store JSONs inside the slice artifacts.
     const flaky: Array<{ name: string; attempts: number; file: string }> = [];
     const collectors: Parameters<typeof collectorOutcomeCounts>[0] = [];
-    const files: Array<{ file: string; tier: string; shard: string | number; cost: number;
+    const files: Array<{ file: string; tier: string; shard: string | number; cost: number | null;
       flaky: number; total: number; executed: number; reused: number; passed: number;
       failed: number; manual_accepted: number; attempts: number }> = [];
     const manualProblems: string[] = [];
@@ -1699,7 +1699,7 @@ async function main(): Promise<number> {
         collectors.push(parsed);
         const counts = collectorOutcomeCounts([parsed]);
         files.push({ file: name, tier: parsed.tier ?? 'unknown', shard: parsed.shard ?? '-',
-          cost: parsed.total_cost_usd ?? 0, flaky: parsed.flaky_retries?.length ?? 0,
+          cost: parsed.total_cost_usd ?? null, flaky: parsed.flaky_retries?.length ?? 0,
           total: counts.passed + counts.failed + counts.manual_accepted, ...counts });
         for (const f of parsed.flaky_retries ?? []) flaky.push({ ...f, file: name });
       } catch (error) {

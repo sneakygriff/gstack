@@ -258,6 +258,35 @@ describe('dependency-free CI planner and report execution', () => {
     });
   }
 
+  test('report preserves unknown native cost while retaining legacy numeric costs', () => {
+    const reportDir = path.join(fixture, 'unknown-cost-report');
+    fs.mkdirSync(reportDir);
+    const manifest = buildRunManifest({ tier: 'gate', sliceCount: 1, evalsAll: true, env: { EVALS_ALL: '1' } });
+    fs.writeFileSync(path.join(reportDir, 'manifest.json'), JSON.stringify(manifest));
+    fs.writeFileSync(path.join(reportDir, 'slice-1.json'), JSON.stringify({
+      version: 1, tier: 'gate', sliceIndex: 1, sliceCount: 1,
+      outcomes: manifest.entries.filter(entry => entry.status === 'planned').map(entry => ({
+        files: [entry.file], status: 'passed', exitCode: 0, elapsedMs: 1,
+        executedTests: STRICT_RETRY_CASE_BUDGETS.find(budget => budget.file === entry.file)?.cases ?? 1,
+        skippedTests: 0, ...(entry.budget ? { budget: entry.budget } : {}),
+      })),
+    }));
+    for (const [version, cost] of [[1, 1.25], [2, 0], [3, null]] as const) {
+      fs.writeFileSync(path.join(reportDir, `native-${version}.json`), JSON.stringify({
+        schema_version: version, version: '1.0', branch: 'fixture', git_sha: 'abc1234',
+        timestamp: '2026-01-01T00:00:00Z', hostname: 'fixture', tier: 'e2e', total_tests: 1,
+        passed: 1, failed: 0, total_duration_ms: 1, total_cost_usd: cost,
+        tests: [{ name: `native-${version}`, suite: 'fixture', tier: 'e2e', passed: true, duration_ms: 1, cost_usd: cost }],
+      }));
+    }
+    const result = run(['--report', reportDir], 'gate');
+    expect(result.status, result.stderr).toBe(0);
+    const summary = JSON.parse(fs.readFileSync(path.join(reportDir, 'collector-outcomes.json'), 'utf8'));
+    expect(Object.fromEntries(summary.files.map((file: any) => [file.file, file.cost])))
+      .toEqual({ 'native-1.json': 1.25, 'native-2.json': 0, 'native-3.json': null });
+    expect(summary.totals).toMatchObject({ passed: 3, failed: 0, executed: 3 });
+  });
+
   test('report verifies every manual claim against current source, preserves attempts, and never masks a failed shard', () => {
     const skillPath = path.join(fixture, 'setup-browser-cookies/SKILL.md');
     const currentSkill = fs.readFileSync(skillPath, 'utf8');
