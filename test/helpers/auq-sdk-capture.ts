@@ -233,7 +233,8 @@ export async function captureSectionReads(opts: {
   nativeReviewOnly?: boolean;
 }): Promise<{ readSections: Set<string>; reportProduced: boolean; reportWritten: boolean;
   exitReason: SkillTestResult['exitReason']; toolCalls: SkillTestResult['toolCalls'];
-  transcript: SkillTestResult['transcript']; output: string }> {
+  transcript: SkillTestResult['transcript']; output: string; prompt: string; requestedModel: string;
+  estimatedCost: number | null }> {
   const outFile = path.join(opts.planDir, opts.reportFile ?? 'REPORT.md');
   const timeout = opts.timeout ?? 300_000;
   const fullPlanReview = opts.skillName === 'plan-ceo-review' || opts.skillName === 'plan-eng-review';
@@ -303,6 +304,7 @@ ${fullPlanReview ? `- Save the evolving plan and review outputs to ${outFile} wi
 - After all required writes are complete, return a brief completion message and STOP. Do not reproduce the full report in the final response.`;
 
   let result: SkillTestResult;
+  const requestedModel = resolveEvalModel('capture', opts.model);
   try {
     if (stateDir) fs.writeFileSync(path.join(stateDir, 'config.yaml'), 'codex_reviews: disabled\n');
     result = await runSkillTest({
@@ -316,7 +318,7 @@ ${fullPlanReview ? `- Save the evolving plan and review outputs to ${outFile} wi
       timeout,
       testName: opts.testName,
       runId: opts.runId,
-      model: resolveEvalModel('capture', opts.model),
+      model: requestedModel,
       ...(stateDir ? { env: { GSTACK_HOME: stateDir, GSTACK_STATE_ROOT: stateDir } } : {}),
     });
   } finally {
@@ -341,7 +343,8 @@ ${fullPlanReview ? `- Save the evolving plan and review outputs to ${outFile} wi
 
   // Keep successful terminal-output captures, but a draft left by a failed run
   // must never satisfy callers that use reportProduced as their completion gate.
-  return { readSections, reportProduced, reportWritten, exitReason: result.exitReason, toolCalls: result.toolCalls, transcript: result.transcript, output };
+  return { readSections, reportProduced, reportWritten, exitReason: result.exitReason, toolCalls: result.toolCalls, transcript: result.transcript, output,
+    prompt, requestedModel, estimatedCost: result.costEstimate?.estimatedCost ?? null };
 }
 
 /** A completed CEO review needs its artifact and every summary outcome. */

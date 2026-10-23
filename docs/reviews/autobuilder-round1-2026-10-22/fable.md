@@ -1,0 +1,39 @@
+**Verdict:** No P1. The gate logic is preserved (the manual recipes moved verbatim; the unit workflow's gate functions are untouched apart from Seat C's read target). Three P2s are operability and hardening regressions in the new helper, not review-policy regressions. I would merge after fixing or explicitly accepting F1–F3.
+
+## Defects introduced by this diff
+
+**F1 (P2, confidence 0.7) — the new Bun helper runs without the repo's own Bun isolation.**
+`bin/gstack-autobuilder-ops:1` is a bare `#!/usr/bin/env bun`. Bun loads `bunfig.toml` (top-level `preload`) and auto-loads `.env` from the caller's cwd, and honors `BUN_OPTIONS`. The skill tells the orchestrator to run the meter from the unit lane (`autobuilder-loop/SKILL.md.tmpl:617,621`), and the Workflow's Haiku relays run it during Build and Integrate (`autobuilder-loop/autobuilder-unit.js:1636,1827`), which is before any gate has reviewed that code. A wave task that commits a `bunfig.toml` with `preload` therefore executes repo code inside the process that holds `.state.lock` and writes `state.json`. The repo already treats this as a real threat: `bin/gstack-lane:1670-1697` runs every helper-side Bun call from an empty cwd with `--no-env-file --config=/dev/null` and `BUN_*` unset. At base the meter and state writes used only git, jq and awk, so this is new surface. Next action: wrap the bin in a bash shim that applies the same H2 treatment, or use `env -S bun --no-env-file --config=/dev/null`. Verified: shebang, H2 block, call sites. Hypothesis: that a product repo's bunfig is reached in practice.
+
+**F2 (P2, confidence 0.85) — all failure reasons are erased, while new failure classes were added.**
+The CLI prints only `SHIP_METER FAIL: operation failed` or `FAILED: state operation failed` (`bin/gstack-autobuilder-ops:9-10`), and the library deliberately discards git stderr and its own reason codes (`lib/autobuilder-ops.ts:15,25,65,72`). The skill then says "repair the meter first" (`SKILL.md.tmpl:622`) and the design doc says a leftover lock "requires operator investigation", but nothing names the cause, and the skill never mentions `.state.lock`. At base the recipe printed the failure class and let git's message through. Next action: emit a fixed-vocabulary reason code (never a path) on stderr, such as `lock_held`, `git_failed`, `unreadable_untracked`, `invalid_base`, and document the lock in the resume text.
+
+**F3 (P2, confidence 0.8) — the meter now hard-stops the unit on inputs that previously counted as zero.**
+`lib/autobuilder-ops.ts:65` throws for any untracked entry that is not a regular file, is a symlink, or vanishes between `ls-files` and `lstat` (ENOENT is not caught). The callers turn that into `SHIP_METER STOP` (`autobuilder-unit.js:1637,1802,1832`). At base, `cat | wc -l` followed file symlinks and tolerated everything else. Trigger: one non-ignored untracked symlink or FIFO anywhere in the lane. Related new limits with the same outcome: a 30-second timeout per git call (`:10`), a 16 MB `ls-files` buffer (`:14`), and whole-file `readFileSync` of each untracked file (`:67`) where the old pipeline streamed. The design doc calls the symlink case intentional, but combined with F2 the operator gets a stop with no lead. Next action: count non-regular entries as zero and report them via the reason channel, or at least catch ENOENT.
+
+**F4 (P3, confidence 0.9) — contradictory Seat C instructions on the L2 path.**
+The new sentence in `autobuilder-unit.js:755` says a missing rubric or checklist means `REVIEW_INCOMPLETE`, never clean. The L2 relay at `:790` still appends "if you cannot read a skill file, apply the methodology from your own knowledge" to the same brief. The judge goal and design doc both claim "never treat missing references as clean". Decide which rule governs L2 and make line 790 agree.
+
+**F5 (P3, confidence 0.85) — new absolute-path requirement with no validation.**
+`updateState` rejects non-absolute `runDir` or `lane` (`lib/autobuilder-ops.ts:28`). The workflow never checks its args, so a relative or `~`-prefixed path (which worked at base via `git -C` and jq) makes every checkpoint fail silently and the run BLOCKs at the first wave (`autobuilder-unit.js:1613`). The documented flow produces absolute paths (`SKILL.md.tmpl:264,270`), so this is a sharp edge. Validate in `main()` and stop with a clear reason.
+
+**F6 (P3, confidence 0.5, hypothesis) — checkpoint counters couple state prompts to prior response bytes.**
+Each state relay now embeds `response_chars` and `null_results` (`autobuilder-unit.js:393,491-494`). The resume contract relies on byte-stable prompts replaying from cache (`:34-35`, `SKILL.md.tmpl:817`). If any earlier response differs on resume, every later state prompt misses. At base those prompts depended only on phase, round and decisions. Consider keeping only script-deterministic counters in the checkpoint payload. I cannot verify the Workflow cache keying from here.
+
+**F7 (P3, confidence 0.8) — minor telemetry caveats.**
+`response_chars` measures `JSON.stringify` length including punctuation and unscrubbed strict-schema payloads (`:513`). The state prompt now carries its own measurement JSON, so the "after" prompt total includes a self-referential cost the "before" lacked. `by_model` keys come from operator args, unlike the fixed `by_phase` vocabulary.
+
+## Advisory comments
+
+- **Methodology scope.** The extract covers preferences, cognitive patterns, Sections 1–4 with rubric and coverage audit, failure modes, checklist read, and the full core pass. Dropped versus the old whole-skill read: review's Important Rules (`review/SKILL.md.tmpl:427-430`, "read the FULL diff", "only flag real problems"), the slop scan, and the Diagrams subsection. Extracted text still references "Decision procedure", "Step 4.6" and "Step 5.8", which no longer exist in the reviewer's context. The preface handles decisions; it could also resolve the step references.
+- **Extractor fragility.** `SEAT_C_SOURCES` slices on literal headings and fails only when a marker is missing, not when one is inserted earlier. The containment test would catch shrinkage only.
+- **Removed rationalization section.** I checked that every operative rule survives elsewhere: compact envelope (`SKILL.md.tmpl:82`), re-read from disk (`:93`), deferral valve with its four limits (`:559-568`), P2 one-fix-pass (`:921`), never auto-run (`:741,938`), live Docker (`:943`). No test referenced the removed text.
+- **Judge wiring holds.** `test/helpers/workflow-judge-input.ts:93-102` auto-includes `autobuilder-loop/sections/*.md`, so the judge sees both sections plus the checklist. Touchfile and count updates (24→25, 17→18) are consistent.
+- **Savings framing.** The "Seat C direct required reading" baseline counts all of `review/SKILL.md`, most of which the old prompt told Seat C to skip, so that 67% overstates practical savings.
+- `test/autobuilder-ops.test.ts:68` is titled "rejects extra arguments" but only tests malformed JSON.
+
+## Inspected and limits
+
+Inspected: the complete diff across all 27 files; head regions of `autobuilder-unit.js` for helpers, scrubbing, `ask`, `writeState`, `finish`, Seat C, wave meter and Integrate; all of `lib/autobuilder-ops.ts`, the bin, `scripts/resolvers/autobuilder.ts` and `sections.ts`; section rendering in `gen-skill-docs.ts`; the setup asset linker; the judge input helper; the harness fake agent; the canonical templates at every slice boundary; gstack-lane's Bun isolation; the repo `bunfig.toml`.
+
+Not inspected: roughly three quarters of `autobuilder-unit.js`, the context-budget capture logic, non-Claude install paths in `setup`, host configs, and the generated SKILL.md outside the diff hunks. I ran no tests, builds or scripts. Claims about LLM relay fidelity and Workflow cache behaviour are hypotheses, marked as such.

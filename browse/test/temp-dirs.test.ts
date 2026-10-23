@@ -22,7 +22,9 @@ const tmpdirIsDistinct = real(os.tmpdir()) !== real(TEMP_DIR);
 describe('TEMP_DIRS allowlist shape', () => {
   it('contains exactly TEMP_DIR + os.tmpdir() deduped, and SAFE_DIRECTORIES wires them realpathed alongside cwd', () => {
     expect(TEMP_DIRS).toContain(TEMP_DIR);
-    expect(TEMP_DIRS).toContain(os.tmpdir());
+    // A cwd beneath /private/tmp can filter that spelling as an ancestor,
+    // while the fixed /tmp entry still covers the same effective directory.
+    expect(TEMP_DIRS.map(real)).toContain(real(os.tmpdir()));
     expect(new Set(TEMP_DIRS).size).toBe(TEMP_DIRS.length);
     // Nothing else sneaks into the allowlist.
     for (const d of TEMP_DIRS) {
@@ -52,20 +54,31 @@ describe('local commands accept os.tmpdir() paths (TMPDIR-honoring environments)
 });
 
 describe('remote file serving stays pinned to TEMP_DIR alone (no exfil widening)', () => {
-  it('validateTempPath REJECTS a project file the local allowlist accepts — the actual exfil boundary, on every topology', () => {
-    // cwd is in SAFE_DIRECTORIES (local commands read project files) but must
-    // NEVER be servable to a remote agent. Unlike the os.tmpdir() case below,
-    // this holds regardless of where the environment points TMPDIR.
-    const f = path.join(process.cwd(), 'package.json');
-    expect(() => validateReadPath(f)).not.toThrow();
-    expect(() => validateTempPath(f)).toThrow(/temp directory/i);
+  it('validateTempPath rejects a project outside TEMP_DIR that the local allowlist accepts', () => {
+    // The contract is TEMP_DIR-only: a checkout inside it is not outside the
+    // remote boundary. Load the real validators in an owned project outside it.
+    const project = fs.mkdtempSync(path.join(os.userInfo().homedir, 'browse-remote-project-'));
+    try {
+      fs.writeFileSync(path.join(project, 'package.json'), '{}');
+      const probe = Bun.spawnSync([process.execPath, '-e', `
+        import { validateReadPath, validateTempPath } from ${JSON.stringify(path.resolve(import.meta.dir, '../src/path-security.ts'))};
+        validateReadPath('package.json');
+        let rejection = '';
+        try { validateTempPath('package.json'); } catch (error) { rejection = error.message; }
+        console.log(JSON.stringify({ rejection }));
+      `], { cwd: project, env: { ...process.env }, timeout: 30_000 });
+      expect(probe.exitCode).toBe(0);
+      expect(JSON.parse(probe.stdout.toString()).rejection).toMatch(/temp directory/i);
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
   });
 
   it('validateTempPath and a distinct os.tmpdir(): rejected outside TEMP_DIR, allowed when nested inside it', () => {
     if (!tmpdirIsDistinct) {
-      // On hosts where os.tmpdir() IS /tmp the widening is a no-op — the
-      // allowlist must have collapsed to the single dir.
-      expect(TEMP_DIRS).toEqual([TEMP_DIR]);
+      // Aliases such as /tmp and /private/tmp can be separate spellings but
+      // must resolve to one effective directory, without widening access.
+      expect([...new Set(TEMP_DIRS.map(real))]).toEqual([real(TEMP_DIR)]);
       return;
     }
     const f = path.join(os.tmpdir(), `browse-tempdirs-remote-${Date.now()}.txt`);

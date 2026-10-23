@@ -97,6 +97,20 @@ export interface CarveGuard {
 }
 
 export const CARVE_GUARDS: Record<string, CarveGuard> = {
+  'autobuilder-loop': {
+    skill: 'autobuilder-loop',
+    expectedSections: ['manual-gate.md','seat-c-review.md','run-setup.md','contracts.md','build.md','gate.md','release.md','workflow-reference.md','continuous-queue.md'],
+    requiredReads: ['run-setup.md','contracts.md','continuous-queue.md'],
+    scenario: 'Readiness-only walkthrough for an already-approved autobuilder plan. We will use the experimental continuous host queue, but do not dispatch workers or mutate the product. Load the mandatory startup and routing contracts and the continuous-queue reference, then report the required input/evidence blockers and the existing gate handoff. Stop after this report; no provider calls, implementation or publication.',
+    staticInvariants: {
+      mustStayInSkeleton: ['INVALID never counts as ABSENT','EITHER model FAILs','REVIEW_INCOMPLETE','there is no Seat X waiver'],
+      mustMoveToSection: ['## Core principle — you are an orchestrator ONLY','## Prepare the task contract'],
+    },
+    behavioral: 'prompt',
+    maxSkeletonBytes: 24000,
+    minUnionBytes: 160000,
+    mustContain: ['SHIP_METER','REVIEW_INCOMPLETE','## AskUserQuestion Format','completionTimeoutMs','shipBase'],
+  },
   ship: {
     skill: 'ship',
     expectedSections: [

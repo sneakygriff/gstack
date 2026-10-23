@@ -402,6 +402,7 @@ export const E2E_TOUCHFILES: Record<string, string[]> = {
   // the selector sets GSTACK_CARVE_SKILL=<name> to scope cost to the changed
   // skill (D-CODEX A). Touching the registry/helper or sections.ts runs all.
   'carve-section-loading':       [
+    'autobuilder-loop/**', 'scripts/resolvers/autobuilder.ts', 'test/carve-section-loading-autobuilder-loop.test.ts',
     'bin/gstack-review-log', 'bin/gstack-review-read', 'lib/review-evidence.ts',
     'bin/gstack-slug', 'bin/gstack-wtree', 'bin/gstack-config', 'bin/gstack-brain-enqueue',
      'test/fixtures/autoplan-amend-input-77.json',
@@ -1495,6 +1496,17 @@ export const E2E_TIERS: Record<string, 'gate' | 'periodic'> = {
  * LLM-judge test touchfiles — keyed by test description string.
  */
 export const LLM_JUDGE_TOUCHFILES: Record<string, string[]> = {
+  'autobuilder-loop/SKILL.md workflow': [
+    'autobuilder-loop/**', 'lib/autobuilder-*.ts', 'bin/gstack-autobuilder-ops', 'scripts/resolvers/preamble.ts', 'scripts/resolvers/preamble/**', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts',
+    'plan-eng-review/SKILL.md.tmpl', 'plan-eng-review/sections/review-sections.md.tmpl',
+    'review/SKILL.md.tmpl', 'review/checklist.md', 'scripts/resolvers/testing.ts',
+    'scripts/resolvers/shared-libs.ts', 'scripts/resolvers/confidence.ts',
+    'scripts/resolvers/index.ts', 'scripts/gen-skill-docs.ts',
+    'test/skill-llm-eval.test.ts', 'test/helpers/workflow-judge-input.ts',
+    'test/helpers/llm-judge.ts', 'test/helpers/workflow-excerpt.ts', 'test/helpers/workflow-judge-cache.ts',
+    'test/helpers/cookie-workflow-judge-input.ts', 'test/helpers/cookie-workflow-manual-review.ts',
+    'test/fixtures/eval-baselines.json',
+  ],
   'review/SKILL.md workflow': ['review/**', 'qa/**', 'scripts/resolvers/qa.ts', 'scripts/resolvers/review-army.ts', 'scripts/resolvers/review.ts', 'scripts/resolvers/sections.ts', 'test/skill-llm-eval.test.ts', 'test/helpers/workflow-judge-input.ts', 'test/helpers/workflow-judge-cache.ts', 'test/fixtures/eval-baselines.json', 'test/helpers/cookie-workflow-judge-input.ts', 'test/helpers/cookie-workflow-manual-review.ts', 'test/helpers/llm-judge.ts', 'test/helpers/workflow-excerpt.ts'],
   'setup-browser-cookies/SKILL.md workflow': ['setup-browser-cookies/SKILL.md.tmpl', 'setup-browser-cookies/SKILL.md', 'BROWSER.md', 'test/helpers/cookie-workflow-judge-input.ts',  'test/helpers/cookie-workflow-manual-review.ts',  'test/helpers/manual-judge-review-fixture.ts', '.github/cookie-workflow-manual-review.json', 'test/helpers/workflow-judge-input.ts', 'test/skill-llm-eval.test.ts', 'test/fixtures/eval-baselines.json', 'test/helpers/llm-judge.ts', 'test/helpers/workflow-excerpt.ts', 'test/helpers/workflow-judge-cache.ts'],
   'browse/SKILL.md reference':        ['browse/sections/**', 'browse/SKILL.md', 'browse/SKILL.md.tmpl', 'browse/src/**', 'test/skill-llm-eval.test.ts', 'SKILL.md', 'SKILL.md.tmpl', 'gstack/llms.txt', 'test/fixtures/eval-baselines.json', 'test/helpers/cookie-workflow-judge-input.ts', 'test/helpers/cookie-workflow-manual-review.ts', 'test/helpers/llm-judge.ts', 'test/helpers/workflow-excerpt.ts', 'test/helpers/workflow-judge-cache.ts', 'test/helpers/workflow-judge-input.ts'],
@@ -1569,6 +1581,7 @@ export const GLOBAL_TOUCHFILES = [
   'test/helpers/session-drain-policy.ts',
   'test/helpers/hermetic-env.ts',    // Changes every E2E child's environment
   'test/helpers/eval-store.ts',      // All E2E tests store results here
+  'scripts/native-eval-binding.ts', // Opt-in collector input/runtime evidence
   'test/helpers/test-selection.ts',  // Selection logic itself — a bug here mis-selects every test
   'test/helpers/touchfiles.ts',      // The facade is executable selection-path code; an edit must run everything (it should never change, so the cost is ~zero)
   'test/helpers/e2e-helpers.ts',     // Shared harness every paid test imports (selection wiring, preflight, describeIfSelected) — an edit here changes every test's behavior
@@ -1580,3 +1593,32 @@ export const GLOBAL_TOUCHFILES = [
   // diffed per key, so a data-only edit runs just the affected tests.
   // Map-diff fails CLOSED — any error on that path still runs everything.
 ];
+
+/** Free dependent checks, keyed by exact test path. Missing relationships only:
+ * paid coverage remains in the existing maps above. Shared structure checks use
+ * the generator's template/reference surface; section-read probes derive from
+ * CARVE_GUARDS rather than a second skill list.
+ */
+export const FREE_TOUCHFILES: Record<string, string[]> = {
+  'test/eval-cli-family.test.ts': ['scripts/eval-summary.ts', 'scripts/eval-list.ts', 'scripts/eval-watch.ts', 'scripts/eval-flake-rank.ts'],
+  'test/autobuilder-acceptance.test.ts': ['scripts/autobuilder-acceptance.ts', 'scripts/native-eval-binding.ts', 'scripts/autobuilder-usage.ts', 'test/helpers/eval-store.ts'],
+  'test/helpers/eval-store.test.ts': ['test/helpers/eval-store.ts', 'scripts/native-eval-binding.ts'],
+  'test/generated-content-freshness.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'scripts/gen-skill-docs.ts', 'scripts/discover-skills.ts', 'scripts/host-config.ts', 'hosts/**', 'review/checklist.md'],
+  'test/auq-format-always-loaded.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**'],
+  'test/section-manifest-consistency.test.ts': ['*/SKILL.md*', '*/sections/**', 'scripts/resolvers/sections.ts', 'test/helpers/carve-guards.ts'],
+  'test/carve-guard-completeness.test.ts': ['*/SKILL.md*', '*/sections/**', 'scripts/resolvers/sections.ts', 'test/helpers/carve-guards.ts'],
+  'test/carve-section-ordering.test.ts': ['*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'test/helpers/carve-guards.ts', 'test/helpers/carve-guard-checks.ts'],
+  'test/context-budget-ratchet.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'lib/context-bill.ts', 'test/fixtures/context-budget.json', 'test/helpers/carve-guards.ts'],
+  'test/parity-suite.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'test/helpers/carve-guards.ts', 'test/helpers/parity-harness.ts'],
+  'test/skill-size-budget.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'test/helpers/carve-guards.ts'],
+  'test/autobuilder-packaging.test.ts': ['autobuilder-loop/**', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts', 'scripts/resolvers/preamble/generate-ask-user-format.ts', 'review/checklist.md'],
+  'test/autobuilder-unit-harness.test.ts': ['autobuilder-loop/autobuilder-unit.js', 'test/fixtures/autobuilder-unit/**'],
+  'test/autobuilder-efficiency.test.ts': ['autobuilder-loop/**', 'lib/autobuilder-*.ts', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts', 'test/fixtures/autobuilder-unit/**'],
+  'test/autobuilder-queue.test.ts': ['autobuilder-loop/autobuilder-unit.js', 'lib/autobuilder-*.ts', 'test/fixtures/autobuilder-unit/**'],
+  'test/autobuilder-ops.test.ts': ['autobuilder-loop/autobuilder-unit.js', 'lib/autobuilder-ops.ts', 'lib/autobuilder-ops-cli.ts', 'bin/gstack-autobuilder-ops'],
+  'test/autobuilder-launcher.test.ts': ['bin/gstack-autobuilder-ops', 'lib/autobuilder-ops-cli.ts'],
+  'test/test-focused.test.ts': ['scripts/test-focused.ts', 'scripts/test-free-shards.ts', 'scripts/test-strict-output.ts', 'test/helpers/paid-test-set.ts'],
+  'test/test-free-shards.test.ts': ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts', 'test/helpers/paid-test-set.ts'],
+  'test/test-free-shards-capture.test.ts': ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts'],
+  'test/validation-select.test.ts': ['scripts/validation-select.ts', 'test/helpers/touchfiles-data.ts', 'test/helpers/touchfiles.ts', 'test/helpers/test-selection.ts', 'test/helpers/carve-guards.ts', 'test/helpers/paid-test-set.ts'],
+};

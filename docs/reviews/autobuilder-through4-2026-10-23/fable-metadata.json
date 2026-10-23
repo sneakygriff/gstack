@@ -1,0 +1,45 @@
+{
+  "session_id": "8107a064-6a03-4d71-8193-dc13b2430555",
+  "transport": "interactive Claude CLI",
+  "auth_mode": "claude.ai Max",
+  "model_ids": [
+    "claude-fable-5-1"
+  ],
+  "api_credit_override": false,
+  "scope": "read-only instruction walkthrough and new queue review; no execution or gate verdict",
+  "usage": {
+    "input_tokens": 194,
+    "cache_creation_input_tokens": 179229,
+    "cache_read_input_tokens": 595132,
+    "output_tokens": 13090
+  },
+  "usage_note": "Observed message usage, deduplicated by message id; output may include reasoning. Not a subscription invoice or savings benchmark.",
+  "inspected_source_manifest": {
+    "autobuilder-loop/SKILL.md": "2acc585b6789faacbca2602786d02e3c14fb242561111c66034698e4ed90b5d3",
+    "autobuilder-loop/SKILL.md.tmpl": "8e20dbaed5028d9bb8f7dedc9ca47945caa74c2f5104207c3b5b54c662c674af",
+    "autobuilder-loop/sections/build.md": "de68fcfe957c6193ed0919352b7dc9e7f2a0cd778f3d98499f4413bcc0e576ff",
+    "autobuilder-loop/sections/build.md.tmpl": "0530a3575565bb04b3a5b21e0a58b38a318d9311c1811c0d24ff548b6cbec0a7",
+    "autobuilder-loop/sections/continuous-queue.md": "747decdf38572428e6e1cc8a44ebb3226fb84eb01aa4700664e842268a038999",
+    "autobuilder-loop/sections/continuous-queue.md.tmpl": "9e01eaf9d46cb4512d0150a05dc59b36977fea9f0b531600493ca343959dee7a",
+    "autobuilder-loop/sections/contracts.md": "588974ac2b5e5f7b94f0b11fea7aa8a2a2c6bd268d52f5f10199964ca7fc3096",
+    "autobuilder-loop/sections/contracts.md.tmpl": "dce4a7dc4b814206d950cc0ea61e577e7c53b5ceeb0322f29c4b2b24aa3f50ac",
+    "autobuilder-loop/sections/gate.md": "81bff87dbaa65eaf1bd82144b2d6e1f0043b799231bf3c2c85dd3357992f2237",
+    "autobuilder-loop/sections/gate.md.tmpl": "66aef408d0c783b7bfc5649709e6af7cb2776bcbf97524e6f7d1cbd66fa1b8c1",
+    "autobuilder-loop/sections/manifest.json": "52db2bb877e1b0dfc2d28c361b1bddccd25626e730611176fe39a9162afac0d0",
+    "autobuilder-loop/sections/preservation.json": "ca6a1613d0c080299ebc8c2875f1ac811e6f839e402fd81c15bfe8653f886778",
+    "autobuilder-loop/sections/release.md": "2c9f4de0ddcb5c23da29d4d75191cdae6d4363f7c5f3e6a02e1188978c2ca5e0",
+    "autobuilder-loop/sections/release.md.tmpl": "97104aa84eae5b2dcc761bc84f38df426521eb53b30decdcc527fa4585151fec",
+    "autobuilder-loop/sections/run-setup.md": "39556cebf3ef2867858163955e5e6a714b51885fdf1c7e6f4135e2fe2734da11",
+    "autobuilder-loop/sections/run-setup.md.tmpl": "70202b5ca331e4d0ba546ce31685ff9cc2fe14c51666232ef728bed494a3c392",
+    "autobuilder-loop/sections/workflow-reference.md": "b6366a8246bcc3368b102355254a85f3789d5f08528d4f16f785ff05024dc966",
+    "autobuilder-loop/sections/workflow-reference.md.tmpl": "da4c87fbf77728c83d1b9229bbd2aeb0e15ab554085c0170b6905aab01821164",
+    "bin/gstack-autobuilder-ops": "bdfa2a8b4b792c2cdd85c2fc3ad9e146b4d9c7a8ac5978211246481a79e2550e",
+    "lib/autobuilder-ops-cli.ts": "b993fe5f18e8691c6bb354a64f27b78de66796b37f4a3f527cf84ee6442b84f9",
+    "lib/autobuilder-queue.ts": "a147bdc16da9e07c9a3a91bcfb26adeec12df440a23974c5a362d20b1aa168d4",
+    "scripts/resolvers/autobuilder.ts": "69d00877a3e24b68b6500f6b1485e25bce80cdd1b58e25d026662a54634e7fbe",
+    "test/autobuilder-forum-divergence.test.ts": "dca5d2a9f252b028c04bd64f8f797c161f9adf335df82e2b3f94f5ad9c31ee95",
+    "test/autobuilder-packaging.test.ts": "c7aeb15385f88b4be59c125f537ef35728a5dce060156e43f478d4ea96e46414",
+    "test/autobuilder-queue.test.ts": "f586261f0952f5179e0674209edfbe0f2183e12b64b4feb55f55e659ce7dde00",
+    "test/helpers/touchfiles-data.ts": "3aa458ec5aef4c3c3e4a1bf2a8e262de618bf73e24098efd1373532a8abda34b"
+  }
+}

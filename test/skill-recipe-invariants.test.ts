@@ -31,7 +31,9 @@ import { HOST_PATHS } from '../scripts/resolvers/types';
 import type { TemplateContext } from '../scripts/resolvers/types';
 
 const ROOT = path.resolve(import.meta.dir, '..');
-const AUTOBUILDER_TMPL = fs.readFileSync(path.join(ROOT, 'autobuilder-loop', 'SKILL.md.tmpl'), 'utf-8');
+const autobuilderSections = path.join(ROOT, 'autobuilder-loop', 'sections');
+const AUTOBUILDER_TMPL = fs.readFileSync(path.join(ROOT, 'autobuilder-loop', 'SKILL.md.tmpl'), 'utf-8')
+  + fs.readdirSync(autobuilderSections).filter(f => f.endsWith('.md.tmpl')).sort().map(f => fs.readFileSync(path.join(autobuilderSections, f), 'utf8')).join('\n');
 const PLAN_DELIVERABLES_TMPL = fs.readFileSync(path.join(ROOT, 'plan-deliverables', 'SKILL.md.tmpl'), 'utf-8');
 
 // T10 — Outside Voices security-field + gate-shape invariants. Static-text

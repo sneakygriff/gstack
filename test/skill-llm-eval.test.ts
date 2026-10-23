@@ -442,6 +442,7 @@ async function runWorkflowJudge(opts: {
   let scores: JudgeScore | undefined;
   let manualReview: ManualJudgeReview | undefined;
   let customInputMetadata: { prompt: string; model: string } | undefined;
+  let requestMetadata: { prompt: string; model: string; model_source: 'resolved-request'; provider_model: null } | undefined;
   let reused: ReturnType<ReturnType<typeof prepareWorkflowJudgeCache>['lookup']> = null;
   let timer: ReturnType<typeof setTimeout>;
   let rejectStopped: (error: Error) => void;
@@ -460,6 +461,7 @@ async function runWorkflowJudge(opts: {
       duration_ms: Math.max(0, performance.now() - started),
       cost_usd: reused || !scores ? 0 : 0.02,
       execution: reused ? 'reused' : 'executed',
+      ...requestMetadata,
       ...customInputMetadata,
       ...(manualReview ? { manual_review: manualReview } : {}),
       ...(reused ? { reused_from: { input_key: reused.reuse.key, run_id: reused.reuse.source.runId,
@@ -501,6 +503,7 @@ async function runWorkflowJudge(opts: {
       startMarker: opts.startMarker, endMarker: opts.endMarker, references: opts.references });
     checkActive();
     const prompt = buildWorkflowJudgePrompt(opts, input);
+    requestMetadata = { prompt, model: resolveEvalModel('judge', opts.model), model_source: 'resolved-request', provider_model: null };
     if (opts.readInput) customInputMetadata = { prompt, model: resolveEvalModel('judge', opts.model) };
     const cache = prepareWorkflowJudgeCache({ ...opts, root: ROOT, thresholds, prompt, attempt });
     checkActive();
@@ -584,6 +587,22 @@ describeIfSelected('Ship & Release skill evals', ['ship/SKILL.md workflow', 'doc
       endMarker: '## Important Rules',
       judgeContext: 'a release documentation audit workflow',
       judgeGoal: 'how to audit relevant nested docs and authored sources; in ship-owned mode complete a bounded docs-only audit and return a typed result without Git/metadata authority, while standalone mode retains its approval and publication protections',
+    });
+  }, WORKFLOW_JUDGE_TEST_MS);
+});
+
+// Autobuilder's carved references must be judged together with their calling gate policy.
+describeIfSelected('Autobuilder workflow eval', ['autobuilder-loop/SKILL.md workflow'], () => {
+  testIfSelected('autobuilder-loop/SKILL.md workflow', async () => {
+    await runWorkflowJudge({
+      testName: 'autobuilder-loop/SKILL.md workflow',
+      suite: 'Autobuilder workflow eval',
+      skillPath: 'autobuilder-loop/SKILL.md',
+      startMarker: '# /autobuilder-loop',
+      endMarker: null,
+      references: ['review/checklist.md'],
+      judgeContext: 'an approved-plan orchestrator with conditional manual recipes and a generated findings-only Seat C review reference',
+      judgeGoal: 'preserve both review seats, the union of kept P1 blockers, critical Astra requirements, invalid-versus-absent distinction, Docker and mutation checks, and completion evidence; reviewers must load the full focused methods and canonical checklist, never treat missing references as clean; checkpoint metrics describe logical calls and characters rather than billing; only manual gate execution loads manual recipes; extracted planning language must not cause Seat C to ask questions or edit files',
     });
   }, WORKFLOW_JUDGE_TEST_MS);
 });

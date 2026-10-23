@@ -120,7 +120,7 @@ test.skipIf(!Bun.which('jq') || !Bun.which('bash'))('comment consumes verified f
   writeFileSync(join(binDir, 'bc'), '#!/bin/sh\nread -r expression\n[ "$expression" = "0 + 0" ] && printf "0\\n"\n');
   chmodSync(join(binDir, 'bc'), 0o755);
   writeFileSync(join(paidDir, 'manifest.json'), JSON.stringify({ profile: 'pr', selection: { e2e: [], judges: [] } }));
-  writeFileSync(join(paidDir, 'judge.json'), JSON.stringify({ total_tests: 2, tier: 'llm-judge', shard: 1,
+  writeFileSync(join(paidDir, 'judge.json'), JSON.stringify({ total_tests: 2, tier: 'llm-judge', shard: 1, total_cost_usd: null,
     tests: [{ name: 'manual', passed: false, manual_review: { unverified: true } },
       { name: 'reused', passed: true, execution: 'reused' }], flaky_retries: [] }));
   const summary = { version: 1, files: [{ file: 'judge.json', tier: 'llm-judge', shard: 1, cost: 0,
@@ -145,6 +145,16 @@ test.skipIf(!Bun.which('jq') || !Bun.which('bash'))('comment consumes verified f
     expect(verified.stdout).toContain('1 automated passed / 2 final results');
     expect(verified.stdout).toContain('0 failed, 1 manual accepted');
 
+    const unknownCost = { ...summary, files: [{ ...summary.files[0], cost: null },
+      { ...summary.files[0], file: 'known-zero.json' }],
+      totals: Object.fromEntries(Object.entries(summary.totals).map(([key, value]) => [key, value * 2])) };
+    writeFileSync(summaryPath, JSON.stringify(unknownCost));
+    const unknown = run();
+    expect(unknown.status, unknown.stderr).toBe(0);
+    expect(unknown.stdout).toContain('**unknown** total cost');
+    expect(unknown.stdout).toContain('| unknown |');
+    expect(unknown.stdout).toContain('| $0 |');
+
     const unrelatedFailure = { ...summary, files: [{ ...summary.files[0], total: 3, failed: 1,
       executed: 2, attempts: 3 }], totals: { ...summary.totals, total: 3, failed: 1,
       executed: 2, attempts: 3 } };
@@ -163,5 +173,6 @@ test.skipIf(!Bun.which('jq') || !Bun.which('bash'))('comment consumes verified f
     const absent = run();
     expect(absent.status, absent.stderr).toBe(0);
     expect(absent.stdout).toContain('manual acceptance unavailable/unverified');
+    expect(absent.stdout).toContain('**unknown** total cost');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

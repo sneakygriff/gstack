@@ -1,5 +1,5 @@
 import { describe, test as _bunTest, expect, beforeEach, afterEach } from 'bun:test';
-import { execSync } from 'child_process';
+import { execSync, execFileSync, type ExecSyncOptionsWithStringEncoding } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -21,9 +21,9 @@ let tmpDir: string;
 let skillsDir: string;
 let installDir: string;
 
-function run(cmd: string, env: Record<string, string> = {}, expectFail = false): string {
+function run(cmd: string | [string, ...string[]], env: Record<string, string> = {}, expectFail = false): string {
   try {
-    return execSync(cmd, {
+    const options: ExecSyncOptionsWithStringEncoding = {
       cwd: ROOT,
       // A sibling test file in the same shard PROCESS can leave GSTACK_HOME
       // set on process.env; relink/config children must resolve state ONLY
@@ -35,9 +35,11 @@ function run(cmd: string, env: Record<string, string> = {}, expectFail = false):
         return child;
       })(),
       encoding: 'utf-8',
-      timeout: 10000,
       stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    };
+    return (typeof cmd === 'string'
+      ? execSync(cmd, { ...options, timeout: 10000 })
+      : execFileSync(cmd[0], cmd.slice(1), { ...options, timeout: 10000 })).trim();
   } catch (e: any) {
     if (expectFail) return (e.stderr || e.stdout || '').toString().trim();
     throw e;
@@ -487,7 +489,7 @@ describe('gstack-relink (#578)', () => {
 
   // Test 14: error when install dir missing
   test('prints error when install dir missing', () => {
-    const output = run(`${BIN}/gstack-relink`, {
+    const output = run([path.join(BIN, 'gstack-relink')], {
       GSTACK_INSTALL_DIR: '/nonexistent/path/gstack',
       GSTACK_SKILLS_DIR: '/nonexistent/path/skills',
     }, true);
@@ -573,7 +575,7 @@ describe('upgrade migrations', () => {
     expect(fs.lstatSync(path.join(skillsDir, 'qa')).isSymbolicLink()).toBe(true);
 
     // Run the migration (it calls gstack-relink internally)
-    run(`bash ${path.join(MIGRATIONS_DIR, 'v0.15.2.0.sh')}`, {
+    run(['bash', path.join(MIGRATIONS_DIR, 'v0.15.2.0.sh')], {
       GSTACK_INSTALL_DIR: installDir,
       GSTACK_SKILLS_DIR: skillsDir,
     });

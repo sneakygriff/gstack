@@ -489,7 +489,7 @@ await new Promise(()=>{});
 `;
 
 test.skipIf(process.platform === 'win32')('real PTY observes native public calls, preserves failures, model/tool scope and cleans every outcome', async () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'native-auq-pty-'));
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'native-auq-private-reasoning-'));
   const fake=path.join(dir,'fake-claude'), worker=path.join(dir,'worker.ts');
   const temp=path.join(dir,'tmp'); fs.mkdirSync(temp);
   fs.writeFileSync(fake,`#!${process.execPath}\n`+FAKE_CLI,{mode:0o755});
@@ -587,10 +587,14 @@ fs.writeFileSync(path.join(root,'results.json'),JSON.stringify({results,privateR
       expect(args).toContain('--strict-mcp-config');expect(args).not.toContain('--mcp-config');expect(args).not.toContain('-p');
       expect(result.observed.headless).toBe('');
       const prompt=args.find((arg:string)=>arg.startsWith('The ONLY skill file'));
-      expect(prompt).toContain(path.join(dir,result.kind,'plan-eng-review','SKILL.md'));
+      const skillPath=path.join(dir,result.kind,'plan-eng-review','SKILL.md');
+      expect(prompt).toContain(skillPath);
       expect(prompt).toContain('Review plan.md.');expect(prompt).toContain('Skip any system-audit / environment-setup / codebase-exploration steps.');
       expect(prompt).toContain('ask the user through the AskUserQuestion tool');
-      for(const absent of ['verbatim','would call','write the','ELI10','Pros / cons:','Net:','private','reasoning']) expect(prompt).not.toContain(absent);
+      // The allowed fixture path can contain these words; only remove that
+      // exact, separately verified path before checking the instruction prose.
+      const instructionProse=prompt.replaceAll(skillPath,'<fixture-skill-path>');
+      for(const absent of ['verbatim','would call','write the','ELI10','Pros / cons:','Net:','private','reasoning']) expect(instructionProse).not.toContain(absent);
       if(result.kind.endsWith('artifact-error')){
         expect(result.receipt).toBeNull();expect(result.text).toBeUndefined();
         expect(result.error).toContain(result.kind==='artifact-error'?'fixture receipt disk full':'[reasoning_extraction]');

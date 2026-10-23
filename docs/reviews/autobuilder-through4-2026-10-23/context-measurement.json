@@ -1,0 +1,42 @@
+{
+  "base_entry_words": 17211,
+  "counts": {
+    "autobuilder-loop/SKILL.md": {
+      "words": 3137,
+      "characters": 21957
+    },
+    "autobuilder-loop/sections/run-setup.md": {
+      "words": 4423,
+      "characters": 31834
+    },
+    "autobuilder-loop/sections/contracts.md": {
+      "words": 3379,
+      "characters": 22099
+    },
+    "autobuilder-loop/sections/build.md": {
+      "words": 1290,
+      "characters": 8789
+    },
+    "autobuilder-loop/sections/gate.md": {
+      "words": 1473,
+      "characters": 9616
+    },
+    "autobuilder-loop/sections/release.md": {
+      "words": 1550,
+      "characters": 10597
+    },
+    "autobuilder-loop/sections/continuous-queue.md": {
+      "words": 1624,
+      "characters": 12058
+    },
+    "autobuilder-loop/sections/seat-c-review.md": {
+      "words": 4707,
+      "characters": 32726
+    }
+  },
+  "startup_entry_setup_contract_words": 10939,
+  "source_commit": "2fdc46980f64bec62d38555c4949df11284bcf40",
+  "baseline_commit": "ba1a3153b3e39701f5966a2c805e876eec3f8d45",
+  "method": "Python str.split whitespace word count; characters are Unicode code points, not tokens. Required startup = entry + setup + contracts; excludes host context, tools and subsequently loaded stages.",
+  "mandatory_question_format_words": 1672
+}

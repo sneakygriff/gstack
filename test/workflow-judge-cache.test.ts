@@ -176,7 +176,7 @@ test('workflow registration preserves model work and reserves only terminal-reco
   expect(body).toContain('const workDeadline = started + JUDGE_MS;');
   expect(source).toContain('const WORKFLOW_JUDGE_RECORD_MS = 5_000;');
   expect(source).toContain('const WORKFLOW_JUDGE_TEST_MS = JUDGE_MS + 10_000;');
-  expect(source.match(/\}, WORKFLOW_JUDGE_TEST_MS\);/g)).toHaveLength(17);
+  expect(source.match(/\}, WORKFLOW_JUDGE_TEST_MS\);/g)).toHaveLength(18);
   expect(source).toContain("testName: 'review/SKILL.md workflow'");
   expect(source.match(/\}, JUDGE_MS\);/g)).toHaveLength(7);
 });
@@ -228,6 +228,14 @@ test('the actual workflow callback preserves the pinned model and frontier rubri
   expect(actual.records[0]).toMatchObject({ passed: true, model: 'claude-sonnet-4-6', prompt: actual.prompts[0] });
 });
 
+test('ordinary workflow evidence retains the actual prompt and resolved request model without claiming provider identity', async () => {
+  const actual = actualCallback(fixture());
+  await actual.run(actual.options);
+  expect(actual.records[0]).toMatchObject({ passed: true, prompt: actual.prompts[0],
+    model: resolveEvalModel('judge', actual.options.model), model_source: 'resolved-request', provider_model: null });
+  expect(actual.records[0]).not.toHaveProperty('manual_review');
+});
+
 test.each(['ship', 'review'])('the registered %s callback sends the frontier rubric and still rejects subthreshold clarity', async skill => {
   const source = fs.readFileSync(path.join(import.meta.dir, 'skill-llm-eval.test.ts'), 'utf8');
   const registration = source.match(new RegExp(`testIfSelected\\('${skill}/SKILL\\.md workflow',[\\s\\S]*?await runWorkflowJudge\\(\\{([\\s\\S]*?)\\n    \\}\\);`));
@@ -256,8 +264,9 @@ test('the actual workflow callback executes once, reuses with provenance, and pr
   await first.run(options);
   expect(first.prompts).toEqual([f.opts.prompt]); expect(f.entries()).toHaveLength(1);
   expect(first.records[0]).toMatchObject({ passed: true, execution: 'executed', cost_usd: 0.02 });
-  expect(first.records[0]).not.toHaveProperty('prompt');
-  expect(first.records[0]).not.toHaveProperty('model');
+  expect(first.records[0]).toMatchObject({ prompt: f.opts.prompt, model: resolveEvalModel('judge'),
+    model_source: 'resolved-request', provider_model: null });
+  expect(first.records[0]).not.toHaveProperty('manual_review');
   const reused = actualCallback(f, { judge: async () => ({ ...scores, clarity: 1 }) });
   await reused.run(options);
   expect(reused.prompts).toHaveLength(0);
@@ -459,9 +468,9 @@ test('the structured callback rejects incomplete, schema-invalid and below-thres
   ];
   const stream = spyOn(Messages.prototype, 'stream');
   const diagnostics = spyOn(console, 'error').mockImplementation(() => {});
+  const f = fixture();
   try {
     for (const response of responses) {
-      const f = fixture();
       stream.mockReturnValue({ finalMessage: async () => ({ stop_reason: response.stop_reason,
         content: [{ type: 'text', text: JSON.stringify(response.value) }] }) } as any);
       const h = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });

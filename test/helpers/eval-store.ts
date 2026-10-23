@@ -14,12 +14,16 @@ import * as os from 'os';
 import { spawnSync } from 'child_process';
 import { isManualReviewEntry } from './cookie-workflow-manual-review';
 import type { ManualJudgeReview } from './cookie-workflow-manual-review';
+import { beginNativeBinding, finishNativeBinding } from '../../scripts/native-eval-binding';
 
 // v2: EvalTestEntry.harvest gains optional {insertions, deletions, net} and
 // may be explicitly null (arm-benchmark harvest-failure taxonomy). Readers
 // stay tolerant of v1 runs: no reader requires the new fields, and
 // eval-compare only warns on version mismatch.
 const SCHEMA_VERSION = 2;
+// v3 adds opt-in lifecycle evidence and explicit unknown cost. Ordinary
+// unbound numeric-cost runs keep v2, including their filenames and behavior.
+const BOUND_SCHEMA_VERSION = 3;
 const LEGACY_EVAL_DIR = path.join(os.homedir(), '.gstack-dev', 'evals');
 
 /**
@@ -64,7 +68,7 @@ export interface EvalTestEntry {
   tier: 'e2e' | 'llm-judge';
   passed: boolean;
   duration_ms: number;
-  cost_usd: number;
+  cost_usd: number | null;
   /** Absent in older records means executed; reuse is never a new model run. */
   execution?: 'executed' | 'reused';
   reused_from?: { input_key: string; run_id: string; revision: string; completed_at: string };
@@ -95,6 +99,8 @@ export interface EvalTestEntry {
 
   // Model + timing diagnostics (added for Sonnet/Opus split)
   model?: string;                // e.g. 'claude-sonnet-4-6' or 'claude-opus-4-7'
+  model_source?: 'resolved-request' | 'provider-observed';
+  provider_model?: string | null;
   first_response_ms?: number;    // time from spawn to first NDJSON line
   max_inter_turn_ms?: number;    // peak latency between consecutive tool calls
 
@@ -132,6 +138,8 @@ export function evalEntryOutcome(entry: unknown): 'passed' | 'failed' | 'manual-
 }
 
 export interface EvalResult {
+  /** Optional contemporaneous collector lifecycle evidence; absent on legacy runs. */
+  acceptance?: ReturnType<typeof finishNativeBinding>;
   schema_version: number;
   version: string;
   branch: string;
@@ -149,7 +157,7 @@ export interface EvalResult {
   manual_accepted_tests?: number;
   passed: number;
   failed: number;
-  total_cost_usd: number;
+  total_cost_usd: number | null;
   total_duration_ms: number;
   wall_clock_ms?: number;     // wall-clock from collector creation to finalization (shows parallelism)
   tests: EvalTestEntry[];
@@ -165,9 +173,9 @@ export interface EvalResult {
 
 export interface TestDelta {
   name: string;
-  before: { passed: boolean; cost_usd: number; turns_used?: number; duration_ms?: number;
+  before: { passed: boolean; cost_usd: number | null; turns_used?: number; duration_ms?: number;
             detection_rate?: number; tool_summary?: Record<string, number>; manual_review?: boolean };
-  after:  { passed: boolean; cost_usd: number; turns_used?: number; duration_ms?: number;
+  after:  { passed: boolean; cost_usd: number | null; turns_used?: number; duration_ms?: number;
             detection_rate?: number; tool_summary?: Record<string, number>; manual_review?: boolean };
   status_change: 'improved' | 'regressed' | 'unchanged' | 'manual-review';
 }
@@ -180,7 +188,7 @@ export interface ComparisonResult {
   before_timestamp: string;
   after_timestamp: string;
   deltas: TestDelta[];
-  total_cost_delta: number;
+  total_cost_delta: number | null;
   total_duration_delta: number;
   improved: number;
   regressed: number;
@@ -442,7 +450,7 @@ export function compareEvalResults(
       name: afterTest.name,
       before: {
         passed: beforeTest !== undefined && evalEntryOutcome(beforeTest) === 'passed',
-        cost_usd: beforeTest?.cost_usd ?? 0,
+        cost_usd: beforeTest ? beforeTest.cost_usd : 0,
         turns_used: beforeTest?.turns_used,
         duration_ms: beforeTest?.duration_ms,
         detection_rate: beforeTest?.detection_rate,
@@ -494,7 +502,7 @@ export function compareEvalResults(
     before_timestamp: before.timestamp,
     after_timestamp: after.timestamp,
     deltas,
-    total_cost_delta: after.total_cost_usd - before.total_cost_usd,
+    total_cost_delta: after.total_cost_usd == null || before.total_cost_usd == null ? null : after.total_cost_usd - before.total_cost_usd,
     total_duration_delta: after.total_duration_ms - before.total_duration_ms,
     improved,
     regressed,
@@ -547,8 +555,8 @@ export function formatComparison(c: ComparisonResult): string {
     if (d.before.detection_rate !== undefined || d.after.detection_rate !== undefined) {
       detail = ` ${d.before.detection_rate ?? '?'}→${d.after.detection_rate ?? '?'} det`;
     } else {
-      const costBefore = d.before.cost_usd.toFixed(2);
-      const costAfter = d.after.cost_usd.toFixed(2);
+      const costBefore = d.before.cost_usd?.toFixed(2) ?? 'unknown';
+      const costAfter = d.after.cost_usd?.toFixed(2) ?? 'unknown';
       detail = ` $${costBefore}→$${costAfter}`;
     }
 
@@ -566,8 +574,8 @@ export function formatComparison(c: ComparisonResult): string {
   if (c.manual_reviewed) parts.push(`${c.manual_reviewed} unscored manual review`);
   lines.push(`  Status: ${parts.join(', ')}`);
 
-  const costSign = c.total_cost_delta >= 0 ? '+' : '';
-  lines.push(`  Cost:   ${costSign}$${c.total_cost_delta.toFixed(2)}`);
+  const costSign = c.total_cost_delta != null && c.total_cost_delta >= 0 ? '+' : '';
+  lines.push(`  Cost:   ${c.total_cost_delta == null ? 'unknown' : `${costSign}$${c.total_cost_delta.toFixed(2)}`}`);
 
   const durDelta = Math.round(c.total_duration_delta / 1000);
   const durSign = durDelta >= 0 ? '+' : '';
@@ -691,7 +699,7 @@ export function generateCommentary(c: ComparisonResult): string[] {
     }
 
     // Cost
-    if (d.before.cost_usd > 0) {
+    if (d.before.cost_usd != null && d.after.cost_usd != null && d.before.cost_usd > 0) {
       const costDelta = d.after.cost_usd - d.before.cost_usd;
       const costPct = Math.round((costDelta / d.before.cost_usd) * 100);
       if (Math.abs(costPct) >= 30 && Math.abs(costDelta) >= 0.05) {
@@ -723,8 +731,8 @@ export function generateCommentary(c: ComparisonResult): string[] {
     const overallParts: string[] = [];
 
     // Total cost
-    const totalBefore = c.deltas.reduce((s, d) => s + d.before.cost_usd, 0);
-    if (totalBefore > 0) {
+    const totalBefore = c.deltas.some(d => d.before.cost_usd == null) ? null : c.deltas.reduce((s, d) => s + d.before.cost_usd!, 0);
+    if (totalBefore != null && totalBefore > 0 && c.total_cost_delta != null) {
       const costPct = Math.round((c.total_cost_delta / totalBefore) * 100);
       if (Math.abs(costPct) >= 10) {
         overallParts.push(`${Math.abs(costPct)}% ${costPct < 0 ? 'cheaper' : 'more expensive'} overall`);
@@ -887,8 +895,11 @@ export class EvalCollector {
   private shard: string | null;
   private fileNamespace?: string;
   private createdAt = Date.now();
+  private acceptanceBinding: ReturnType<typeof beginNativeBinding>;
 
   constructor(tier: 'e2e' | 'llm-judge', evalDir?: string, fileNamespace?: string) {
+    // Opt-in configuration is validated before the caller can begin model work.
+    this.acceptanceBinding = beginNativeBinding();
     if (fileNamespace !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(fileNamespace)) {
       throw new Error('Eval collector namespace must be a lowercase kebab-case slug');
     }
@@ -921,13 +932,13 @@ export class EvalCollector {
     try {
       const git = getGitInfo();
       const version = getVersion();
-      const totalCost = this.tests.reduce((s, t) => s + t.cost_usd, 0);
+      const totalCost = this.tests.some(t => t.cost_usd == null) ? null : this.tests.reduce((s, t) => s + t.cost_usd!, 0);
       const totalDuration = this.tests.reduce((s, t) => s + t.duration_ms, 0);
       const passed = this.tests.filter(t => evalEntryOutcome(t) === 'passed').length;
       const manual = this.tests.filter(t => evalEntryOutcome(t) === 'manual-review').length;
 
       const partial: EvalResult = {
-        schema_version: SCHEMA_VERSION,
+        schema_version: this.acceptanceBinding || this.tests.some(t => t.cost_usd == null) ? BOUND_SCHEMA_VERSION : SCHEMA_VERSION,
         version,
         branch: git.branch,
         git_sha: git.sha,
@@ -941,7 +952,7 @@ export class EvalCollector {
         ...(manual ? { manual_accepted_tests: manual } : {}),
         passed,
         failed: this.tests.length - passed - manual,
-        total_cost_usd: Math.round(totalCost * 100) / 100,
+        total_cost_usd: totalCost == null ? null : Math.round(totalCost * 100) / 100,
         total_duration_ms: totalDuration,
         tests: this.tests,
         ...(this.shard ? { shard: this.shard } : {}),
@@ -963,14 +974,14 @@ export class EvalCollector {
     const git = getGitInfo();
     const version = getVersion();
     const timestamp = new Date().toISOString();
-    const totalCost = this.tests.reduce((s, t) => s + t.cost_usd, 0);
+    const totalCost = this.tests.some(t => t.cost_usd == null) ? null : this.tests.reduce((s, t) => s + t.cost_usd!, 0);
     const totalDuration = this.tests.reduce((s, t) => s + t.duration_ms, 0);
     const passed = this.tests.filter(t => evalEntryOutcome(t) === 'passed').length;
     const manual = this.tests.filter(t => evalEntryOutcome(t) === 'manual-review').length;
 
     const flaky = this.flakyRetries();
     const result: EvalResult = {
-      schema_version: SCHEMA_VERSION,
+      schema_version: this.acceptanceBinding || this.tests.some(t => t.cost_usd == null) ? BOUND_SCHEMA_VERSION : SCHEMA_VERSION,
       version,
       branch: git.branch,
       git_sha: git.sha,
@@ -984,20 +995,23 @@ export class EvalCollector {
       ...(manual ? { manual_accepted_tests: manual } : {}),
       passed,
       failed: this.tests.length - passed - manual,
-      total_cost_usd: Math.round(totalCost * 100) / 100,
+      total_cost_usd: totalCost == null ? null : Math.round(totalCost * 100) / 100,
       total_duration_ms: totalDuration,
       wall_clock_ms: Date.now() - this.createdAt,
       tests: this.tests,
       ...(this.shard ? { shard: this.shard } : {}),
       ...(flaky.length > 0 ? { flaky_retries: flaky } : {}),
     };
+    const acceptance = finishNativeBinding(this.acceptanceBinding, result);
+    if (acceptance) result.acceptance = acceptance;
 
     // Write eval file
     fs.mkdirSync(this.evalDir, { recursive: true });
     const dateStr = timestamp.replace(/[:.]/g, '').replace('T', '-').slice(0, 15);
     const safeBranch = git.branch.replace(/[^a-zA-Z0-9._-]/g, '-');
     // Keep the legacy stem first: eval:compare orders candidates by basename.
-    const suffix = this.fileNamespace ? `--suite-${this.fileNamespace}` : '';
+    const suffix = (this.fileNamespace ? `--suite-${this.fileNamespace}` : '')
+      + (acceptance ? `--acceptance-${acceptance.runId}` : '');
     const filename = `${version}-${safeBranch}-${this.tier}-${dateStr}${suffix}.json`;
     const filepath = path.join(this.evalDir, filename);
     fs.writeFileSync(filepath, JSON.stringify(result, null, 2) + '\n');
@@ -1036,7 +1050,7 @@ export class EvalCollector {
       const outcome = evalEntryOutcome(t);
       const status = outcome === 'manual-review' ? 'MANUAL' : outcome === 'failed' ? ' FAIL '
         : t.execution === 'reused' ? ' REUSE' : ' PASS ';
-      const cost = `$${t.cost_usd.toFixed(2)}`;
+      const cost = t.cost_usd == null ? 'unknown' : `$${t.cost_usd.toFixed(2)}`;
       const dur = t.duration_ms ? `${Math.round(t.duration_ms / 1000)}s` : '';
       const turns = t.turns_used !== undefined ? `${t.turns_used}t` : '';
 
@@ -1055,7 +1069,7 @@ export class EvalCollector {
     }
 
     lines.push('─'.repeat(70));
-    const totalCost = `$${result.total_cost_usd.toFixed(2)}`;
+    const totalCost = result.total_cost_usd == null ? 'unknown' : `$${result.total_cost_usd.toFixed(2)}`;
     const totalDur = `${Math.round(result.total_duration_ms / 1000)}s`;
     lines.push(`  Total: ${result.passed}/${result.total_tests} passed${' '.repeat(20)}${totalCost.padStart(6)}  ${totalDur}`);
     if (result.manual_accepted_tests) lines.push(`  Manual accepted: ${result.manual_accepted_tests} unscored provider refusal(s)`);

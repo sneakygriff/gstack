@@ -1,0 +1,151 @@
+<!-- PRESERVED:round1-10:BEGIN -->
+## Quick reference
+
+**Claude subagent dispatch (fill `<model>`/effort from the routing table):**
+```
+Agent (subagent_type: general-purpose):
+  description: "<one-line task>"
+  model: <fable|claude-opus-4-8|claude-opus-5-5|sonnet|haiku>   # REQUIRED; bare `opus` only after the alias probe; `claude-opus-5` = T2/T3 coding ONLY, never orchestration/review
+  run_in_background: <true|false> # true = parallel / long work
+  isolation: "worktree"           # every L1 implementer that runs concurrently with another task
+  prompt: |
+    Read your brief first: <ABS_BRIEF_PATH>   # requirements live here, verbatim
+    <one line on where this fits + interfaces from prior tasks>
+    Work at <max|high|medium> reasoning effort.   # effort in prose (host may lack an effort param)
+    Write your full report to: <ABS_REPORT_PATH under $RUN_DIR/reports/>
+    Return only the envelope: STATUS, attempt_id, lane, requested_model, actual_model,
+    fallback_reason, base_sha, result_sha, files_touched, change_summary, tests_run,
+    test_result, checks, report_path, follow_ups.
+```
+
+**Class R dispatch:** <!-- retro-2026-10-19 item 12 -->
+```
+Agent (subagent_type: general-purpose | Explore for read-only search):
+  model: haiku          # never sonnet/opus/fable for R (Sonnet only for the one missing-check re-dispatch)
+  effort: "low"         # R only; drop the key if the host rejects it
+  prompt: "<exact command or read/extract task>. Return ≤10 lines: file:line refs, counts, verbatim
+    failing names, and REQUIRED checks[]: {name, command, exit_code} for EVERY check this brief names.
+    On failure: exit code + last lines verbatim, no retry."
+```
+
+Default to `run_in_background: false`: every sequential or gating dispatch (resolver, parse,
+scribe, step-e marker, /ship, gate seats) must return before the loop moves on. Use `true`
+only for ready tasks with DISJOINT `owns` sets and the two gate seats.
+
+**Envelope contract:** the fields in the dispatch template above; `STATUS` is DONE /
+DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED; CLI lanes report `runtime_model` from the CLI's own output,
+never self-report (null = unknown); `checks[]` is `{name, command, exit_code}`. Never full
+diffs/logs/files. Parallel = N dispatch calls in ONE turn.
+
+**Follow-ups contract.** The milestone set is frozen at resolution (step 0); completion is
+defined over that frozen set only. Each `follow_up` a subagent returns is EITHER resolved
+within its milestone's bounded fix rounds, OR recorded to the plan / audit trail / `hardening.json`
+as deferred work with a status. A follow-up is NEVER silently promoted into a new milestone and
+NEVER silently dropped. New milestones require explicit user approval.
+
+**Unit workflow launch (one per ship-unit).** <!-- retro-2026-10-19 item 7 -->
+```
+Bash: SP=<this session's scratchpad dir>; cp ~/.claude/skills/gstack/autobuilder-loop/autobuilder-unit.js "$SP/"
+Workflow:
+  scriptPath: <SP>/autobuilder-unit.js      # the tool refuses a scriptPath outside the session
+  args: {runDir, lane, repo, briefsDir, reportsDir, unit, base, branch,          # required
+         flow: FULL|LITE|PATCH, gateClass: ordinary|critical, prNumber (PATCH only),
+         waves: [[{id, impl: claude|codex, model, effort, tier, note}]], context, gateFocus,
+         dockerFocus, dockerGlobs, shipNotes, prebuilt, maxRounds (3), autoFourth (true),
+         synModel, synGateFrom, synConsFrom, seatCModel (fable), seatXModel (only gpt-6-astra),
+         shipModel, deltaModel, extraFixes ([{owner, item, checks, tier?, impl?, model?}]),
+         extraFixRound, mergeNotes, shipOpenP1, shipOpenP1Markers, shipExtra, shipAttempt,
+         gateAttempt (gate cache-buster, +1 per resume after a quota wait), deltaKnown, privtest,
+         liteLocCap (400), sensitiveGlobs (replaces the S1 classifier + structural globs), acceptDegraded (the operator's record)}
+  resumeFromRunId: <state.json workflow_run_id>   # resume only; every other arg byte-identical except gateAttempt
+```
+Omit an optional arg rather than passing an empty value — prompts stay byte-stable so a resume replays
+from cache. Record the returned run id in `state.json`. The script returns READY (PR open, CI green),
+STOPPED with a classified cause, or BLOCKED; it never merges.
+
+**Resume paths.** <!-- retro-2026-10-19 item 5 --> <!-- retro-2026-10-19 item 11 -->
+1. **Any resume** (new session, `/context-restore`, after a stop) reads `$RUN_DIR/state.json` BEFORE
+   any narrative checkpoint. A `workflow_run_id` still running → watch that run, never relaunch it.
+   A stopped one → relaunch with `resumeFromRunId` and the same args, changing only what the fix needs
+   (e.g. `synModel` + `synGateFrom` after a Fable `quota`).
+   If the helper reports `lock_held`, investigate `$RUN_DIR/.state.lock` and the active
+   writer first. Preserve `state.json`; manual lock cleanup requires confirming that
+   no writer is active and inspecting any pending checkpoint. Never auto-delete the lock
+   or increase the existing retry limit to bypass it. Other helper failures report a
+   bounded reason code on stderr; repair the cause before resuming.
+2. **Known reset time** (a 429 body or the CLI's limit message) → schedule an auto-resume at reset
+   + 2 minutes and say so; never wait for a manual "try again". Unknown reset → probe on the lane's
+   `next_probe_at`. A gate that waited on Astra resumes with `resumeFromRunId` and `gateAttempt: <n+1>`
+   (otherwise the cached ABSENT replays).
+3. **Second-account headless driver** (the orchestrator's own account is out):
+   `CLAUDE_CONFIG_DIR=~/.claude-overflow claude -p --resume <driver session> --permission-mode
+   bypassPermissions` runs the unit workflow with `resumeFromRunId`; this session only watches the
+   journal and `state.json`. Caveat: the second account has its own five-hour window — when the driver
+   hits it, schedule its resume at that reset; never Fable there (credit billing).
+
+**The gate forum — Seat C + Seat X, launched in parallel, read-only, gate on kept `[P1]`.** <!-- v1.8 decision D-B -->
+Two vendors (Anthropic, OpenAI), so neither's blind spots decide the gate alone; the gate is
+mandatory, so it must never hard-fail or hang the loop. Each recipe below is an INDEPENDENT,
+self-contained call — substitute `$RUN_DIR`, `<m>` and `<base>` with literals first. Each seat yields
+`{member, attempt_id, requested_model, runtime_model, base_sha, reviewed_sha, gate:
+PASS|FAIL|INVALID|ABSENT, p1_count, substituted}` — Seat X's copied from the helper's `VERDICT=` and
+`summary` lines, never composed from review text. The station's verdict is the UNION of both members: it FAILs if EITHER reports a `[P1]` that consolidation keeps.
+
+The unit workflow executes these recipes. When executing a gate manually or diagnosing its
+evidence, load the following section; routine Workflow execution does not need this recipe text.
+
+{{SECTION:manual-gate}}
+
+Seat C reads `~/.claude/skills/gstack/autobuilder-loop/sections/seat-c-review.md` plus its required
+canonical checklist. Both methodologies, severity, completion markers and runtime-model checks
+remain mandatory; a missing reference means an incomplete review, never clean.
+
+**Forum fallback and the diversity floor.** Each seat resolves to PRESENT (valid completed
+review), INVALID (completed but unusable) or ABSENT (missing / disabled / quota / timeout /
+throttle-exhausted). Then:
+- **INVALID never counts as ABSENT.** On a `critical` gate an INVALID seat → the gate is
+  **`BLOCKED`** (AskUserQuestion below). On an `ordinary` gate the gate cannot pass until that seat
+  is re-run clean at the same `REVIEWED_SHA` — an extra round that does not count against the cap.
+- **`GATE_CLASS=ordinary`:** both PRESENT, no kept `[P1]` → `CLEAN`. Seat X ABSENT on `quota`/cooling →
+  wait for the reset and re-run, unless policy question 6 accepts `DEGRADED`. Any other single ABSENT
+  seat, the other PRESENT without a kept `[P1]` → **`DEGRADED`** — never `CLEAN` (audit-trailed; ships
+  only with an operator-accepted record; the run ends `COMPLETE_UNVERIFIED` at best). BOTH ABSENT → wait
+  for the earliest reset (Resume paths) and re-run.
+- **`GATE_CLASS=critical`** (contains a T3 task, or the FINAL milestone): Astra PRESENT and valid is
+  REQUIRED — there is no Seat X waiver. Astra ABSENT → wait and auto-resume at the reset (unknown reset:
+  re-probe at `next_probe_at`); Astra INVALID → **`BLOCKED`**: AskUserQuestion ONCE (decision-brief
+  format): **A) Retry** after the INVALID cause is fixed, **B) Stop**.
+
+**ABSENT is PER-GATE, never per-run (this is not optional).** A seat ABSENT at one gate — quota,
+capacity, timeout, transient, auth — MUST be re-attempted at the NEXT gate: the gate-start block
+re-probes absent/cooling lanes and the full recipe runs again. Never cache "Codex/Fable unavailable"
+for the run. The ONLY run-durable disable is `codex_reviews` being off. An ABSENT seat's audit-trail /
+review-log entry states its class so the skip is visible and known to be retried, not abandoned.
+
+**Gate verdict (fail-closed — absence of a positive success signal is a FAIL):** PASS only when
+every PRESENT seat returned an explicit completed review with zero kept `[P1]`.
+FAIL on any `[P1]`/P0 from EITHER model that the consolidator keeps (a rulings-register re-raise
+without new facts is not kept), or on INVALID evidence per the adjudication order above (incl.
+"unable to review" / "no diff" / malformed output — exit 0 but unusable = FAIL, not ABSENT). An ABSENT
+seat is already adjudicated — NOT re-counted as a FAIL; the diversity floor decides `CLEAN` /
+`DEGRADED` / `BLOCKED`. Never read a silent no-op as clean.
+
+**Filesystem boundary:** keep the codex boundary text in sync with codex/SKILL.md.tmpl's. Codex
+reviews run `-s read-only` in a disposable worktree; any write → `tainted` → INVALID.
+
+**Per-gate dashboard log — one entry PER review PER gate** (Seat C logs both methodologies it ran;
+three entries, all `via: "autobuilder-loop"`, same commit):
+```bash
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null)
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-eng-review","timestamp":"'"$TIMESTAMP"'","status":"STATUS","unresolved":N,"via":"autobuilder-loop","commit":"'"$COMMIT"'"}'
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"review","timestamp":"'"$TIMESTAMP"'","status":"STATUS","unresolved":N,"via":"autobuilder-loop","commit":"'"$COMMIT"'"}'
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"codex","timestamp":"'"$TIMESTAMP"'","status":"STATUS","unresolved":N,"via":"autobuilder-loop","commit":"'"$COMMIT"'"}'
+```
+`status` = `clean` if no unresolved issues, else `issues_open`; an ABSENT / INVALID seat still gets its
+entry with a status naming the class (and `substituted` when Sol stood in). This is separate from the
+preamble's run-level "Telemetry (run last)" block — do not duplicate it. All review-log calls are
+best-effort — never block the loop.
+
+---
+<!-- PRESERVED:round1-10:END -->

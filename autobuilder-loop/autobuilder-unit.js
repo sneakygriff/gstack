@@ -304,10 +304,9 @@ if [ -z "$R" ] && ! printf '%s\n' "$LAST" | grep -q -E '^[[:space:]]*(\*\*|__)?R
 if [ -n "$R" ]; then echo "SEATC status=INVALID class=ok reason=$R p1=$P1N runtime_model=$RM"; else echo "SEATC status=PRESENT class=ok reason=complete p1=$P1N runtime_model=$RM"; fi`
 // retro-2026-10-19 item 6: SHIP_METER — the skill's step-f meter (tracked diff + untracked files, the same exclusions,
 // prod/test split). Base = this unit's ship base.
-const METER_EXCL = `':(exclude)*.lock' ':(exclude)package-lock.json' ':(exclude)pnpm-lock.yaml' ':(exclude)bun.lockb' ':(exclude)*dist/*' ':(exclude)*build/*' ':(exclude)*.gen.ts' ':(exclude)*generated/*' ':(exclude)*drizzle/meta/*' ':(exclude)*__snapshots__/*' ':(exclude)*.snap'`
-const METER_TEST = `':(glob)**/test/**' ':(glob)**/__tests__/**' ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/e2e*/**'`
-// Fails closed: an unresolvable base or any git error prints "SHIP_METER FAIL: ..." and no numbers (never 0 + 0).
-const METER = `( cd ${LANE} || { echo "SHIP_METER FAIL: lane missing"; exit 1; }; git rev-parse -q --verify "${BASE}^{commit}" >/dev/null || { echo "SHIP_METER FAIL: base ${BASE} does not resolve"; exit 1; }; _T=$(mktemp) || { echo "SHIP_METER FAIL: mktemp"; exit 1; }; _d() { _o=$(LC_ALL=C git diff --shortstat ${BASE} -- "$@" ${METER_EXCL}) || return 1; printf '%s\\n' "$_o" | awk '{for(n=1;n<NF;n++) if($(n+1)~/^(insertion|deletion)/) t+=$n} END{print t+0}'; }; _n() { git ls-files --others --exclude-standard -z -- "$@" ${METER_EXCL} > "$_T" || return 1; xargs -0 cat < "$_T" 2>/dev/null | wc -l | awk '{print $1+0}'; }; _a=$(_d .) && _b=$(_n .) && _c=$(_d ${METER_TEST}) && _e=$(_n ${METER_TEST}) || { rm -f "$_T"; echo "SHIP_METER FAIL: git error"; exit 1; }; rm -f "$_T"; echo "SHIP_METER: $(( _a + _b - _c - _e )) prod + $(( _c + _e )) test" )`
+// Script owns Git calls, exclusions and prod/test arithmetic; the VM only relays its result.
+const shellArg = x => "'" + String(x).replace(/'/g, "'\\''") + "'"
+const METER = `${SK}/bin/gstack-autobuilder-ops meter ${shellArg(LANE)} ${shellArg(BASE)}`
 // ruling R7: "linear" = no merge commit FROM THE BASE BRANCH after the ship base; the unit's own wave merges keep it linear
 // (fail closed: when the default branch cannot be resolved the branch is not linear; the +20% band is an exception)
 const LINEAR = `_DB=$(git -C ${LANE} symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null); for _c in origin/main origin/master; do [ -n "$_DB" ] || { git -C ${LANE} rev-parse -q --verify "$_c" >/dev/null 2>&1 && _DB=$_c; }; done; _LIN=true; [ -n "$_DB" ] || _LIN=false; _MS=$(git -C ${LANE} rev-list --merges ${BASE}..HEAD) || _LIN=false; for _m in $(printf '%s\n' "$_MS"); do for _p in $(git -C ${LANE} rev-list --parents -n 1 "$_m" | cut -d' ' -f3-); do [ -n "$_DB" ] && git -C ${LANE} merge-base --is-ancestor "$_p" "$_DB" 2>/dev/null && _LIN=false; done; done; echo "LINEAR=$_LIN"`
@@ -391,11 +390,8 @@ function upgrade(why, r) { // v1.8 decision D-E: LITE -> FULL is recorded, never
 let stateWriteFailures = 0
 async function writeState(ph0, decisions0, extra0) {
   const ph = scrubText(ph0), decisions = scrubOut(arr(decisions0)), extra = scrubOut(extra0 || {})
-  const dec = arr(decisions).length
-    ? `, open_decisions=<the existing open_decisions array (or []) plus ${J(decisions)}, without duplicates>`
-    : ', open_decisions=<keep the existing array, or [] when absent>'
-  const ext = Object.keys(extra || {}).map(k => `, ${k}=<the existing ${k} object (or {}) with these entries set: ${J(extra[k])}>`).join('')
-  const p = `Rote state update; edit ONLY ${RUN}/state.json. Read it if it exists (else start from {}). Keep every key you are not told to set; keep workflow_run_id exactly as it is (null when absent: the orchestrator records it at launch; never invent one). Set unit=${J(UNIT)}, flow=${J(flow)}, phase=${J(ph)}, round=${round}, ship_base=${J(BASE)}, lane_head=<output of git -C ${LANE} rev-parse HEAD, or null on error>, lanes_roster=<an object mapping each lane key of ${RUN}/lanes.json to its status field, or {} when the file is missing>, updated_at=<output of date -u +%Y-%m-%dT%H:%M:%SZ>${dec}${ext}. Write valid JSON to a temp file in ${RUN} and mv it over state.json, then confirm with jq -e .unit ${RUN}/state.json. Return only: ok (or FAILED: <reason> when the mv or the jq check failed)`
+  const request = { runDir: RUN, lane: LANE, unit: UNIT, flow, phase: ph, round, base: BASE, decisions, extra: { ...extra, measurement: checkpointMeasurement() } }
+  const p = `Run exactly: ${SK}/bin/gstack-autobuilder-ops state ${shellArg(J(request))}. Relay stdout verbatim; do not edit state yourself. A nonzero exit or missing helper is FAILED, never ok.`
   for (const lbl of [`state: ${ph}`, `state: ${ph} (retry)`]) {
     const r = await ask(p, { label: lbl, phase: curPhase, model: 'haiku', effort: 'low' })
     if (r && /^\s*ok\b/i.test(String(r))) return true
@@ -489,8 +485,32 @@ const strictSchema = s => s === IDL || s === LINE || s === PUSHR
 // schema data they are kept verbatim and validated against PATH_OK by the consumer, which BLOCKs on a failure
 // (invalid_path:<field>, the value never echoed). Every other field of these envelopes is scrubbed as usual.
 const PATH_FIELDS = new Map([[FILES, ['files']], [GS, ['files_since_base', 'files_since_prev']], [GUARD, ['files_since', 'tree_delta']], [INT, ['files']]])
+// Logical requests include Workflow replay: these are NOT billable-call or token counters.
+// Only string lengths/counts persist. No prompts, reports, paths or provider credentials.
+const measurement = { version: 1, logical_dispatches: 0, prompt_chars: 0, response_chars: 0, null_results: 0, thrown_calls: 0, by_model: {}, by_phase: {} }
+function checkpointMeasurement() {
+  const { by_model, by_phase, ...counts } = measurement
+  return { ...counts, actual_tokens: null, duration_ms: null }
+}
+function measurementSnapshot() {
+  return JSON.parse(J({ ...measurement, actual_tokens: null, duration_ms: null, cache_status: 'unknown',
+    measurement_scope: 'workflow logical requests; UTF-16 chars; excludes loaded files, schemas, tools and nested CLI calls',
+    snapshot: 'before this checkpoint relay; final result includes it' }))
+}
 const ask = async (prompt, opts) => {
-  const r = await agent(prompt, opts)
+  measurement.logical_dispatches++
+  measurement.prompt_chars += String(prompt).length
+  const key = String((opts && opts.model) || 'unspecified')
+  const bucket = measurement.by_model[key] || (measurement.by_model[key] = { logical_dispatches: 0, prompt_chars: 0 })
+  bucket.logical_dispatches++; bucket.prompt_chars += String(prompt).length
+  // Fixed vocabulary prevents phase descriptions or unit names entering telemetry.
+  const phaseKey = ((String((opts && opts.phase) || '').match(/^(Refresh|Build|Integrate|Gate|Fix|Ship|PATCH)\b/) || [])[1] || 'other').toLowerCase()
+  const phaseBucket = measurement.by_phase[phaseKey] || (measurement.by_phase[phaseKey] = { logical_dispatches: 0, prompt_chars: 0 })
+  phaseBucket.logical_dispatches++; phaseBucket.prompt_chars += String(prompt).length
+  let r
+  try { r = await agent(prompt, opts) } catch (e) { measurement.thrown_calls++; throw e }
+  if (r == null) measurement.null_results++
+  else { try { measurement.response_chars += (typeof r === 'string' ? r : J(r)).length } catch {} }
   if (opts && strictSchema(opts.schema)) return r
   const out = scrubDeep(r), pf = opts && PATH_FIELDS.get(opts.schema)
   if (pf && r && out && typeof r === 'object' && typeof out === 'object') for (const k of pf) if (Array.isArray(r[k])) out[k] = r[k].slice()
@@ -605,6 +625,8 @@ async function finish(res0) {
   const ph = out.status === 'READY' ? 'READY' : (out.stopped ? `${out.status}: ${out.stopped}` : out.status)
   if (!(await writeState(ph, out.decision ? [out.decision] : []))) out.state_write_failed = true
   if (stateWriteFailures) out.state_write_failures = stateWriteFailures
+  out.measurement = measurementSnapshot()
+  out.measurement.snapshot = 'final result includes the final checkpoint relay'
   return out
 }
 
@@ -730,7 +752,7 @@ function seatCCore(round, seatScope, gs, prev) {
   const range = seatScope === 'delta' ? `${prev}..${gs.reviewed_sha}` : `${BASE}...${gs.reviewed_sha}`
   return `Seat C (Claude) of the ${UNIT} gate, round ${round}${seatScope === 'delta' ? ' (scoped to the fix delta; the earlier range was already reviewed and its rulings are in the register)' : ''}. Ship-unit ${UNIT} = ${IDS.join(', ') || 'see the briefs'}.${opt(A.gateFocus, f => ' ' + f)} Briefs (the acceptance criteria): ${BRIEFS || B}. Code: ${LANE} (branch ${BR}); RANGE=${range} — diff exactly this range, never a moving ref. Read-only: never edit, commit, stash or check out anything.
 Already adjudicated in this unit (do not re-file without new facts): read ${RULINGS} first; a claim in it is closed unless you state a NEW fact.
-ONE pass, two methodologies, findings only: read ${SK}/plan-eng-review/SKILL.md and apply ONLY its review methodology (architecture, code quality, tests, performance, failure modes); read ${SK}/review/SKILL.md and run its checklist passes; both against the RANGE diff and the briefs. ${SEATC_SKIP} Anything either skill would ask the user: take the recommended option and list genuine taste calls in notes. Verify every acceptance clause of the briefs against the code (file:line, or MISSING). ${SEV}
+ONE pass, two methodologies, findings only: read ${SK}/autobuilder-loop/sections/seat-c-review.md and the checklist it requires; apply all engineering dimensions and both checklist passes; both against the RANGE diff and the briefs. If the rubric or checklist is missing or unreadable, return REVIEW_INCOMPLETE, never clean. ${SEATC_SKIP} Anything either skill would ask the user: take the recommended option and list genuine taste calls in notes. Verify every acceptance clause of the briefs against the code (file:line, or MISSING). ${SEV}
 Write the full report to ${R}/gate-${U}-r${round}-seat-c.md.`
 }
 
@@ -765,7 +787,7 @@ async function seatC(round, seatScope, gs, prev) {
   const p = `Rote relay for Seat C on lane L2 (second Claude account, claude-opus-5-5 at high effort; never Fable here, never --allow-credit-billing). Use Bash, every call with timeout 600000; run commands and copy their outputs; never read, judge or summarize review text yourself. Use the literal ADIR / OUT paths in every later call.
 1. ${GL} worktree add --run-dir ${RUN} --task ${T} --base ${gs.reviewed_sha} --detach --repo ${REPO} (reuse ${RUN}/wt/${T} if it exists). On failure return status ABSENT, verdict ABSENT, class error.
 2. AID=$(date -u +%Y%m%dT%H%M%SZ)-$$; ADIR=${RUN}/attempts/${T}/$AID; mkdir -p "$ADIR"; OUT="$ADIR/review.json".
-3. Write "$ADIR/prompt.txt" = the review brief between the markers, then a line "THE DIFF (you cannot run git; it is ${rng}):" and the output of git -C ${LANE} diff ${rng}, then "Already adjudicated in this unit (do not re-file without new facts):" and the content of ${RULINGS}. Append to the brief: "You cannot write files: reply with the full review text instead of writing the report. If you cannot read a skill file, apply the methodology named here from your own knowledge. Tag every finding [P1] or [P2] at the start of its line. ${MARKER_RULE}"
+3. Write "$ADIR/prompt.txt" = the review brief between the markers, then a line "THE DIFF (you cannot run git; it is ${rng}):" and the output of git -C ${LANE} diff ${rng}, then "Already adjudicated in this unit (do not re-file without new facts):" and the content of ${RULINGS}. Append to the brief: "You cannot write files: reply with the full review text instead of writing the report. If the required rubric or checklist is missing or unreadable, end with REVIEW_INCOMPLETE: <reason>; never substitute remembered methodology or emit REVIEW_COMPLETE. Tag every finding [P1] or [P2] at the start of its line. ${MARKER_RULE}"
 <<<BRIEF
 ${core}
 BRIEF>>>

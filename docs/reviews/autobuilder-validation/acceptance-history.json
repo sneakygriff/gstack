@@ -1,0 +1,34 @@
+{
+  "description": "Historical attributed observations only. Complete consumed-input metadata is unknown. No current coverage credit.",
+  "historical": [
+    {
+      "id": "complete-free-2fdc4698",
+      "revision": "2fdc46980f64bec62d38555c4949df11284bcf40",
+      "exit": 1,
+      "totals": {
+        "files": 938,
+        "pass": 22326,
+        "fail": 422,
+        "skip": 410
+      },
+      "source": {
+        "path": "docs/reviews/autobuilder-through4-2026-10-23/final-verification.json",
+        "sha256": "5cf4726633e7e7bec53cedb54329282c5a66438910fb3733051a3d10f1ee6944"
+      }
+    },
+    {
+      "id": "later-focused-50",
+      "revision": "64e08cbcc1f5730315d2bbc025d4c911d93c3b60",
+      "result": {
+        "pass": 50,
+        "fail": 0,
+        "files": 3,
+        "log": ".context/goal-census-final.log"
+      },
+      "source": {
+        "path": "docs/reviews/autobuilder-through4-2026-10-23/final-verification.json",
+        "sha256": "5cf4726633e7e7bec53cedb54329282c5a66438910fb3733051a3d10f1ee6944"
+      }
+    }
+  ]
+}

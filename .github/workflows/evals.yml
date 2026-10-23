@@ -442,6 +442,15 @@ jobs:
           RESULTS=$(find /tmp/paid-report -name '*.json' ! -name 'manifest.json' ! -name 'slice-*.json' ! -name '_partial*' 2>/dev/null | sort)
           TOTAL=0; PASSED=0; FAILED=0; MANUAL=0; FLAKY=0; EXECUTED=0; REUSED=0; COST="0"
           SUITE_LINES=""
+          add_cost() {
+            C_LABEL="unknown"
+            if [ "$C" = "unknown" ]; then
+              COST="unknown"
+            else
+              C_LABEL="\$$C"
+              if [ "$COST" != "unknown" ]; then COST=$(echo "$COST + $C" | bc); fi
+            fi
+          }
           VERIFIED=/tmp/verdict/paid-report/collector-outcomes.json
           if ! jq -e '
             . as $summary |
@@ -462,13 +471,13 @@ jobs:
               TOTAL=$((TOTAL + T)); PASSED=$((PASSED + P)); FAILED=$((FAILED + F))
               MANUAL=$((MANUAL + M)); FLAKY=$((FLAKY + FL))
               EXECUTED=$((EXECUTED + EX)); REUSED=$((REUSED + RE))
-              COST=$(echo "$COST + $C" | bc)
+              add_cost
               STATUS_ICON="✅"
               [ "$M" -gt 0 ] && STATUS_ICON="⚠ manual/unscored"
               [ "$F" -gt 0 ] && STATUS_ICON="❌"
               [ "$F" -eq 0 ] && [ "$M" -eq 0 ] && [ "$FL" -gt 0 ] && STATUS_ICON="✅⚠"
-              SUITE_LINES="${SUITE_LINES}| ${TIER}/${SHARD} | ${P}/${T} | ${M} | ${EX} | ${RE} | ${STATUS_ICON} | \$${C} |\n"
-            done < <(jq -r '.files[] | [.file,.total,.passed,.failed,.manual_accepted,.flaky,.executed,.reused,.attempts,.cost,.tier,.shard] | @tsv' "$VERIFIED")
+              SUITE_LINES="${SUITE_LINES}| ${TIER}/${SHARD} | ${P}/${T} | ${M} | ${EX} | ${RE} | ${STATUS_ICON} | ${C_LABEL} |\n"
+            done < <(jq -r '.files[] | [.file,.total,.passed,.failed,.manual_accepted,.flaky,.executed,.reused,.attempts,(.cost // "unknown"),.tier,.shard] | @tsv' "$VERIFIED")
           else
           for f in $RESULTS; do
             if ! jq -e '.total_tests' "$f" >/dev/null 2>&1; then
@@ -488,7 +497,7 @@ jobs:
             STATS=$(jq -r '[.tests | group_by(.name)[] | last] as $final | "\($final | length) \([$final[] | select(.passed)] | length) \([$final[] | select(.passed | not)] | length) \(.flaky_retries // [] | length) \([$final[] | select(.execution != "reused")] | length) \([$final[] | select(.execution == "reused")] | length)"' "$f" 2>/dev/null) || { echo "Skipping malformed tests[] in: $f"; continue; }
             read -r T P F FL EX RE <<< "$STATS"
             [ -z "$T" ] && { echo "Skipping malformed tests[] in: $f"; continue; }
-            C=$(jq -r '.total_cost_usd // 0' "$f")
+            C=$(jq -r '.total_cost_usd // "unknown"' "$f")
             TIER=$(jq -r '.tier // "unknown"' "$f")
             SHARD=$(jq -r '.shard // "-"' "$f")
             [ "$T" -eq 0 ] && continue
@@ -498,11 +507,11 @@ jobs:
             FLAKY=$((FLAKY + FL))
             EXECUTED=$((EXECUTED + EX))
             REUSED=$((REUSED + RE))
-            COST=$(echo "$COST + $C" | bc)
+            add_cost
             STATUS_ICON="✅"
             [ "$F" -gt 0 ] && STATUS_ICON="❌"
             [ "$F" -eq 0 ] && [ "$FL" -gt 0 ] && STATUS_ICON="✅⚠"
-            SUITE_LINES="${SUITE_LINES}| ${TIER}/${SHARD} | ${P}/${T} | unverified | ${EX} | ${RE} | ${STATUS_ICON} | \$${C} |\n"
+            SUITE_LINES="${SUITE_LINES}| ${TIER}/${SHARD} | ${P}/${T} | unverified | ${EX} | ${RE} | ${STATUS_ICON} | ${C_LABEL} |\n"
           done
           fi
 
@@ -513,9 +522,11 @@ jobs:
           if [ "$STATUS" = '✅ PASS' ] && [ "$MANUAL" -gt 0 ]; then STATUS='⚠ MANUAL ACCEPTED (unscored)'; fi
           if [ -z "$VERIFIED" ]; then STATUS='❌ FAIL (manual acceptance unavailable/unverified)'; fi
 
+          COST_LABEL="unknown"
+          [ "$COST" = "unknown" ] || COST_LABEL="\$$COST"
           BODY="## E2E Evals: ${STATUS}
 
-          **${PASSED} automated passed / ${TOTAL} final results** | **${FAILED} failed, ${MANUAL} manual accepted (unscored; no score-cache credit)** | **${EXECUTED} executed, ${REUSED} reused** | **\$${COST}** total cost | reconcile exit: ${RECONCILE_EXIT:-missing}$([ "$FLAKY" -gt 0 ] && printf ' | ⚠ %s cases with multiple attempts' "$FLAKY")
+          **${PASSED} automated passed / ${TOTAL} final results** | **${FAILED} failed, ${MANUAL} manual accepted (unscored; no score-cache credit)** | **${EXECUTED} executed, ${REUSED} reused** | **${COST_LABEL}** total cost | reconcile exit: ${RECONCILE_EXIT:-missing}$([ "$FLAKY" -gt 0 ] && printf ' | ⚠ %s cases with multiple attempts' "$FLAKY")
 
           ${COVERAGE}
 

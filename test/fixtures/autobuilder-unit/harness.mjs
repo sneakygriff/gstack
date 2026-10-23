@@ -548,8 +548,9 @@ const scenarios = {
     expect: (r, c) => {
       const BRX = 'fix/' + fake.sk('validation-of-the-input-parser')
       const sp = (c.find(x => /^state: Ship: PR #12$/.test(x.label)) || {}).prompt || ''
-      const m = sp.match(/, prs=<the existing prs object \(or \{\}\) with these entries set: (\{.*?\})>/)
-      const rec = m ? JSON.parse(m[1]).U1 : null
+      const m = sp.match(/gstack-autobuilder-ops state '(.*)'\. Relay stdout/)
+      const request = m ? JSON.parse(m[1].replace(/'\\''/g, "'")) : null
+      const rec = request && request.extra && request.extra.prs && request.extra.prs.U1
       return r.status === 'READY' && new RegExp("B='" + BRX.replace('/', '\\/') + "'").test(c.find(x => /^ship push$/.test(x.label)).prompt) && /git\/ref\/heads\/\$B/.test(c.find(x => /^ship verify push$/.test(x.label)).prompt)
         && !!rec && rec.branch === BRX && rec.repo === 'github.com/acme/app' && rec.pr === 12 && /^[0-9a-f]{40}$/.test(rec.head) && rec.head === r.pushed_head
         && r.pr.head_ref === BRX && r.branch === undefined && !/<token>/.test(sp) && !/<token>/.test(JSON.stringify(r))

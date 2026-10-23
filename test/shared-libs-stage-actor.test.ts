@@ -8,10 +8,17 @@ import { createLifecyclePrerequisiteActor } from './helpers/shared-libs-path-fix
 import { sharedLibsFingerprint } from '../lib/review-evidence';
 import { CAPTURE_MS, CAPTURE_LONG_MS } from './helpers/eval-budgets';
 import { E2E_TOUCHFILES, GLOBAL_TOUCHFILES, selectTests } from './helpers/touchfiles';
+import { createLifecycleDiagnostics } from './helpers/lifecycle-diagnostics';
 import stageScope from './fixtures/shared-libs-lifecycle-r59-stage-scope-public.json';
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+const diagnostics = new Map<string, ReturnType<typeof createLifecycleDiagnostics>>();
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    try { diagnostics.get(root)?.beforeCleanup(); }
+    finally { fs.rmSync(root, { recursive: true, force: true }); diagnostics.delete(root); }
+  }
+});
 const source = fs.readFileSync(path.join(import.meta.dir, 'skill-e2e-shared-libs.test.ts'), 'utf8');
 const helper = fs.readFileSync(path.join(import.meta.dir, 'helpers/shared-libs-eval-fixture.ts'), 'utf8');
 const transpile = (text: string) => new Bun.Transpiler({ loader: 'ts' }).transformSync(text);
@@ -23,6 +30,7 @@ function runner(f: fixtures.SharedLibsFixture, mode: string, observations: any[]
   for (const [module, replacement] of [['./agent-sdk-runner', 'deps.sdk'], ['@anthropic-ai/claude-agent-sdk', 'deps.provider'], ['./eval-budgets', 'deps.budgets']]) {
     body = body.replace(`await import('${module}')`, replacement);
   }
+  const diagnostic = diagnostics.get(f.root)!;
   let session: any;
   const query = (args: any) => ({ async *[Symbol.asyncIterator]() {
     expect(args.options.hooks).toBe(session.stageActor.hooks);
@@ -31,9 +39,9 @@ function runner(f: fixtures.SharedLibsFixture, mode: string, observations: any[]
     let count = 0;
     const hook = async (kind: 'PreToolUse' | 'PostToolUse', tool: string, input: any, id: string) => {
       for (const matcher of hooks[kind] ?? []) for (const callback of matcher.hooks) {
-        const result = await callback({ hook_event_name: kind, tool_name: tool, tool_input: input,
+        const result = await diagnostic.step(`${kind}:${tool}:${id}`, () => callback({ hook_event_name: kind, tool_name: tool, tool_input: input,
           tool_use_id: id, cwd: f.repo, session_id: 'free-lifecycle', transcript_path: path.join(f.root, 'public.jsonl'),
-          ...(kind === 'PostToolUse' ? { tool_response: {} } : {}) }, mode === 'optional hook id' ? undefined : id, { signal: new AbortController().signal });
+          ...(kind === 'PostToolUse' ? { tool_response: {} } : {}) }, mode === 'optional hook id' ? undefined : id, { signal: new AbortController().signal }));
         expect(result.hookSpecificOutput?.permissionDecision).not.toBe('deny');
       }
     };
@@ -42,7 +50,7 @@ function runner(f: fixtures.SharedLibsFixture, mode: string, observations: any[]
       events.push({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', id, input }] } });
       if (!(isStage && mode === 'no-call')) await hook('PreToolUse', 'Bash', input, id);
       const text = isStage && mode === 'no-call' ? JSON.stringify({ synthetic: true, native_coverage: false, settled: true })
-        : execFileSync('bash', ['-c', command], { cwd: f.repo, env: { ...process.env, ...f.env }, encoding: 'utf8', timeout: 30_000 }).trim();
+        : await diagnostic.step(command, () => execFileSync('bash', ['-c', command], { cwd: f.repo, env: { ...process.env, ...f.env }, encoding: 'utf8', timeout: 30_000 }).trim());
       await hook('PostToolUse', 'Bash', input, id);
       events.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: text }] } });
       return text;
@@ -166,7 +174,7 @@ function lifecycle(mode: string) {
       expect(cases).toEqual(['skip', 'approve']); return work({ signal: new AbortController().signal,
         remainingMs: () => CAPTURE_LONG_MS, add: (scenario: string, row: any) => rows.push({ scenario, row }) });
     } },
-    createSharedLibsFixture: (name: string) => { const f = fixtures.createSharedLibsFixture(name); roots.push(f.root); return f; },
+    createSharedLibsFixture: (name: string) => { const f = fixtures.createSharedLibsFixture(name); roots.push(f.root); diagnostics.set(f.root, createLifecycleDiagnostics(f.root)); return f; },
     runSharedInteractive: async (f: fixtures.SharedLibsFixture, name: string, prompt: string, choose: string, options: any) => {
       expect(prompt).toBe(fixtures.reviewPrompt(f, path.join(f.root, 'review-lifecycle.md'), path.join(f.root, 'specialist-input.jsonl'), options.stageActor));
       if (mode === 'post-fix verification') {

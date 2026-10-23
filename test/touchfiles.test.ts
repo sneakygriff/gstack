@@ -178,7 +178,7 @@ describe('selectTests', () => {
   test('testing resolver source selects only judges that consume its generated workflow text', () => {
     const result = selectTests(['scripts/resolvers/testing.ts'], LLM_JUDGE_TOUCHFILES);
     expect(result.reason).toBe('diff');
-    expect(result.selected.sort()).toEqual(['plan-eng-review/SKILL.md sections', 'ship/SKILL.md workflow']);
+    expect(result.selected.sort()).toEqual(['autobuilder-loop/SKILL.md workflow', 'plan-eng-review/SKILL.md sections', 'ship/SKILL.md workflow']);
   });
 
   test('bounded shared-code planning selects its consumed resolvers, excluding other Eng sections', () => {
@@ -224,7 +224,9 @@ describe('selectTests', () => {
     expect(paragraph?.length).toBeGreaterThan(100);
     expect(readWorkflowExcerpt(skill, start, end)).toContain(`${marker}\n\n${paragraph}`);
     for (const changed of [file, `${file}.tmpl`]) {
-      expect(selectTests([changed], LLM_JUDGE_TOUCHFILES).selected).toEqual([judge]);
+      const expected = changed === 'plan-eng-review/sections/review-sections.md.tmpl'
+        ? ['autobuilder-loop/SKILL.md workflow', judge] : [judge];
+      expect(selectTests([changed], LLM_JUDGE_TOUCHFILES).selected).toEqual(expected);
     }
   });
 
@@ -525,7 +527,7 @@ describe('TOUCHFILES completeness', () => {
     );
 
     const unique = registeredJudgeTestNames(llmContent);
-    expect(unique).toHaveLength(24);
+    expect(unique).toHaveLength(25);
 
     const missing = unique.filter(name => !(name in LLM_JUDGE_TOUCHFILES));
     if (missing.length > 0) {
@@ -544,7 +546,7 @@ describe('TOUCHFILES completeness', () => {
       testIfSelected('unmapped judge case', async () => {}, 120_000);
     `;
     const names = registeredJudgeTestNames(withUnmappedCase);
-    expect(names).toHaveLength(25);
+    expect(names).toHaveLength(26);
     expect(names.filter(name => !(name in LLM_JUDGE_TOUCHFILES))).toEqual(['unmapped judge case']);
   });
 

@@ -1,0 +1,99 @@
+<!-- PRESERVED:round1-5:BEGIN -->
+### 1. Build the next milestone
+
+**1.0. Re-parse from disk.** Each iteration, dispatch the **R-class Haiku** parse subagent to
+re-extract `{next_milestone, acceptance_criteria}` from the frozen plan on disk. When the plan
+carries per-milestone status markers (`<!-- status: pending | built-gate-pending | complete -->`,
+authored by `/plan-deliverables`), `next_milestone` is the FIRST milestone still marked `pending`.
+Plans without markers: the orchestration-class decomposer (step a) picks the first milestone with
+unmet acceptance criteria — selection is judgment, not R work. **Re-probe before dispatch:** if
+any lane was absent/cooling in the last roster, run `gstack-lane probe --run-dir "$RUN_DIR" --lanes
+<those lanes>` now (and again at each gate start); only `codex_reviews=disabled` persists.
+
+**Choose the flow size (record it in `state.json` and the audit trail).** <!-- v1.8 decision D-E -->
+- **FULL** — any T2/T3 task, the FINAL unit, OR any sensitive path, OR more than 400 production LOC
+  (default). Sensitive = auth, security boundary, migrations, public interfaces/APIs, payments,
+  PII/erasure; the classifier OVER-matches (case-insensitive tokens at a path-segment or camelCase start:
+  the token set in `autobuilder-unit.js` SENSITIVE_TOKEN_RE: auth*, session, secrets, keys/certs, admin/roles, payments,
+  migrations, PII; only `author*` is excluded; `sensitiveGlobs`
+  REPLACES it and the structural globs) — a false positive only upgrades LITE to FULL. Gate: Seat C + Seat X; Docker in round 1
+  (then path-scoped); round-1 mutation probe; up to the packet's max rounds.
+- **LITE** — at most 400 production LOC, only T0/T1 tasks, no sensitive path, never the FINAL unit. Gate: ONE round of
+  Seat C ∥ Seat X; targeted tests; Docker only when a trigger glob is touched; mutation probe only on
+  brief-named mutants. P2 fix-now → the scoped delta review. Any kept `[P1]` upgrades the unit to FULL
+  for the rest of its gate (record the upgrade).
+- **PATCH** — a fix to the OPEN PR that `prs[<unit>]` of `state.json` (else `state.final.json`)
+  recorded (any other PR is refused): CI failure, review comment, post-gate P2 follow-up, CHANGELOG
+  correction. Owner-routed fix (Haiku max for T0/T1) → targeted tests → scoped delta review by one
+  Claude seat (Fable or Opus 5.5) → push to the SAME PR branch → CI wait. No refresh, no new gate round, no /ship rerun, no version bump, no new PR. Prose-only deltas (`.md`,
+  `.txt`, `.rst` — `.mdx` is code) skip the delta review and get the Haiku fact-check. Fixes go in as
+  `extraFixes [{owner, item, checks, tier?, impl?, model?}]`: an owner that is a task of `waves` routes
+  by its tier row; any other owner needs `tier`, else PATCH stops. Every check fails closed (step f).
+  A PATCH escalates to a full re-round only when its delta touches a sensitive path or its delta
+  review keeps a `[P1]`. A fix to an already-MERGED PR is a new unit (LITE, or the hardening batch).
+
+**Pre-dispatch SHIP_METER check.** <!-- retro-2026-10-19 item 6 --> Before dispatching this milestone,
+run the step-f meter. At ≥ 2,000 production LOC: checkpoint FIRST (step f), then start the milestone
+against the fresh base. Never begin a milestone that cannot plausibly finish inside the cap.
+
+**a. Decompose.** A **Fable / Opus-5.5 / Opus-4.8-max** subagent (L1) decomposes the milestone into
+tasks, classifies each by tier, and returns `{tasks[]: {id, summary, tier: T0|T1|T2|T3, deps[],
+owns[], lane}}`. `owns` is the task's WRITE SET including shared surfaces — interfaces, lockfiles,
+schemas, generated outputs, CHANGELOG/VERSION. The decomposition, briefs and any T3 design analysis
+then get the rule-5 planning pass (one internal round + one Astra review per milestone; LITE skips it).
+
+**b. Dispatch — the script's Build phase (waves), under these rules.** A task is READY when its deps
+are integrated AND its `owns` set is disjoint from every in-flight task's `owns` (file-level). Group
+ready tasks into the script's `waves`.
+- **Caps:** per lane L1 = 2, L2 = 2, L3 = 2; global = `autobuilder_max_parallel` (default 6).
+  Reviewers count; background `gstack-lane run` launches count against THEIR lane. Reserve the next
+  gate's seats before admitting new implementation work (rule 2); class-R workers sit outside these
+  caps. Heavy checks: ≤ 2 focused runners + 1 full-suite/build runner at a time. **Throttle cap
+  rule:** each `throttle` drops that lane's cap by 1 for the milestone (never below 1 while `ok`);
+  ≥ 3 consecutive throttles in a milestone → treat the lane as `cooling`.
+- **Isolation:** every external-lane task, and every in-session task running concurrently with
+  another, gets its OWN worktree — `gstack-lane worktree add --run-dir "$RUN_DIR" --task <id>
+  --base <milestone-branch>` (it prints `base_sha=<sha>` — record it in your task ledger; it is the
+  `--base` every later `commit` for this task must pass); concurrent Agent implementers pass
+  `isolation: "worktree"`. Dependents start from the INTEGRATED milestone branch, never a sibling's.
+- **External-lane (L2/L3) task:** `A="$RUN_DIR/attempts/<id>/<attempt_id>"; mkdir -p "$A" &&
+  ~/.claude/skills/gstack/bin/gstack-lane run --run-dir "$RUN_DIR" --lane <l2|l3> --mode impl --tier
+  T<n> --model <id> --effort <e> --cwd "$RUN_DIR/wt/<id>" --prompt-file <brief> --out "$A/impl.json"
+  --schema <envelope schema> --timeout <s> --allow-cmd "<vetted check prefix>"… >/dev/null 2>&1;
+  ~/.claude/skills/gstack/bin/gstack-lane summary --out "$A/impl.json"` — a FRESH attempt dir (`run`
+  refuses an existing `--out`). `--allow-cmd` takes only test/build-runner prefixes (`bun test`, `npm
+  test`, `make`, `cargo`, `pytest`, …); the helper rejects shells and inline interpreters (`bash -c`,
+  `eval`, `python -c`, `curl`, …) — never smuggle one through. Only the PREFIX is vetted, so a check
+  command on L2 impl = repo code running as the operator; only L3 runs its checks in an OS sandbox.
+  The helper owns the hard deadline, the `ok|throttle|quota|auth|timeout|error` classification, the
+  REVIEW-only timeout step-down (an impl timeout never drops effort below the tier's floor) and
+  `lanes.json`; never retry around it by hand.
+- **Evidence + commit:** accept an attempt only when ITS `status.json` says `class: ok`, `exit: 0`
+  and `runtime_model` is present (null = treat as coercion, spill per rule 1). Commit with
+  `gstack-lane commit --run-dir "$RUN_DIR" --task <id> --base <base_sha> -m "<task summary>"` —
+  `--base` from YOUR task ledger, never re-read from the run tree (the helper refuses a mismatch). It
+  stages inertly (no hooks/filters) and REFUSES (exit 1, nothing committed) on any credential-shaped
+  path in the staged delta or any commit since the base (keys, `auth.json`/`.credentials.json`,
+  `id_*`, `.env`/`.env.*` except example/sample/template files, `.netrc`, `.git-credentials`,
+  `.pgpass`, token-bearing `.npmrc`/`.pypirc`, credential-shaped names under `.claude*/`), on an
+  LFS/git-crypt filtered path (`filter_path=`), or when the git control state changed since
+  `worktree add`. A refusal is a failed attempt: diagnose (rule 6) — never commit around it.
+- **Quota / health (from `lanes.json`):** `throttle` → the throttle cap rule. `quota` → the lane
+  cools until `next_probe_at`; requeue on the next lane in the row (same tier, rule 1). `auth` → lane
+  ABSENT until a later probe clears it. `timeout` (impl) → diagnose (rule 6) before re-dispatch.
+  `lane_update: pending` → re-run `probe` first. Keep a requeued attempt's partial diff for the next
+  brief. Codex cooling is lane-wide: a cooling L3 cools all its models.
+- **Per-task review (T1+):** no separate pass — the unit gate is each task's other-vendor review
+  (rule 3); its findings route to the author lane.
+- **Integration:** ONE integration worker (L1 Opus 5.5, owning the milestone worktree) merges task
+  branches in dependency order, runs the affected checks after EACH merge, resolves conflicts with
+  semantic revalidation, then `gstack-lane worktree rm` the task worktree. A schema-valid envelope and
+  `test_result: pass` are claims, not verification — the integration worker's own check run counts.
+
+A failing task: re-query ground truth via a fresh subagent before re-dispatching; 2 failed
+re-dispatches of the SAME task → `BLOCKED` with its last envelope.
+
+**Mid-milestone SHIP_METER check.** For any milestone projected > 1,000 production LOC, re-run the
+step-f meter after each wave. At ≥ 2,500 production LOC mid-milestone: stop dispatching feature tasks
+— only what is required to reach a coherent, verifiable state — then gate and checkpoint (step f).
+<!-- PRESERVED:round1-5:END -->
