@@ -364,6 +364,24 @@ describe('eval:compare CLI (scripts/eval-compare.ts)', () => {
 // ── eval-summary ─────────────────────────────────────────────────────────────
 
 describe('eval:summary CLI (scripts/eval-summary.ts)', () => {
+  test('per-test cost completeness is independent of available turn observations', () => {
+    for (let index = 0; index < 3; index++) {
+      const file = writeRun(evalDir, { timestamp: `2026-01-0${index + 1}T01:00:00Z`, tests: [
+        { name: 'missing-cost', passed: true, cost: index + 1, turns: index + 1 },
+        { name: 'known-cost', passed: true, cost: index + 1, turns: index + 1 },
+      ] });
+      const body = JSON.parse(fs.readFileSync(file, 'utf8'));
+      body.schema_version = 3;
+      if (index === 1) { body.tests[0].cost_usd = null; body.total_cost_usd = null; }
+      if (index === 2) for (const entry of body.tests) delete entry.turns_used;
+      fs.writeFileSync(file, JSON.stringify(body));
+    }
+    const result = runEvalCli('eval-summary.ts');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toMatch(/missing-cost\s+unknown\s+2t/);
+    expect(result.stdout).toMatch(/known-cost\s+\$2\.00\s+2t/);
+  });
+
   test('unknown native cost remains unknown in history, summary and flake JSON', () => {
     const file = writeRun(evalDir, { timestamp: new Date().toISOString(), tests: [{ name: 'unknown-cost', passed: true }] });
     const body = JSON.parse(fs.readFileSync(file, 'utf8'));
