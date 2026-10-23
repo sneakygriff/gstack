@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] Distinguish effective account identity, auth method, observed model, working transport and known quota evidence.
 - [ ] Do not count two Claude profiles as independent pools without distinct effective identities.
