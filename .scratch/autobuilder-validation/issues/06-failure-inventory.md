@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] Reconcile reported totals with named failures and module-load/unattributed errors.
 - [ ] Group demonstrated product, expectation, fixture and environment causes; retain unknown causes explicitly.

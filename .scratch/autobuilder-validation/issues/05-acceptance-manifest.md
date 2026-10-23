@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Strict focused test execution
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] Separate passed, failed, skipped, cancelled and unexecuted checks, and preserve failure evidence.
 - [ ] Reject incomplete or stale evidence; bind consumed inputs and relevant environment.
