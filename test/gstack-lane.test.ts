@@ -115,7 +115,8 @@ describe('l3 codex (E1–E4, addendum b)', () => {
     expect(fs.readFileSync(path.join(c.rec, 'codex-modes'), 'utf8').trim().split('\n')).toEqual(['700', '600', '600']);
     expect(fs.readFileSync(path.join(c.rec, 'codex-auth.json'), 'utf8')).toBe(fs.readFileSync(path.join(sb.home, '.codex', 'auth.json'), 'utf8'));
     expect(fs.readFileSync(path.join(c.rec, 'codex-config.toml'), 'utf8').split('\n').filter((l) => l && !l.startsWith('#')))
-      .toEqual(['approval_policy = "never"', 'service_tier = "default"']);
+      .toEqual(['approval_policy = "never"', 'service_tier = "default"',
+        ...(process.platform === 'win32' ? ['[windows]', 'sandbox = "elevated"'] : [])]);
     expect(fs.existsSync(home)).toBe(false); // removed after the invocation
     expect(fs.readFileSync(r.outPath, 'utf8')).toBe('final message\n');
     const s = r.status();
