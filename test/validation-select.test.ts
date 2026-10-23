@@ -157,3 +157,31 @@ test('mixed positional and delimited sources never discard an earlier changed de
     changedFiles: ['docs/unrelated-notes.md', 'scripts/test-focused.ts'],
     free: [expect.objectContaining({ file: 'test/test-focused.test.ts' })] });
 });
+
+
+test('a changed helper and its already-selected free test retain both reasons without duplicating the check', () => {
+  const result = Bun.spawnSync([process.execPath, command, '--plan', '--',
+    'scripts/autobuilder-acceptance.ts', 'test/autobuilder-acceptance.test.ts'], {
+    cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 5000,
+  });
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  const report = JSON.parse(result.stdout.toString());
+  expect(report).toMatchObject({ status: 'planned', unknownFiles: [], coverageCredit: false });
+  const selected = report.free.filter((check: any) => check.file === 'test/autobuilder-acceptance.test.ts');
+  expect(selected).toHaveLength(1);
+  expect(selected[0].reasons).toEqual(expect.arrayContaining([
+    { source: 'scripts/autobuilder-acceptance.ts', registry: 'FREE_TOUCHFILES', pattern: 'scripts/autobuilder-acceptance.ts' },
+    { source: 'test/autobuilder-acceptance.test.ts', registry: 'exact changed free test', pattern: 'test/autobuilder-acceptance.test.ts' },
+  ]));
+});
+
+test('native cost readers select their demonstrated free CLI consumers without inventing coverage for unknown files', () => {
+  const sources = ['scripts/eval-summary.ts', 'scripts/eval-list.ts', 'scripts/eval-watch.ts', 'scripts/eval-flake-rank.ts'];
+  const result = run(['--plan', '--', ...sources, 'scripts/new-unmapped-reader.ts'], root, true);
+  expect(result.code, result.stderr).toBe(2);
+  const report = JSON.parse(result.text);
+  expect(report).toMatchObject({ status: 'blocked', unknownFiles: ['scripts/new-unmapped-reader.ts'], coverageCredit: false });
+  const selected = report.free.filter((check: any) => check.file === 'test/eval-cli-family.test.ts');
+  expect(selected).toHaveLength(1);
+  expect(selected[0].reasons.map((reason: any) => reason.source).sort()).toEqual(sources.sort());
+});

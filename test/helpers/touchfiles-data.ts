@@ -1600,6 +1600,7 @@ export const GLOBAL_TOUCHFILES = [
  * CARVE_GUARDS rather than a second skill list.
  */
 export const FREE_TOUCHFILES: Record<string, string[]> = {
+  'test/eval-cli-family.test.ts': ['scripts/eval-summary.ts', 'scripts/eval-list.ts', 'scripts/eval-watch.ts', 'scripts/eval-flake-rank.ts'],
   'test/autobuilder-acceptance.test.ts': ['scripts/autobuilder-acceptance.ts', 'scripts/native-eval-binding.ts', 'scripts/autobuilder-usage.ts', 'test/helpers/eval-store.ts'],
   'test/helpers/eval-store.test.ts': ['test/helpers/eval-store.ts', 'scripts/native-eval-binding.ts'],
   'test/generated-content-freshness.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'scripts/gen-skill-docs.ts', 'scripts/discover-skills.ts', 'scripts/host-config.ts', 'hosts/**', 'review/checklist.md'],
