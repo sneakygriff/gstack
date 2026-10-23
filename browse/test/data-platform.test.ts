@@ -118,10 +118,17 @@ describe('validateTempPath', () => {
     expect(() => validateTempPath('/tmp/nonexistent-file-12345.jpg')).toThrow(/not found/i);
   });
 
-  it('rejects paths in cwd', () => {
-    // Create a real file in cwd to test the path check (not the existence check)
-    const cwdFile = path.join(process.cwd(), 'package.json');
-    expect(() => validateTempPath(cwdFile)).toThrow(/temp directory/i);
+  it('rejects existing files outside the temp directory', () => {
+    // A checkout may itself be in TEMP_DIR. Use the OS account home, as the
+    // upload-path fixtures do, rather than treating cwd as an unsafe location.
+    const outside = fs.mkdtempSync(path.join(os.userInfo().homedir, 'gstack-remote-path-'));
+    try {
+      const file = path.join(outside, 'outside.jpg');
+      fs.writeFileSync(file, 'fixture');
+      expect(() => validateTempPath(file)).toThrow(/temp directory/i);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('rejects absolute paths outside safe dirs', () => {
