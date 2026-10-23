@@ -6,7 +6,7 @@ Integration branch: `codex/autobuilder-validation`. Last full-suite code revisio
 
 ## Path and timeout follow-up
 
-Path-test assumptions and repository-path launching have been repaired on the isolated branch. The [follow-up report](path-timeout-followup.md) records red/green probes, adjacent checks and remaining limits. The historical lifecycle timeout did not reproduce in isolated, concurrent or actual-runner probes; it and the complete-suite timeouts remain unresolved. No fresh full-suite acceptance or model result is claimed.
+Path-test assumptions and repository-path launching have been repaired on the isolated branch. The [follow-up report](path-timeout-followup.md) records red/green probes, adjacent checks and remaining limits. The historical lifecycle timeout did not reproduce in isolated, concurrent or actual-runner probes; it and the complete-suite timeouts remain unresolved. No fresh full-suite acceptance or model result is claimed. [Opt-in timeout instrumentation](timeout-instrumentation.md) now retains command/hook errors before cleanup; a targeted actual-runner reproduction and negative-control check passed, so the historical cause remains unresolved.
 
 ## Delivered behavior
 

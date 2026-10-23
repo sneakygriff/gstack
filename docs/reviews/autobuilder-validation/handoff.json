@@ -2,8 +2,8 @@
   "kind": "local-implementation-handoff",
   "version": 1,
   "branch": "codex/autobuilder-validation",
-  "codeRevision": "90e6add2128280b29bbb372ce9b1bfc5138ab28e",
-  "codeTree": "9536324e7cdea37d3c9411ef4210f9ee2b7b61dd",
+  "codeRevision": "9b8728af2f127a0136e89a486eb3e40437bccbe1",
+  "codeTree": "af1a9e9a023c4f0d94257dd627d5883fdc7a14ad",
   "specBase": "ce0fe916d2550b21d6eb116aee483786060f730f",
   "specComplete": false,
   "adoption": "blocked",
@@ -117,5 +117,18 @@
     "fullSuiteTimeout": "unresolved",
     "fullSuiteRerun": false,
     "gatesOrLimitsChanged": false
+  },
+  "timeoutInstrumentation": {
+    "report": "timeout-instrumentation.md",
+    "codeRevision": "9b8728af2f127a0136e89a486eb3e40437bccbe1",
+    "optIn": true,
+    "unitPass": 7,
+    "unitFail": 0,
+    "targetedActualRunnerPass": 2,
+    "targetedActualRunnerFail": 0,
+    "retainedFixtureTraces": 4,
+    "historicalTimeout": "unreproduced-unresolved",
+    "limitsChanged": false,
+    "fullSuiteRerun": false
   }
 }
