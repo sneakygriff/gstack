@@ -127,7 +127,7 @@ const FULL_GATE_PR_FILES = [
   'scripts/host-config.ts', 'scripts/discover-skills.ts', 'hosts/index.ts',
 ] as const;
 
-function knownNonBehaviorFile(file: string): boolean {
+export function knownNonBehaviorFile(file: string): boolean {
   // A mapped dependency still wins over these exemptions. New helper/fixture,
   // runtime, dependency, or workflow files are deliberately not exempted.
   return /^(?:docs\/|(?:README|CONTRIBUTING|ARCHITECTURE|CHANGELOG|TODOS)\.md$|VERSION$)/.test(file)
