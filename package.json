@@ -1,7 +1,7 @@
 {
   "name": "gstack",
   "version": "1.91.9",
-  "description": "Garry's Stack — Claude Code skills + fast headless browser. One repo, one install, entire AI engineering workflow.",
+  "description": "Garry's Stack \u2014 Claude Code skills + fast headless browser. One repo, one install, entire AI engineering workflow.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -58,7 +58,9 @@
     "test:pr": "EVALS_JOBS=${EVALS_JOBS:-2} bun run scripts/test-paid-shards.ts --tier gate --profile pr",
     "test:release": "EVALS_ALL=1 EVALS_FRESH=1 EVALS_CACHE_PURPOSE=release bun run scripts/test-paid-shards.ts --tier gate --profile full && EVALS_ALL=1 EVALS_FRESH=1 EVALS_CACHE_PURPOSE=release bun run scripts/test-paid-shards.ts --tier periodic --profile full",
     "eval:bg:pr": "bin/gstack-detach --label evals-pr --lock gstack-evals --timeout 92820 -- bun run test:pr",
-    "eval:bg:release": "bin/gstack-detach --label evals-release --lock gstack-evals --timeout 116700 -- bun run test:release"
+    "eval:bg:release": "bin/gstack-detach --label evals-release --lock gstack-evals --timeout 116700 -- bun run test:release",
+    "test:focused": "bun run scripts/test-focused.ts",
+    "validation:usage": "bun run scripts/autobuilder-usage.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Strict focused test execution
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] Cover template/reference freshness, always-loaded contracts, section registration, context/parity and affected supervision.
 - [ ] Show selection reasons; preview launches no test, monitor or model.
