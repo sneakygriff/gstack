@@ -73,14 +73,18 @@ function read(dir: string): Journal {
   if (s.version !== 1 || s.contractHash !== digest(encode(s.contract)) || s.contract.runDir !== dir) fail('contract_changed');
   return s;
 }
+// Task IDs may match Object.prototype names; only persisted own entries are jobs.
+function job(s: Journal, task: string): Job | undefined {
+  return Object.hasOwn(s.jobs, task) ? s.jobs[task] : undefined;
+}
 function save(s: Journal, event: string, task?: string) {
-  s.events.push({ seq: ++s.sequence, at: new Date().toISOString(), event, ...(task ? { task, attempt: s.jobs[task]?.attempt } : {}) });
+  s.events.push({ seq: ++s.sequence, at: new Date().toISOString(), event, ...(task ? { task, attempt: job(s,task)?.attempt } : {}) });
   atomic(path.join(s.contract.runDir,'queue.json'), s);
 }
 function integrationIdentity(s: Journal) {
   if (git(s.contract.lane,'symbolic-ref','--short','HEAD') !== s.contract.branch) fail('integration_branch_changed');
   const last = [...s.events].reverse().find(e => e.event === 'integrated');
-  const expected = last ? s.jobs[last.task!].integratedHead : s.contract.base;
+  const expected = last ? job(s,last.task!)?.integratedHead : s.contract.base;
   if (head(s.contract.lane) !== expected) fail('integration_head_changed');
   clean(s.contract.lane);
 }
@@ -124,12 +128,12 @@ export function queueNext(dir: string) {
     const s = read(dir), c = s.contract;
     if (s.status !== 'BUILDING') return { status:s.status, reason:s.reason, admitted:[] };
     integrationIdentity(s);
-    const busy = c.tasks.filter(t=>s.jobs[t.id] && s.jobs[t.id].status !== 'integrated');
-    if (busy.some(t=>s.jobs[t.id].status === 'integrating')) fail('integration_recovery_required');
+    const busy = c.tasks.filter(t=>job(s,t.id) && job(s,t.id)!.status !== 'integrated');
+    if (busy.some(t=>job(s,t.id)!.status === 'integrating')) fail('integration_recovery_required');
     if (c.mode === 'waves' && busy.length) return { status:s.status, admitted:[] };
     const depths = new Map<string,number>();
     const depth = (t: Task): number => { if (!depths.has(t.id)) depths.set(t.id, (t.estimate || 1) + Math.max(0,...c.tasks.filter(x=>x.dependencies.includes(t.id)).map(depth))); return depths.get(t.id)!; };
-    const ready = c.tasks.filter(t=>!s.jobs[t.id] && t.dependencies.every(d=>s.jobs[d]?.status==='integrated')).sort((a,b)=>depth(b)-depth(a) || a.id.localeCompare(b.id));
+    const ready = c.tasks.filter(t=>!job(s,t.id) && t.dependencies.every(d=>job(s,d)?.status==='integrated')).sort((a,b)=>depth(b)-depth(a) || a.id.localeCompare(b.id));
     const admitted: any[] = [];
     for (const t of ready) {
       if (busy.length >= c.maxWorkers) break;
@@ -147,13 +151,13 @@ export function queueNext(dir: string) {
       save(s,'reserved',t.id);
       try { git(c.repo,'worktree','add','-b',branch,cwd,base); }
       catch { s.status='BLOCKED';s.reason='worktree_setup_failed';save(s,'blocked',t.id);throw new QueueError(s.reason); }
-      busy.push(t); admitted.push({ ...t, ...s.jobs[t.id], exploration:c.exploration || null, completionTimeoutMs: completionTimeoutMs(c,t) });
+      busy.push(t); admitted.push({ ...t, ...job(s,t.id)!, exploration:c.exploration || null, completionTimeoutMs: completionTimeoutMs(c,t) });
     }
-    return { status:s.status, admitted, pending:c.tasks.filter(t=>!s.jobs[t.id]).map(t=>t.id) };
+    return { status:s.status, admitted, pending:c.tasks.filter(t=>!job(s,t.id)).map(t=>t.id) };
   });
 }
 export function queueBind(dir: string, task: string, attempt: string, handle: string) {
-  return lock(dir,()=>{ const s=read(dir),j=s.jobs[task]; if(s.status!=='BUILDING'||!j||j.attempt!==attempt||!['reserved','running'].includes(j.status)||!handle||/[\x00-\x1f]/.test(handle))fail('invalid_binding');
+  return lock(dir,()=>{ const s=read(dir),j=job(s,task); if(s.status!=='BUILDING'||!j||j.attempt!==attempt||!['reserved','running'].includes(j.status)||!handle||/[\x00-\x1f]/.test(handle))fail('invalid_binding');
     if(j.handle && j.handle!==handle)fail('attempt_already_bound'); j.handle=handle;j.status='running';save(s,'bound',task);return {status:j.status}; });
 }
 function withinWriteSet(cwd: string, base: string, commit: string, writes: string[]) {
@@ -197,7 +201,7 @@ async function lockAsync<T>(dir: string, work:()=>Promise<T>): Promise<T> {
 }
 export async function queueComplete(dir: string, task: string, attempt: string, completedHead: string) {
   return lockAsync(dir,async()=>{
-    const s=read(dir),c=s.contract,t=c.tasks.find(t=>t.id===task),j=s.jobs[task];
+    const s=read(dir),c=s.contract,t=c.tasks.find(t=>t.id===task),j=job(s,task);
     if(!t||!j||j.attempt!==attempt||!sha.test(completedHead))fail('invalid_completion');
     if(j.status==='integrated') {if(j.head!==completedHead)fail('completion_changed');return {status:'integrated',head:j.integratedHead,duplicate:true};}
     if(s.status!=='BUILDING'||j.status!=='running')fail('attempt_not_running');
@@ -230,7 +234,7 @@ export async function queueComplete(dir: string, task: string, attempt: string, 
       atomic(path.join(receiptDir,'result.json'),{task,attempt,base:j.base,shipBase:c.shipBase,source:completedHead,integrationBase:start,head:result,checks,integrationChecks:integrated,meter});
       j.status='integrated';j.integratedHead=result;
       if(meter.prod_loc>=2500) {s.status='BLOCKED';s.reason='meter_admission_stop';}
-      else if(c.tasks.every(t=>s.jobs[t.id]?.status==='integrated'))s.status='BUILT';
+      else if(c.tasks.every(t=>job(s,t.id)?.status==='integrated'))s.status='BUILT';
       save(s,'integrated',task);return {status:s.status,task,head:result,meter,review_required:true};
     } catch(e) {s.status='BLOCKED';s.reason=e instanceof QueueError?e.reason:'integration_failed';save(s,'blocked',task);throw new QueueError(s.reason);}
   });

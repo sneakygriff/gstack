@@ -32,6 +32,20 @@ test('static wave fallback waits for every active task before admitting dependen
  const {contract:c}=fixture();c.mode='waves';queueInit(c);const jobs=queueNext(c.runDir).admitted;await finish(c,jobs[0]);expect(queueNext(c.runDir).admitted).toEqual([]);await finish(c,jobs[1]);expect(queueNext(c.runDir).admitted.map(j=>j.id)).toEqual(['C']);
 },30_000);
 
+for (const mode of ['continuous','waves'] as const) {
+ test(`${mode} queue admits prototype-named tasks and unlocks their dependents after integration`,async()=>{
+  const {contract:c}=fixture();c.mode=mode;
+  c.tasks=c.tasks.slice(0,2).map((task,i)=>({...task,id:i===0?'constructor':'toString',dependencies:i===0?[]:['constructor'],writes:[i===0?'constructor.txt':'toString.txt']}));
+  queueInit(c);
+  const first=queueNext(c.runDir);expect(first.admitted.map(j=>j.id)).toEqual(['constructor']);expect(first.pending).toEqual(['toString']);
+  expect(queueNext(c.runDir).admitted).toEqual([]);
+  expect((await finish(c,first.admitted[0])).status).toBe('BUILDING');
+  const next=queueNext(c.runDir);expect(next.admitted.map(j=>j.id)).toEqual(['toString']);expect(next.pending).toEqual([]);
+  expect((await finish(c,next.admitted[0])).status).toBe('BUILT');
+  const state=queueStatus(c.runDir);expect(Object.keys(state.jobs).sort()).toEqual(['constructor','toString']);expect(state.jobs.constructor.status).toBe('integrated');expect(state.jobs.toString.status).toBe('integrated');expect(state.review_required).toBe(true);
+ },30_000);
+}
+
 test('declared write prefixes and shared resources serialize admission',async()=>{
  const {contract:c}=fixture();c.tasks[0].writes=['shared'];c.tasks[1].writes=['shared/child'];queueInit(c);expect(queueNext(c.runDir).admitted.map(j=>j.id)).toEqual(['A']);
  const f=fixture();f.contract.tasks[0].resources=['database'];f.contract.tasks[1].resources=['database'];queueInit(f.contract);expect(queueNext(f.contract.runDir).admitted.map(j=>j.id)).toEqual(['A']);
