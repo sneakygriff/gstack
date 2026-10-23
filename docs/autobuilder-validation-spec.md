@@ -1,6 +1,7 @@
 # Autobuilder: trustworthy validation and measured adoption
 
-Status: Draft; proposed testing boundaries await user confirmation.
+Status: `ready-for-agent` (local specification).
+Testing boundaries: explicitly confirmed by the user on 23 October 2026.
 Destination: local fork, branch `codex/autobuilder-efficiency-round1`.
 Scope: remaining validation and retrospective improvements after ranked trims 1-4.
 
@@ -66,7 +67,7 @@ Deliver in four verifiable slices: strict focused execution; dependent-check sel
 
 ## Testing Decisions
 
-The proposed primary seam is the public validation command: supply a selection or source change and observe the plan, child execution, exit status, retained logs and acceptance receipt. This is the highest practical boundary for the deterministic work. Reuse the existing model-evaluation boundary for instruction behavior; command-level tests cannot prove that a model reads required sections or follows the skill. These boundaries await user confirmation before the specification is treated as ready for implementation.
+The confirmed primary seam is the public validation command: supply a selection or source change and observe the plan, child execution, exit status, retained logs and acceptance receipt. This is the highest practical boundary for the deterministic work. Reuse the existing model-evaluation boundary for instruction behavior; command-level tests cannot prove that a model reads required sections or follows the skill. The user explicitly confirmed both boundaries.
 
 - Test observable behavior rather than private helpers, prose layout or implementation structure. Use disposable repositories and isolated child processes, following the existing free-runner, capture-integrity and real-Git queue fixtures.
 - Reproduce the actual selection incident with one valid and one nonexistent test. The command must reject it before any test side effect occurs. Also cover exact-name collisions, spaces in paths, duplicate selections and an explicitly empty plan.
@@ -95,4 +96,4 @@ The entrypoint changed from 17,211 to 3,137 whitespace-delimited words, with 10,
 
 The separate retrospective recommended strict local test selection first, followed by dependent-check selection, provider-observed usage and a revision-bound acceptance manifest. This specification follows that sequence.
 
-The user selected the local fork as the destination. No remote issue has been created. The requested `ready-for-agent` triage state should be applied only after the testing boundaries are confirmed; it is not currently claimed. If remote tracker publication is wanted later, use the configured project tracker and its triage vocabulary rather than assuming the upstream repository.
+The user selected the local fork as the destination and confirmed the testing boundaries. This document carries the local `ready-for-agent` state; no remote issue or tracker label has been created. If remote tracker publication is wanted later, use the configured project tracker and its triage vocabulary rather than assuming the upstream repository.
