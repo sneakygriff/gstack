@@ -1,0 +1,407 @@
+{
+  "version": 1,
+  "observedAt": "2026-10-23T04:52:30.565Z",
+  "sourceRevision": "afda36d93c9f7876caa306184107fc9d8002471f",
+  "status": "external-blocked",
+  "execution": "not-run",
+  "coverageCredit": false,
+  "environmentPresence": {
+    "ANTHROPIC_API_KEY": false,
+    "GSTACK_ANTHROPIC_API_KEY": false,
+    "OPENAI_API_KEY": false,
+    "XAI_API_KEY": false
+  },
+  "workflow": {
+    "id": "autobuilder-loop/SKILL.md workflow",
+    "options": {
+      "skillPath": "autobuilder-loop/SKILL.md",
+      "startMarker": "# /autobuilder-loop",
+      "endMarker": null,
+      "references": [
+        "review/checklist.md"
+      ],
+      "judgeContext": "an approved-plan orchestrator with conditional manual recipes and a generated findings-only Seat C review reference",
+      "judgeGoal": "preserve both review seats, the union of kept P1 blockers, critical Astra requirements, invalid-versus-absent distinction, Docker and mutation checks, and completion evidence; reviewers must load the full focused methods and canonical checklist, never treat missing references as clean; checkpoint metrics describe logical calls and characters rather than billing; only manual gate execution loads manual recipes; extracted planning language must not cause Seat C to ask questions or edit files"
+    },
+    "promptSha256": "b49511d9d8d2432caa1cca6c671b41e5838a715ba52966929775527426495faa",
+    "promptUtf8Bytes": 178187,
+    "bundleSha256": "63adec00c9a43c612efc1f8b5be1839b2b9224f4e0e4ba3761cc6e5dc4b94c02",
+    "consumedExcerpts": [
+      {
+        "path": "autobuilder-loop/SKILL.md",
+        "kind": "entrypoint",
+        "startLine": 144,
+        "endLine": 258,
+        "excerptSha256": "5542af13af438c270158055e4b285eef2a91ab3ad818d77a54670463122fa691",
+        "fileSha256": "05a0138eff1e9ee1b3309c85c088aca31fff3a46988396fbea48e1a0a460c59a"
+      },
+      {
+        "path": "autobuilder-loop/sections/build.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 101,
+        "excerptSha256": "de68fcfe957c6193ed0919352b7dc9e7f2a0cd778f3d98499f4413bcc0e576ff",
+        "fileSha256": "de68fcfe957c6193ed0919352b7dc9e7f2a0cd778f3d98499f4413bcc0e576ff"
+      },
+      {
+        "path": "autobuilder-loop/sections/continuous-queue.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 178,
+        "excerptSha256": "af27cbd5a759de069b024bf227f8c30bbe9de7d1e623a0c120b6524b513f001d",
+        "fileSha256": "af27cbd5a759de069b024bf227f8c30bbe9de7d1e623a0c120b6524b513f001d"
+      },
+      {
+        "path": "autobuilder-loop/sections/contracts.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 269,
+        "excerptSha256": "588974ac2b5e5f7b94f0b11fea7aa8a2a2c6bd268d52f5f10199964ca7fc3096",
+        "fileSha256": "588974ac2b5e5f7b94f0b11fea7aa8a2a2c6bd268d52f5f10199964ca7fc3096"
+      },
+      {
+        "path": "autobuilder-loop/sections/gate.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 116,
+        "excerptSha256": "81bff87dbaa65eaf1bd82144b2d6e1f0043b799231bf3c2c85dd3357992f2237",
+        "fileSha256": "81bff87dbaa65eaf1bd82144b2d6e1f0043b799231bf3c2c85dd3357992f2237"
+      },
+      {
+        "path": "autobuilder-loop/sections/manual-gate.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 132,
+        "excerptSha256": "1460c1bafae613b2a3bffd2d29969c050745e8d22a44d6e7a46d64385d1a1a11",
+        "fileSha256": "1460c1bafae613b2a3bffd2d29969c050745e8d22a44d6e7a46d64385d1a1a11"
+      },
+      {
+        "path": "autobuilder-loop/sections/release.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 154,
+        "excerptSha256": "2c9f4de0ddcb5c23da29d4d75191cdae6d4363f7c5f3e6a02e1188978c2ca5e0",
+        "fileSha256": "2c9f4de0ddcb5c23da29d4d75191cdae6d4363f7c5f3e6a02e1188978c2ca5e0"
+      },
+      {
+        "path": "autobuilder-loop/sections/run-setup.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 455,
+        "excerptSha256": "d918cac9510c36d8576dde8503c027e6ebe0dce95d7223539363bbeb38391b14",
+        "fileSha256": "d918cac9510c36d8576dde8503c027e6ebe0dce95d7223539363bbeb38391b14"
+      },
+      {
+        "path": "autobuilder-loop/sections/seat-c-review.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 492,
+        "excerptSha256": "ba2531b25b31d6fd5b84fa5ce818e9fbc65a7e28fa95793950a48cc90b2dd2e8",
+        "fileSha256": "ba2531b25b31d6fd5b84fa5ce818e9fbc65a7e28fa95793950a48cc90b2dd2e8"
+      },
+      {
+        "path": "autobuilder-loop/sections/workflow-reference.md",
+        "kind": "section",
+        "startLine": 1,
+        "endLine": 155,
+        "excerptSha256": "b6366a8246bcc3368b102355254a85f3789d5f08528d4f16f785ff05024dc966",
+        "fileSha256": "b6366a8246bcc3368b102355254a85f3789d5f08528d4f16f785ff05024dc966"
+      },
+      {
+        "path": "review/checklist.md",
+        "kind": "reference",
+        "startLine": 1,
+        "endLine": 183,
+        "excerptSha256": "7f3a2ced1862c352d002268ed1bb4a5f332deee8a315c809ac91a41fc60533c8",
+        "fileSha256": "7f3a2ced1862c352d002268ed1bb4a5f332deee8a315c809ac91a41fc60533c8"
+      }
+    ],
+    "observedModel": null,
+    "observedUsage": null,
+    "observedOutcome": null
+  },
+  "sectionRead": {
+    "id": "autobuilder-loop: a real run Reads run-setup.md, contracts.md, continuous-queue.md",
+    "file": "test/carve-section-loading-autobuilder-loop.test.ts",
+    "tier": "periodic",
+    "requiredReads": [
+      "run-setup.md",
+      "contracts.md",
+      "continuous-queue.md"
+    ],
+    "observedReads": [],
+    "executed": false,
+    "runtimePromptSha256": null,
+    "runtimePromptReason": "Contains disposable fixture paths; no fixture or actor launched."
+  },
+  "supportingFileFingerprints": [
+    {
+      "path": "test/skill-llm-eval.test.ts",
+      "sha256": "95da26b3b3887ec745b157d4ee30febaad26efadd0f2bd49b9f307cffab3fafe"
+    },
+    {
+      "path": "test/helpers/workflow-judge-input.ts",
+      "sha256": "f530c8eb5bd6de22dfb4a1e584ecfecac6d6ede445bb31d9469fa37fc899af46"
+    },
+    {
+      "path": "test/helpers/workflow-judge-cache.ts",
+      "sha256": "e08cc2eb4df61332489090b2f10a2ac87bda19679062bf2a1a7ebe1143fa7eae"
+    },
+    {
+      "path": "test/helpers/llm-judge.ts",
+      "sha256": "92c4e614dc3bcf5a01d5ecdf8b33079d53ee53f8daaf292cf425e87d14f68028"
+    },
+    {
+      "path": "lib/eval-model.ts",
+      "sha256": "0f5587afb1d65ee455c3588b0089524ab013b9dfa3035f0ccc2491cf62527104"
+    },
+    {
+      "path": "test/helpers/eval-budgets.ts",
+      "sha256": "1c6df425073af53e8c8f2f6b44ae9699d3a2defd34db37963f374a01f4825f9d"
+    },
+    {
+      "path": "test/carve-section-loading-autobuilder-loop.test.ts",
+      "sha256": "08f66539610e59726923c9cf0a69edd005140851b162e95103a9a2dca3dbfd14"
+    },
+    {
+      "path": "test/helpers/carve-guards.ts",
+      "sha256": "aa4830e058829da894c73a7921b6a2c74062837cec9741e42c59612a6a147937"
+    },
+    {
+      "path": "test/helpers/carve-section-case.ts",
+      "sha256": "9c031ec86e8ae159b849c2b1e6d373d85397bed0ee663c7f11f8a5c975f93190"
+    },
+    {
+      "path": "test/helpers/auq-sdk-capture.ts",
+      "sha256": "b8a3c65de6fea15e139732926a9d7166998c85fca541999637b0efb010d94d6d"
+    },
+    {
+      "path": "test/helpers/session-runner.ts",
+      "sha256": "e71c97a7cbd74b66f7d0839d7d3dc1b4efc53d75666f105109a5813710e1655b"
+    },
+    {
+      "path": "test/helpers/hermetic-env.ts",
+      "sha256": "b4e0a6e9d354f866ca901d5fc90d25cae115d318c13b0e0a1dd59269525642af"
+    },
+    {
+      "path": "test/helpers/touchfiles-data.ts",
+      "sha256": "595688f5c2ef74d4277f7789ce2654be1225614246ae7b481016c4b28acbc843"
+    },
+    {
+      "path": ".github/docker/Dockerfile.ci",
+      "sha256": "daec67a288314d6ea29f3c6afdafafd01fbfb9566a615a69d907747e90171dde"
+    },
+    {
+      "path": "bun.lock",
+      "sha256": "3a70ad7d23a24160bfab62f8125197972a642e01bfe5e54f10cd46c600741f3b"
+    }
+  ],
+  "fingerprintScope": "Exact public workflow builder prompt/excerpts plus enumerated supporting files. Not the complete dependency-closure cache key or a behavioral execution receipt.",
+  "selectionPreview": {
+    "command": "bun scripts/validation-select.ts --plan -- autobuilder-loop/SKILL.md.tmpl",
+    "changedFiles": [
+      "autobuilder-loop/SKILL.md.tmpl"
+    ],
+    "status": "planned",
+    "coverageCredit": false,
+    "scope": "Explicit entrypoint-template preview, not a complete integrated-branch diff or acceptance plan.",
+    "model": [
+      {
+        "id": "carve-section-loading",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "autobuilder-loop/**"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-ideation",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-plan-eng",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-debug",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-qa",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-code-review",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-ship",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-docs",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-retro",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-design-system",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-visual-qa",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "journey-negatives",
+        "kind": "e2e",
+        "tier": "periodic",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "E2E_TOUCHFILES",
+            "pattern": "*/SKILL.md.tmpl"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "autobuilder-loop/SKILL.md workflow",
+        "kind": "judge",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "LLM_JUDGE_TOUCHFILES",
+            "pattern": "autobuilder-loop/**"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      },
+      {
+        "id": "autobuilder-loop",
+        "kind": "section-read",
+        "tier": "periodic",
+        "file": "test/carve-section-loading-autobuilder-loop.test.ts",
+        "reasons": [
+          {
+            "source": "autobuilder-loop/SKILL.md.tmpl",
+            "registry": "CARVE_GUARDS",
+            "pattern": "autobuilder-loop/**"
+          }
+        ],
+        "execution": "not-run",
+        "coverageCredit": false
+      }
+    ]
+  }
+}
