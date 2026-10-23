@@ -3,7 +3,7 @@
  *
  * This module is split into three files:
  *
- *   - ./touchfiles-data.ts — the four touchfile/tier maps (E2E_TOUCHFILES,
+ *   - ./touchfiles-data.ts — the touchfile/tier maps (FREE_TOUCHFILES, E2E_TOUCHFILES,
  *     E2E_TIERS, LLM_JUDGE_TOUCHFILES, GLOBAL_TOUCHFILES), LITERALS ONLY.
  *     Map-diff selection evaluates OLD git versions of that file standalone
  *     to diff the maps across commits, so it must stay importable pure data
@@ -20,6 +20,7 @@
  */
 
 export {
+  FREE_TOUCHFILES,
   E2E_TOUCHFILES,
   E2E_TIERS,
   LLM_JUDGE_TOUCHFILES,

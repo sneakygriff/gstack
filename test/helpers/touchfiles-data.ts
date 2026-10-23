@@ -1592,3 +1592,29 @@ export const GLOBAL_TOUCHFILES = [
   // diffed per key, so a data-only edit runs just the affected tests.
   // Map-diff fails CLOSED — any error on that path still runs everything.
 ];
+
+/** Free dependent checks, keyed by exact test path. Missing relationships only:
+ * paid coverage remains in the existing maps above. Shared structure checks use
+ * the generator's template/reference surface; section-read probes derive from
+ * CARVE_GUARDS rather than a second skill list.
+ */
+export const FREE_TOUCHFILES: Record<string, string[]> = {
+  'test/generated-content-freshness.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'scripts/gen-skill-docs.ts', 'scripts/discover-skills.ts', 'scripts/host-config.ts', 'hosts/**', 'review/checklist.md'],
+  'test/auq-format-always-loaded.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**'],
+  'test/section-manifest-consistency.test.ts': ['*/SKILL.md*', '*/sections/**', 'scripts/resolvers/sections.ts', 'test/helpers/carve-guards.ts'],
+  'test/carve-guard-completeness.test.ts': ['*/SKILL.md*', '*/sections/**', 'scripts/resolvers/sections.ts', 'test/helpers/carve-guards.ts'],
+  'test/carve-section-ordering.test.ts': ['*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'test/helpers/carve-guards.ts', 'test/helpers/carve-guard-checks.ts'],
+  'test/context-budget-ratchet.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'lib/context-bill.ts', 'test/fixtures/context-budget.json', 'test/helpers/carve-guards.ts'],
+  'test/parity-suite.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'test/helpers/carve-guards.ts', 'test/helpers/parity-harness.ts'],
+  'test/skill-size-budget.test.ts': ['SKILL.md*', '*/SKILL.md*', '*/sections/**', 'scripts/resolvers/**', 'test/helpers/carve-guards.ts'],
+  'test/autobuilder-packaging.test.ts': ['autobuilder-loop/**', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts', 'scripts/resolvers/preamble/generate-ask-user-format.ts', 'review/checklist.md'],
+  'test/autobuilder-unit-harness.test.ts': ['autobuilder-loop/autobuilder-unit.js', 'test/fixtures/autobuilder-unit/**'],
+  'test/autobuilder-efficiency.test.ts': ['autobuilder-loop/**', 'lib/autobuilder-*.ts', 'scripts/resolvers/autobuilder.ts', 'scripts/resolvers/sections.ts', 'test/fixtures/autobuilder-unit/**'],
+  'test/autobuilder-queue.test.ts': ['autobuilder-loop/autobuilder-unit.js', 'lib/autobuilder-*.ts', 'test/fixtures/autobuilder-unit/**'],
+  'test/autobuilder-ops.test.ts': ['autobuilder-loop/autobuilder-unit.js', 'lib/autobuilder-ops.ts', 'lib/autobuilder-ops-cli.ts', 'bin/gstack-autobuilder-ops'],
+  'test/autobuilder-launcher.test.ts': ['bin/gstack-autobuilder-ops', 'lib/autobuilder-ops-cli.ts'],
+  'test/test-focused.test.ts': ['scripts/test-focused.ts', 'scripts/test-free-shards.ts', 'scripts/test-strict-output.ts', 'test/helpers/paid-test-set.ts'],
+  'test/test-free-shards.test.ts': ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts', 'test/helpers/paid-test-set.ts'],
+  'test/test-free-shards-capture.test.ts': ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts'],
+  'test/validation-select.test.ts': ['scripts/validation-select.ts', 'test/helpers/touchfiles-data.ts', 'test/helpers/touchfiles.ts', 'test/helpers/test-selection.ts', 'test/helpers/carve-guards.ts', 'test/helpers/paid-test-set.ts'],
+};
