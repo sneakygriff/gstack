@@ -5,7 +5,7 @@ import { validateReadPath, SENSITIVE_COOKIE_NAME, SENSITIVE_COOKIE_VALUE } from 
 import { BLOCKED_METADATA_HOSTS } from '../src/url-validation';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync, realpathSync } from 'fs';
 import { tmpdir, userInfo } from 'os';
-import { join } from 'path';
+import { join, relative } from 'path';
 
 describe('validateOutputPath', () => {
   it('allows paths within /tmp', () => {
@@ -152,11 +152,12 @@ describe('validateReadPath', () => {
   });
 
   it('blocks path traversal sequences', () => {
-    expect(() => validateReadPath('../../../etc/passwd')).toThrow(/Path must be within/);
+    expect(() => validateReadPath(relative(process.cwd(), '/etc/passwd'))).toThrow(/Path must be within/);
   });
 
   it('blocks nested path traversal', () => {
-    expect(() => validateReadPath('src/../../etc/passwd')).toThrow(/Path must be within/);
+    // Always escape to the forbidden target, even from a deep temp checkout.
+    expect(() => validateReadPath(`src/../${relative(process.cwd(), '/etc/passwd')}`)).toThrow(/Path must be within/);
   });
 
   it('blocks symlink inside safe dir pointing outside', () => {
