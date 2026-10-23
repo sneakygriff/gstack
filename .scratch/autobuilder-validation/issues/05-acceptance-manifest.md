@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Strict focused test execution
 
-**Status:** done
+**Status:** in-progress
 
 - [x] Separate passed, failed, skipped, cancelled and unexecuted checks, and preserve failure evidence.
 - [x] Reject incomplete or stale evidence; bind consumed inputs and relevant environment.
@@ -21,3 +21,5 @@
 - Merge was conflict-free with clean tracked state and passing whitespace check. No tests, full suite, provider calls, package edits, product fixes or installed-skill changes were performed during integration. Parent owns package registration.
 
 Pinned-runtime verification: after synchronizing integration b05adb0a, the exact Bun 1.4.0 executable and child log were verified. Focused acceptance and subprocess checks: 12 passed, 0 failed, 0 skipped, complete capture. Prior Bun 1.3.14 results remain separate as historical evidence. See surrounding-workspace research/validation-orchestration/05.md and retained logs.
+
+Reopened by final two-axis review for the confirmed public-CLI, dependency-selection or evidence-adapter finding applicable to this ticket. Original passing checks remain retained; completion requires the focused repair.
