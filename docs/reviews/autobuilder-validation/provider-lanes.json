@@ -1,0 +1,141 @@
+{
+  "observed_at_utc": "2026-10-23T04:19:55.764152+00:00",
+  "source_revision": "8fb81481739d26fcdb65eff25b09faa836cc09c6",
+  "versions": {
+    "grok": "grok 1.0.67 (2fe064390d07) [stable]",
+    "claude": "2.1.308 (Claude Code)",
+    "codex": "codex-cli 0.159.3"
+  },
+  "claude_profiles": [
+    {
+      "profile": "default",
+      "logged_in": false,
+      "auth_method": "none",
+      "api_provider": "firstParty",
+      "subscription_type": null,
+      "quota": null
+    },
+    {
+      "profile": "overflow",
+      "logged_in": true,
+      "auth_method": "claude.ai",
+      "api_provider": "firstParty",
+      "subscription_type": "max",
+      "quota": null
+    }
+  ],
+  "claude_effective_identity_comparison": {
+    "same_email_and_org": null,
+    "distinct_verified_pools": 1,
+    "comparison_state": "unresolved at final capture: default unauthenticated, overflow authenticated",
+    "initial_comparison_same_email_and_org": true,
+    "raw_identifiers_retained": false,
+    "reason": "Initial authenticated outputs matched. Final capture cannot compare identities because default has no authenticated identity; false from comparing missing values would not establish different pools. Whether temporal or invocation-environment drift caused the difference is unverified."
+  },
+  "grok_auth": {
+    "exit_code": 0,
+    "stdout": "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.6\n  - grok-4.5",
+    "stderr": ""
+  },
+  "codex_auth": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "Logged in using ChatGPT"
+  },
+  "grok_auth_refresh": {
+    "method": "OAuth existing browser session",
+    "result": "Signed in (CLI); already authorized (browser)",
+    "model_call": false,
+    "credentials_retained": false
+  },
+  "grok_sandbox_attempts": [
+    {
+      "profile": "read-only",
+      "exit_code": 1,
+      "stderr": "warning: sandbox could not be applied: socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink to a path outside the deny list\nerror: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.",
+      "tool_execution_observed": false
+    },
+    {
+      "profile": "validation-readonly",
+      "exit_code": 1,
+      "stderr": "warning: sandbox could not be applied: socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink to a path outside the deny list\nerror: could not apply the 'validation-readonly' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.",
+      "tool_execution_observed": false
+    }
+  ],
+  "grok_custom_profile": {
+    "extends": "read-only",
+    "restrict_network": true,
+    "deny": [
+      "/Users/stefanandrei/.orbstack/run/docker.sock"
+    ],
+    "read_write_added": [],
+    "location": "disposable worker project .grok/sandbox.toml",
+    "removed_after_probe": true
+  },
+  "claude_probe": {
+    "session_id": "a2e5f95c-4559-42ed-9996-245dbfcebf4b",
+    "requested_model": "haiku",
+    "observed_model": "claude-haiku-5-5",
+    "auth": "earlier status reported claude.ai; probe result does not independently identify authentication method",
+    "cli_exit": 0,
+    "result_subtype": "success",
+    "num_turns": 2,
+    "duration_ms": 2709,
+    "tool": "Read",
+    "tool_input": {
+      "file_path": "docs/autobuilder-validation-spec.md",
+      "limit": 1
+    },
+    "tool_result": "1\t# Autobuilder: trustworthy validation and measured adoption",
+    "permissions_denied": [],
+    "is_error": false,
+    "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 2977,
+      "cache_read_input_tokens": 6155,
+      "output_tokens": 161
+    },
+    "reported_cost_usd": 0.00073785,
+    "cost_basis": "list",
+    "invoice_charge_verified": false,
+    "fallback_credit": null,
+    "usage_evidence": "CLI result plus allowlisted public Read tool records from session transcript; no hidden reasoning copied",
+    "configuration_context": "No per-command CLAUDE_CONFIG_DIR override; explicit default-directory capture later returned unauthenticated"
+  },
+  "codex_transport": {
+    "cli_model_probe": "not run",
+    "current_host_agent_tools": "observed successful read-only shell commands in this worker",
+    "effective_identity": null,
+    "quota": null,
+    "quota_reason": "desktop usage-limits tool unavailable to this subagent",
+    "model": null,
+    "model_reason": "not reported by login-status"
+  },
+  "grok_transport": {
+    "ready": false,
+    "quota": null,
+    "subscription_type": null,
+    "observed_model": null,
+    "requested_default_catalog": "grok-4.7",
+    "ticket06_dispatched": false
+  },
+  "claude_profiles_observation_context": "Final capture explicitly set CLAUDE_CONFIG_DIR to each profile directory. Preserve these outputs as observed; they differ from earlier CLI calls.",
+  "claude_initial_observations": {
+    "observed_order": "before OAuth started at 2026-10-23T04:17:21Z; exact auth-check timestamps not retained",
+    "source": "tool-returned claude auth status outputs in this worker conversation",
+    "default_invocation": "claude auth status (no per-command CLAUDE_CONFIG_DIR override)",
+    "overflow_invocation": "CLAUDE_CONFIG_DIR=/Users/stefanandrei/.claude-overflow claude auth status",
+    "default": {
+      "logged_in": true,
+      "auth_method": "claude.ai",
+      "subscription_type": "max"
+    },
+    "overflow": {
+      "logged_in": true,
+      "auth_method": "claude.ai",
+      "subscription_type": "max"
+    },
+    "same_email_and_org": true,
+    "raw_identifiers_retained": false
+  }
+}
