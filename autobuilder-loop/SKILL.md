@@ -13,6 +13,7 @@ allowed-tools:
   - Bash
   - AskUserQuestion
   - Workflow
+  - Read
 ---
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
@@ -153,6 +154,8 @@ reads/edits, diagnosis and conflict resolution. Keep their briefs and reports on
 receive compact envelopes with status, immutable commit, evidence paths and blockers.
 The host may run the declared deterministic helpers directly, returning structured
 results. Model judgment still follows the existing routing and review contracts.
+Read is limited to this installed skill's instructions and required review checklist;
+source, diffs and logs remain delegated to the routed agents.
 
 Before the first action of a new or resumed run, load run setup. Before any dispatch,
 load contracts. These references contain the unchanged startup, account probing,

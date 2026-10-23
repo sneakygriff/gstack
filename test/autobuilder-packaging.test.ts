@@ -8,6 +8,20 @@ const root=path.resolve(import.meta.dir,'../autobuilder-loop');
 const read=(p:string)=>fs.readFileSync(path.join(root,p),'utf8');
 const hash=(s:string)=>crypto.createHash('sha256').update(s).digest('hex');
 
+test('lazy instruction reads are authorized without granting source inspection',()=>{
+ const entry=read('SKILL.md.tmpl'),contract=read('sections/contracts.md.tmpl'),gate=read('sections/gate.md.tmpl');
+ expect(entry.split('---')[1]).toMatch(/^  - Read$/m);
+ expect(entry).toContain('Read is limited to this installed skill');
+ expect(contract).toContain('`Read` is limited to this installed skill');
+ expect(contract).not.toContain('You have no\nRead/Write/Edit/Glob/Grep');
+ expect(contract).toContain('You NEVER read source, diffs, or logs');
+ expect(contract).toContain('You NEVER write or edit code');
+ expect(contract).toContain('`Workflow`, `Read`');
+ expect(gate).toContain('sections/seat-c-review.md');
+ expect(gate).not.toContain('reading both skill files from disk');
+ expect(contract).toContain('dedicated `sections/seat-c-review.md`');
+});
+
 test('every pre-carve source block retains its mapped bytes with only declared contract changes',()=>{
  const map=JSON.parse(read('sections/preservation.json'));expect(map.blocks).toHaveLength(12);
  expect(new Set(map.blocks.map((b:any)=>b.id)).size).toBe(12);

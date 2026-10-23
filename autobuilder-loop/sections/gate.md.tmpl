@@ -11,7 +11,9 @@ sees ONLY committed state; the Worktree preflight is what makes stage-everything
 
 <!-- v1.8 decision D-B --> **The forum is two model seats per round, run in parallel** (Quick reference):
 - **Seat C (Claude)** — ONE Fable `effort: high` subagent runs BOTH the /plan-eng-review methodology
-  and the /review checklist in a single pass, reading both skill files from disk, findings-only.
+  and the /review checklist in a single pass, reading `sections/seat-c-review.md` from this installed
+  skill and its canonical checklist in full, findings-only. Missing or unreadable required references
+  mean REVIEW_INCOMPLETE, never clean.
 - **Seat X (other vendor)** — Codex `gpt-6-astra` high through `gstack-lane run --mode review`.
 Codex-authored work gets its other-vendor check from Seat C, Claude-authored work from Seat X; both
 seats always run. A seat's raw `[P1]` is a seat FAIL that goes to consolidation; the gate verdict is

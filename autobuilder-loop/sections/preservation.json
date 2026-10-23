@@ -26,8 +26,8 @@
       "source_start_line": 32,
       "source_sha256": "c1c7f0bd93df51f9a16433770da963fa131c2c9f073af4f2d5aaff52617527fd",
       "target": "sections/contracts.md.tmpl",
-      "target_sha256": "7ca615f9f0a700f26074c3c461cbc4dac426734674b5006e574ced95055f5382",
-      "change": "G1: remove inline meter permission; explicitly permit contracted host executor chores/checks, keeping judgment, edits and conflict resolution with routed agents"
+      "target_sha256": "c81361fc51cd909209e0858b8ac802243816d1066e4e43a4f499a4c8a1362be1",
+      "change": "G1: remove inline meter permission; explicitly permit contracted host executor chores/checks. Authorize Read only for installed skill instructions and required review checklist; source inspection, judgment, edits and conflict resolution remain delegated."
     },
     {
       "id": "round1-2",
@@ -53,8 +53,8 @@
       "source_start_line": 907,
       "source_sha256": "a653327e1b9063e76b0173b70c84dfefde7cac2c3b7719f786b20fa5c07e9097",
       "target": "sections/contracts.md.tmpl",
-      "target_sha256": "a653327e1b9063e76b0173b70c84dfefde7cac2c3b7719f786b20fa5c07e9097",
-      "change": "verbatim"
+      "target_sha256": "73821b763d614bcb4169c1f4e8a5f6dd6f8ae57a0bad516f696c181ff43e6d14",
+      "change": "Align narrow installed-instruction Read permission with the lazy entrypoint; point Seat C at the dedicated canonical rubric and checklist without changing gate policy."
     },
     {
       "id": "round1-5",
@@ -71,8 +71,8 @@
       "source_start_line": 497,
       "source_sha256": "5e24ea011cb3bc2bdfb070bb2e5fc57c9ef41b4fe936e804e7fb8a06db9929cf",
       "target": "sections/gate.md.tmpl",
-      "target_sha256": "5e24ea011cb3bc2bdfb070bb2e5fc57c9ef41b4fe936e804e7fb8a06db9929cf",
-      "change": "verbatim"
+      "target_sha256": "4b22c3e16210614b3a7d1c46744e630c44d6407aea6df9e7455fbca95de35bec",
+      "change": "Point Seat C at the dedicated canonical rubric and checklist; retain both review methodologies and fail closed on unreadable required references."
     },
     {
       "id": "round1-7",

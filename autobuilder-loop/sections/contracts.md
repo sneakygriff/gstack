@@ -30,8 +30,9 @@ perform.
 
 The main session is the scarce resource. Filling it with raw file contents, diffs, or logs
 poisons every downstream routing and gating decision and forces premature compaction. Your
-tool grant is deliberately narrow — `Agent`, `Bash`, `AskUserQuestion`, `Workflow` only. You have no
-Read/Write/Edit/Glob/Grep because you are physically not the worker. So:
+tool grant is deliberately narrow — `Agent`, `Bash`, `AskUserQuestion`, `Workflow`, `Read` only.
+`Read` is limited to this installed skill's instructions and required review checklist.
+You have no Write/Edit/Glob/Grep because you are physically not the worker. So:
 
 - **You NEVER write or edit code.** Every change goes through a subagent — no exceptions,
   not even "a two-line config tweak."
@@ -39,7 +40,7 @@ Read/Write/Edit/Glob/Grep because you are physically not the worker. So:
   dispatch a subagent that returns a distilled summary. Not the file — the summary.
 - **You NEVER author or improvise build commands yourself.** A subagent brings the stack up and reports back. The declared host executor may run the approved named checks and return receipts.
 - **You do no rote (class R) work** beyond ONE compact command with ≤ ~20 lines of output. File
-  reads, suite runs and grep sweeps go to an R Haiku subagent returning a ≤10-line
+  reads other than the installed instructions, suite runs and grep sweeps go to an R Haiku subagent returning a ≤10-line
   envelope. Reviewer output is never "parsed" by Haiku: `gstack-lane adjudicate` decides a
   seat; interpreting finding text is synthesis-tier work. Declared deterministic helper calls run directly on command-capable hosts; Workflow keeps thin relays where no command bridge exists.
 - **Top-level `Bash` is limited to: `~/.claude/skills/gstack/bin/gstack-lane` (`probe` / `run`
@@ -228,7 +229,8 @@ Review adjudication, worktree/commit operations and all gate decisions retain th
 
 - **Orchestrator only.** Never write/edit code, never read source/diffs/logs into your
   context, never run the build yourself. Your tools are `Agent`, `Bash`, `AskUserQuestion`,
-  `Workflow` — top-level Bash only for the list in Core principle (the two lists are one rule).
+  `Workflow`, `Read` — Read only for the installed instructions and required review checklist;
+  top-level Bash only for the list in Core principle (the two lists are one rule).
   Everything real happens in a subagent, a unit workflow, or an external lane that returns a compact
   envelope.
 - **Route every dispatch through the lane table.** Classify (R or T0–T3) first; emit `model:`
@@ -262,7 +264,8 @@ Review adjudication, worktree/commit operations and all gate decisions retain th
   from memory; follow-ups never silently become milestones or get dropped.
 - **Never auto-run business or plan skills.** Suggest /design-review, /plan-ceo-review,
   /plan-design-review — the user owns those. Never auto-invoke /autoplan, and never run a
-  review skill OUTSIDE the milestone gate. (Seat C reading eng-review//review methodology from disk
+  review skill OUTSIDE the milestone gate. (Seat C reading the dedicated `sections/seat-c-review.md`
+  and its canonical checklist from disk
   and the step-f /ship checkpoint are this loop's own contract, not exceptions to it.)
 - **Evidence, not confidence.** No "done" without verification output tied to each
   acceptance criterion and a live Docker run.
