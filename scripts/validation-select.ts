@@ -50,8 +50,11 @@ async function main() {
     return why.length ? [{ file, reasons: why }] : [];
   });
   for (const file of files) {
-    if (/\.test\.(?:[cm]?[jt]s|tsx|jsx)$/.test(file) && !isPaidTestFile(file) && !free.some(check => check.file === file)) {
-      free.push({ file, reasons: [{ source: file, registry: 'exact changed free test', pattern: file }] });
+    if (/\.test\.(?:[cm]?[jt]s|tsx|jsx)$/.test(file) && !isPaidTestFile(file)) {
+      const reason = { source: file, registry: 'exact changed free test', pattern: file };
+      const selected = free.find(check => check.file === file);
+      if (selected) selected.reasons.push(reason);
+      else free.push({ file, reasons: [reason] });
     }
   }
   const model: Array<{ id: string; kind: string; file?: string; tier?: string; reasons: Reason[] }> = [];
