@@ -2,8 +2,8 @@
   "kind": "local-implementation-handoff",
   "version": 1,
   "branch": "codex/autobuilder-validation",
-  "codeRevision": "9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a",
-  "codeTree": "f04ef5a0a637f4a003b8ced0eedaec105e6fcf3e",
+  "codeRevision": "90e6add2128280b29bbb372ce9b1bfc5138ab28e",
+  "codeTree": "9536324e7cdea37d3c9411ef4210f9ee2b7b61dd",
   "specBase": "ce0fe916d2550b21d6eb116aee483786060f730f",
   "specComplete": false,
   "adoption": "blocked",
@@ -88,5 +88,34 @@
     "branchesRetained": true,
     "rawEvidenceRetained": true,
     "retainedBrowserStateRemoved": false
+  },
+  "pathTimeoutFollowup": {
+    "report": "path-timeout-followup.md",
+    "codeRevision": "90e6add2128280b29bbb372ce9b1bfc5138ab28e",
+    "commits": [
+      "ee337305",
+      "c3e1def3",
+      "90e6add2"
+    ],
+    "pathFixesVerified": true,
+    "normalPathMatrix": {
+      "pass": 114,
+      "fail": 0,
+      "assertions": 1010
+    },
+    "temporaryPathMatrix": {
+      "pass": 114,
+      "fail": 0,
+      "assertions": 1009
+    },
+    "relinkAdjacent": {
+      "pass": 64,
+      "fail": 0,
+      "assertions": 241
+    },
+    "lifecycleTimeout": "unreproduced-unresolved",
+    "fullSuiteTimeout": "unresolved",
+    "fullSuiteRerun": false,
+    "gatesOrLimitsChanged": false
   }
 }

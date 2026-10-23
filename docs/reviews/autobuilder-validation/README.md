@@ -2,7 +2,11 @@
 
 Status: **implementation retained; adoption blocked**. Six scoped tickets (01-06) are done; empirical tickets 07/08 and dependent adoption ticket 09 remain blocked. This is a partial delivery of the specification, not full-spec completion or release acceptance.
 
-Integration branch: `codex/autobuilder-validation`. Frozen code revision: `9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a`; tree `f04ef5a0a637f4a003b8ced0eedaec105e6fcf3e`. Specification/review base: `ce0fe916d2550b21d6eb116aee483786060f730f`. Subsequent handoff commits change documentation only. All changes remain local; the installed skill has not been replaced.
+Integration branch: `codex/autobuilder-validation`. Last full-suite code revision: `9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a`; tree `f04ef5a0a637f4a003b8ced0eedaec105e6fcf3e`. Specification/review base: `ce0fe916d2550b21d6eb116aee483786060f730f`. Subsequent path-test repairs are recorded in the [path and timeout follow-up](path-timeout-followup.md); the historical full-suite outcome remains bound to its original revision. All changes remain local; the installed skill has not been replaced.
+
+## Path and timeout follow-up
+
+Path-test assumptions and repository-path launching have been repaired on the isolated branch. The [follow-up report](path-timeout-followup.md) records red/green probes, adjacent checks and remaining limits. The historical lifecycle timeout did not reproduce in isolated, concurrent or actual-runner probes; it and the complete-suite timeouts remain unresolved. No fresh full-suite acceptance or model result is claimed.
 
 ## Delivered behavior
 
@@ -39,7 +43,7 @@ Two outer cleanup warnings retain `/private/tmp/gstack-free-shard-OtE5qE` and `/
 
 The preceding frozen `f9208680` full run terminated with exit 124: five shards hit the unchanged 1,041-second wall without terminal summaries. Completed shards alone recorded 3,584 pass / 48 fail / 105 skip over 157 file executions. This is a partial subtotal; complete totals are unknown. The older complete `2fdc4698` run remains 22,326 pass / 422 fail / 410 skip across 938 files; later passing subsets do not erase it. [Historical inventory](failure-inventory.md) separates demonstrated classifications from unresolved causes.
 
-The final run is justified by concrete subsequent native/report/selection repairs and a demonstrated launcher correction: native fixture shebangs failed when the Bun executable path contained a space and succeeded with byte-identical Bun at a short path. A controlled lifecycle case still failed at its unchanged 30-second timeout after the path correction; this prevents claiming the old suite timeouts are fixed. No blind retry or larger budget was used. Both full-run outcomes remain retained. The short checkout under `/private/tmp` also exposes test assumptions: one temporary-path check expects the checkout to be outside the temporary directory, and a capture privacy assertion matches the literal word `private` inside a legitimate path. These are retained launch/fixture limitations, not silently classified as product regressions. A future launch correction should keep the executable path short while choosing a checkout outside temporary-directory assumptions.
+The final run is justified by concrete subsequent native/report/selection repairs and a demonstrated launcher correction: native fixture shebangs failed when the Bun executable path contained a space and succeeded with byte-identical Bun at a short path. A controlled lifecycle case still failed at its unchanged 30-second timeout after the path correction; this prevents claiming the old suite timeouts are fixed. No blind retry or larger budget was used. Both full-run outcomes remain retained. The short checkout under `/private/tmp` also exposes test assumptions: one temporary-path check expects the checkout to be outside the temporary directory, and a capture privacy assertion matches the literal word `private` inside a legitimate path. These were retained fixture failures, subsequently reproduced and repaired in the path follow-up. The short executable path remains required; both normal and temporary checkout topologies now have focused verification. That does not repair or supersede the incomplete full-suite result.
 
 ## Selection and blocked empirical work
 
