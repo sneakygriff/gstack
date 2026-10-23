@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** in-progress
+**Status:** done - scoped implementation and review fixes verified; adoption remains blocked
 
 - [x] Reject nonexistent or invalid selectors before any test child starts; exact paths, spaces, duplicates and empty selection have explicit behavior.
 - [x] Expose a side-effect-free plan and a structured receipt through the public command.
@@ -21,4 +21,10 @@
 - Earlier adjacent batch retained 141 pass / 3 fail / 5 skip. The exact three owned-browser-settlement cases (`cancel-force`, `full-state-mix`, `replaced-pid`) also failed on untouched baseline `8fb81481` with the same assertions: 0 pass / 3 fail / 89 filtered out. Retained baseline log: `/Users/stefanandrei/Skill Master/research/validation-orchestration/01-baseline.log`. This establishes only those failures predate ticket 01; their root causes remain unresolved and they remain acceptance blockers.
 - Merger reviewed the five-file scope and retained evidence, merged cleanly, and passed the whitespace check. No full suite, provider call, package edit, installed-skill change or review-gate change was performed for this merge.
 
-Reopened by final two-axis review for the confirmed public-CLI, dependency-selection or evidence-adapter finding applicable to this ticket. Original passing checks remain retained; completion requires the focused repair.
+Historical review reopening is resolved by the repairs below. Original passing and failing checks remain retained; this ticket closure does not certify full-suite or empirical adoption acceptance.
+
+## Review repair closure
+
+Public default-root direct and package invocations repaired at `5caba140`, with 18 passing focused checks including the subprocess tripwire. Integration includes this repair at `9a7c8a2c`. The two-axis review independently confirmed closure. Original owned-browser failures remain unresolved and are not removed from acceptance.
+
+Final code revision: `9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a`. See [adoption evidence](../../../docs/reviews/autobuilder-validation/README.md) for full-suite outcome, remaining blockers and retained raw evidence.

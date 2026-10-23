@@ -1,0 +1,92 @@
+{
+  "kind": "local-implementation-handoff",
+  "version": 1,
+  "branch": "codex/autobuilder-validation",
+  "codeRevision": "9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a",
+  "codeTree": "f04ef5a0a637f4a003b8ced0eedaec105e6fcf3e",
+  "specBase": "ce0fe916d2550b21d6eb116aee483786060f730f",
+  "specComplete": false,
+  "adoption": "blocked",
+  "tickets": {
+    "done": [
+      "01",
+      "02",
+      "03",
+      "04",
+      "05",
+      "06"
+    ],
+    "blocked": [
+      "07",
+      "08",
+      "09"
+    ]
+  },
+  "review": {
+    "standards": {
+      "documentedFindings": 1,
+      "heuristicFindings": 0,
+      "confirmedFindingResolved": true
+    },
+    "spec": {
+      "p2Defects": 2,
+      "partialCapabilityRequirements": 1,
+      "implementationFindingsResolved": true,
+      "empiricalRequirementsComplete": false
+    },
+    "duplicateAcrossAxes": "public-focused-launcher",
+    "followupFindingsResolved": true,
+    "disposition": "review-disposition.md"
+  },
+  "finalFreeRun": {
+    "status": "timed-out-incomplete",
+    "exitCode": 124,
+    "completeTotals": null,
+    "sourceRevision": "9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a",
+    "evidenceDirectory": "/Users/stefanandrei/Skill Master/research/validation-orchestration",
+    "parallelShardsTimedOut": 6,
+    "completedShardSubtotal": {
+      "pass": 1,
+      "fail": 0,
+      "skip": 35,
+      "cases": 36,
+      "files": 1
+    },
+    "cleanupUnconfirmedStateDirectories": [
+      "/private/tmp/gstack-free-shard-OtE5qE",
+      "/private/tmp/gstack-free-shard-4BHyJP"
+    ],
+    "outerGroupAbsentAfterTerminal": true,
+    "outerGroup": 136
+  },
+  "modelEvaluationExecutions": 0,
+  "liveComparisonExecutions": 0,
+  "measuredTokenSavings": null,
+  "measuredRepresentativeSpeedup": null,
+  "selection": {
+    "status": "blocked",
+    "freeFiles": 14,
+    "e2eRegistrations": 217,
+    "judgeRegistrations": 25,
+    "uncertainties": 14,
+    "evidence": "final-selection.json"
+  },
+  "installedSkillChanged": false,
+  "pushed": false,
+  "pullRequestCreated": false,
+  "deployed": false,
+  "gatesWeakened": false,
+  "coverageCredit": false,
+  "notes": [
+    "This handoff is descriptive evidence, not an acceptance-runner receipt.",
+    "Focused test batches overlap and are not summed.",
+    "API costs, subscription debit, capacity and absent usage remain unknown."
+  ],
+  "worktreeCleanup": {
+    "implementerWorktreesRemoved": true,
+    "validationWorktreeRemoved": true,
+    "branchesRetained": true,
+    "rawEvidenceRetained": true,
+    "retainedBrowserStateRemoved": false
+  }
+}

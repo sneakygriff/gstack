@@ -17,3 +17,5 @@ Grok agents must use authenticated Grok CLI, never an impersonated substitute.
 Historical full-suite failures are evidence to classify, not failures to erase.
 External prerequisites may leave a ticket blocked; a prepared protocol is not a completed live experiment.
 Review gates, model floors, retries, credit guards and the installed skill remain unchanged.
+
+Current local disposition: 01-06 done within their scoped criteria; 07-09 blocked. Review repairs are integrated at `9a7c8a2c`; no remote tracker closure or adoption acceptance. See [final handoff](../../docs/reviews/autobuilder-validation/README.md).

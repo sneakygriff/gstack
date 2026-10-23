@@ -4,9 +4,9 @@
 
 **Blocked by:** 01: Strict focused test execution
 
-**Status:** in-progress
+**Status:** done - scoped implementation and review fixes verified; adoption remains blocked
 
-Implementation integrated; pinned Bun 1.4.0 revalidation is pending after the merger verified that retained worker runs used Bun 1.3.14. Functional acceptance evidence below remains historical and is not relabeled.
+Historical integration note: the first worker verification used Bun 1.3.14. Subsequent pinned Bun 1.4.0 checks and review repairs are recorded below; the initial evidence remains attributed to its actual runtime.
 
 - [x] Cover template/reference freshness, always-loaded contracts, section registration, context/parity and affected supervision.
 - [x] Show selection reasons; preview launches no test, monitor or model.
@@ -24,4 +24,10 @@ Implementation integrated; pinned Bun 1.4.0 revalidation is pending after the me
 
 Pinned-runtime verification: Bun 1.4.0 confirmed by executable path/version and child logs; public CLI 12 pass, adjacent six files 123 pass, freshness 1 pass, all zero failures/skips. Separate runs overlap and are not summed. Evidence: research/validation-orchestration/02-evidence/bun-1.4.0 in the surrounding workspace. Earlier Bun 1.3.14 records remain historical.
 
-Reopened by final two-axis review for the confirmed public-CLI, dependency-selection or evidence-adapter finding applicable to this ticket. Original passing checks remain retained; completion requires the focused repair.
+Historical review reopening is resolved by the repairs below. Original passing and failing checks remain retained; this ticket closure does not certify full-suite or empirical adoption acceptance.
+
+## Review repair closure
+
+Paid-evaluation exemptions no longer certify absence of free dependencies (`b318ead7`; 16 passing focused checks). Exact changed tests retain their own selection reason even when already selected by a helper; four demonstrated reader dependencies were added (`51ad7698`; 76 pass, 0 fail, 302 assertions across three files). Unknown inputs and changed-registry prior-map review still block automatic execution. Final explicit-diff preview remains blocked, with uncertainties retained in the adoption report.
+
+Final code revision: `9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a`. See [adoption evidence](../../../docs/reviews/autobuilder-validation/README.md) for full-suite outcome, remaining blockers and retained raw evidence.
