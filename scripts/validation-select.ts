@@ -12,7 +12,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { FREE_TOUCHFILES, E2E_TOUCHFILES, E2E_TIERS, LLM_JUDGE_TOUCHFILES, GLOBAL_TOUCHFILES, matchGlob, selectTests, getChangedFiles } from '../test/helpers/touchfiles';
 import { CARVE_GUARDS } from '../test/helpers/carve-guards';
-import { knownNonBehaviorFile } from './test-pr-profile';
 import { isPaidTestFile } from '../test/helpers/paid-test-set';
 
 type Reason = { source: string; registry: string; pattern: string };
@@ -72,7 +71,10 @@ async function main() {
   }
   if (free.some(check => isPaidTestFile(check.file))) throw new Error('Free registry contains a paid evaluation');
   const covered = new Set([...free, ...model].flatMap(check => check.reasons.map(reason => reason.source)));
-  const ignoredFiles = files.filter(file => !covered.has(file) && knownNonBehaviorFile(file));
+  // Paid-profile exemptions do not establish free coverage. Unmapped executable
+  // helpers, fixtures and checkout instructions must remain explicitly unknown.
+  const ignoredFiles = files.filter(file => !covered.has(file)
+    && /^(?:docs\/|(?:README|CONTRIBUTING|ARCHITECTURE|CHANGELOG|TODOS)\.md$|VERSION$)/.test(file));
   const unknownFiles = files.filter(file => (!covered.has(file) && !ignoredFiles.includes(file)) || file === 'test/helpers/touchfiles-data.ts');
   const report = { version: 1, kind: 'dependent-check-plan', root, base: base ?? null, changedFiles: files,
     status: unknownFiles.length ? 'blocked' : free.length || model.length ? 'planned' : 'no-work', coverageCredit: false,

@@ -6,14 +6,19 @@ import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { FreeRunReporter } from './test-free-shards';
 import { BunTestOutputClassifier, installChildSignalForwarding } from './test-strict-output';
+import { evalEntryOutcome } from '../test/helpers/eval-store';
+import { readUsageReport } from './autobuilder-usage';
 
-type Check = { id: string; files: string[]; inputs: string[]; environment: string[];
+type Check = { id: string; kind?: 'focused' | 'native-eval'; cases?: string[]; files: string[]; inputs: string[]; environment: string[];
   scope: { status: 'declared-complete' | 'unknown'; note: string; unresolved: string[] }; record?: string; wallTimeoutSeconds?: number };
-type Plan = { schemaVersion: string; root: string; checks: Check[]; historical?: unknown[] };
+type Measurement = { id: string; report: string; inputs: string[]; instructions: string[];
+  environment: string[]; scope: Check['scope'] };
+type Plan = { schemaVersion: string; root: string; checks: Check[]; measurements?: Measurement[]; historical?: unknown[] };
 const engineRoot = path.resolve(import.meta.dir, '..');
 const engineFiles = ['scripts/autobuilder-acceptance.ts', 'scripts/test-focused.ts', 'scripts/test-free-shards.ts',
   'scripts/test-strict-output.ts', 'test/helpers/paid-test-set.ts', 'test/helpers/touchfiles.ts',
-  'test/helpers/touchfiles-data.ts', 'test/helpers/test-selection.ts'];
+  'test/helpers/touchfiles-data.ts', 'test/helpers/test-selection.ts', 'scripts/autobuilder-usage.ts',
+  'test/helpers/eval-store.ts', 'test/helpers/cookie-workflow-manual-review.ts'];
 const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 function strings(value: unknown): value is string[] {
@@ -34,6 +39,8 @@ function loadPlan(file: string): Plan {
       || !check.scope.note.trim() || !strings(check.scope.unresolved)
       || check.wallTimeoutSeconds != null && (!Number.isFinite(check.wallTimeoutSeconds) || check.wallTimeoutSeconds <= 0)
       || check.record != null && typeof check.record !== 'string') throw new Error('Invalid check declaration');
+    if (check.kind != null && !['focused', 'native-eval'].includes(check.kind)
+      || check.kind === 'native-eval' && (!strings(check.cases) || !check.cases.length)) throw new Error('Invalid evidence kind or native cases');
     ids.add(check.id);
     for (const file of check.files) {
       if (path.isAbsolute(file) || path.relative(plan.root, path.resolve(plan.root, file)).startsWith('..')
@@ -42,6 +49,18 @@ function loadPlan(file: string): Plan {
     if (check.record) check.record = path.resolve(path.dirname(file), check.record);
   }
   if (plan.historical != null && !Array.isArray(plan.historical)) throw new Error('Invalid historical records');
+  if (plan.measurements != null && !Array.isArray(plan.measurements)) throw new Error('Invalid measurements');
+  for (const measurement of plan.measurements ?? []) {
+    if (typeof measurement.id !== 'string' || !measurement.id || ids.has(measurement.id)
+      || typeof measurement.report !== 'string' || !measurement.report
+      || !strings(measurement.inputs) || !strings(measurement.instructions) || !strings(measurement.environment)
+      || measurement.inputs.some((file: string) => measurement.instructions.includes(file))
+      || !measurement.scope || !['declared-complete', 'unknown'].includes(measurement.scope.status)
+      || typeof measurement.scope.note !== 'string' || !measurement.scope.note.trim() || !strings(measurement.scope.unresolved))
+      throw new Error('Invalid measurement declaration');
+    ids.add(measurement.id);
+    measurement.report = path.resolve(path.dirname(file), measurement.report);
+  }
   return plan;
 }
 function fingerprint(file: string) {
@@ -66,6 +85,7 @@ function revision(root: string) {
 async function capture(plan: Plan, id: string) {
   const check = plan.checks.find(c => c.id === id);
   if (!check?.record) throw new Error('Capture requires a known check with an unused record path');
+  if (check.kind === 'native-eval') throw new Error('Native evaluations must be run by the existing model harness; capture is free-only');
   if (fs.existsSync(check.record)) throw new Error('Refusing to replace an original record; use a new path');
   const before = snapshot(plan.root, check);
   if ([...before.inputs, ...before.engine, before.runtime].some(i => !i.sha256)) throw new Error('Cannot capture missing declared inputs');
@@ -158,10 +178,120 @@ function inspectRecord(plan: Plan, check: Check) {
     && receipt.coverageCredit === true;
   return { ...base, applicability: applicable, coverageCredit, reused: applicable === 'applicable', reasons };
 }
+function inspectNative(plan: Plan, check: Check) {
+  const result = { id: check.id, kind: 'native-eval', status: 'unexecuted', applicability: 'missing',
+    coverageCredit: false, reused: false, counts: null as any, provenance: null as any,
+    scope: check.scope, reasons: [] as string[], declaredEnvironment: check.environment,
+    declaredInputs: check.inputs.map(file => ({ file, ...fingerprint(path.resolve(plan.root, file)) })) };
+  if (!check.record || !fs.existsSync(check.record)) return { ...result, reasons: ['No retained native evaluation record'] };
+  result.applicability = 'incomplete';
+  result.provenance = { record: fingerprint(check.record) };
+  try {
+    const native = readJSON(check.record);
+    const nonempty = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+    const numeric = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    if (![1, 2].includes(native.schema_version) || !['e2e', 'llm-judge'].includes(native.tier)
+      || !['version', 'branch', 'git_sha', 'timestamp', 'hostname'].every(key => nonempty(native[key]))
+      || !Number.isFinite(Date.parse(native.timestamp)) || !Array.isArray(native.tests) || !native.tests.length
+      || !native.tests.every((entry: any) => nonempty(entry.name) && nonempty(entry.suite)
+        && ['e2e', 'llm-judge'].includes(entry.tier) && typeof entry.passed === 'boolean'
+        && numeric(entry.duration_ms) && numeric(entry.cost_usd)
+        && (entry.execution == null || ['executed', 'reused'].includes(entry.execution))))
+      throw new Error('Invalid native EvalResult metadata');
+    const passed = native.tests.filter((entry: any) => evalEntryOutcome(entry) === 'passed').length;
+    const manual = native.tests.filter((entry: any) => evalEntryOutcome(entry) === 'manual-review').length;
+    const failed = native.tests.length - passed - manual;
+    const reused = native.tests.filter((entry: any) => entry.execution === 'reused').length;
+    const executed = native.tests.length - reused;
+    result.counts = { passed, failed, manual, executed, reused, total: native.tests.length };
+    result.provenance = { ...result.provenance, revision: native.git_sha, timestamp: native.timestamp,
+      claudeCliVersion: native.claude_cli_version ?? null, tier: native.tier,
+      entries: native.tests.map((entry: any) => ({ name: entry.name, outcome: evalEntryOutcome(entry),
+        attempt: entry.attempt ?? null, execution: entry.execution ?? 'executed', reusedFrom: entry.reused_from ?? null })) };
+    if (native.total_tests !== native.tests.length || native.passed !== passed || native.failed !== failed
+      || (native.manual_accepted_tests ?? 0) !== manual
+      || native.executed_tests != null && native.executed_tests !== executed
+      || native.reused_tests != null && native.reused_tests !== reused
+      || native.total_duration_ms !== native.tests.reduce((sum: number, entry: any) => sum + entry.duration_ms, 0)
+      || native.total_cost_usd !== Math.round(native.tests.reduce((sum: number, entry: any) => sum + entry.cost_usd, 0) * 100) / 100)
+      throw new Error('Native evaluation counters contradict its entries');
+    result.status = failed ? 'failed' : manual ? 'incomplete' : 'passed';
+    if (!equal([...new Set(native.tests.map((entry: any) => entry.name))].sort(), [...check.cases!].sort()))
+      result.reasons.push('Native evaluation cases do not match the declared selection');
+    if (native._partial) result.reasons.push('Native evaluation is partial, not finalized');
+    if (native.tests.some((entry: any) => !nonempty(entry.model))) result.reasons.push('Native evaluation lacks observed model identity');
+    if (native.tests.some((entry: any) => entry.execution === 'reused'
+      && (!entry.reused_from?.input_key || !entry.reused_from?.run_id || !entry.reused_from?.revision || !entry.reused_from?.completed_at)))
+      result.reasons.push('Native reused entry lacks original provenance');
+    if (check.scope.status !== 'declared-complete' || check.scope.unresolved.length) result.reasons.push('Consumed input scope remains unknown');
+    // EvalCollector v1/v2 has no complete input/runtime manifest. Today's hashes
+    // or a cache input_key alone cannot retroactively establish consumption.
+    result.reasons.push('Native evaluation lacks consumed source/instruction fingerprints',
+      'Native evaluation lacks complete runtime and environment binding');
+  } catch (error) { result.status = 'incomplete'; result.reasons.push(error instanceof Error ? error.message : 'Invalid native evidence'); }
+  return result;
+}
 function inspect(plan: Plan, check: Check) {
-  try { return inspectRecord(plan, check); }
+  try { return check.kind === 'native-eval' ? inspectNative(plan, check) : inspectRecord(plan, check); }
   catch { return { id: check.id, status: 'unexecuted', applicability: 'incomplete', coverageCredit: false, reused: false,
     counts: null, provenance: null, scope: check.scope, reasons: ['Malformed execution metadata'] }; }
+}
+function inspectUsage(plan: Plan, measurement: Measurement) {
+  const result = { id: measurement.id, kind: 'usage', applicability: 'incomplete', consistency: 'incomplete',
+    coverageCredit: false, scope: measurement.scope, provenance: { report: fingerprint(measurement.report), input: null as any,
+      evidence: [] as any[] }, duplicateEvents: null as number | null, groups: null as any, events: null as any,
+    reasons: [] as string[] };
+  try {
+    const report = readJSON(measurement.report);
+    if (report.schemaVersion !== 'autobuilder-usage-report/v1' || typeof report.input?.path !== 'string'
+      || !path.isAbsolute(report.input.path)) throw new Error('Invalid usage report metadata');
+    result.provenance.input = fingerprint(report.input.path);
+    if (!report.input.sha256 || report.input.sha256 !== result.provenance.input.sha256)
+      throw new Error('Usage normalized input missing or changed');
+    const recomputed = readUsageReport(report.input.path);
+    if (!equal(report, recomputed)) throw new Error('Usage report contradicts its normalized input');
+    result.consistency = 'consistent';
+    result.duplicateEvents = report.duplicateEvents;
+    result.groups = report.groups;
+    result.events = report.events;
+    if (!report.events.length) result.reasons.push('Usage report contains no observations');
+    for (const event of recomputed.events) {
+      for (const evidence of event.evidence) {
+        // Local references resolve against the normalized input's directory.
+        // Remote/opaque locators are retained but cannot be verified offline.
+        const local = !/^[a-z][a-z0-9+.-]*:/i.test(evidence.ref);
+        const observed = local ? fingerprint(path.resolve(path.dirname(report.input.path), evidence.ref)) : null;
+        result.provenance.evidence.push({ ...evidence, observed });
+        if (!observed?.sha256 || evidence.sha256 !== observed.sha256) {
+          result.consistency = 'incomplete';
+          result.reasons.push(`Usage evidence missing or changed: ${evidence.ref}`);
+        }
+      }
+      for (const [label, declared, recorded] of [
+        ['Source', measurement.inputs, event.sourceFingerprints],
+        ['Instruction', measurement.instructions, event.instructionFingerprints],
+      ] as const) {
+        if (!declared.length || !recorded) { result.reasons.push(`${label} consumed inputs are unknown`); continue; }
+        if (!equal(Object.keys(recorded).sort(), [...declared].sort())) result.reasons.push(`${label} fingerprint scope differs from declaration`);
+        for (const file of declared) {
+          const current = fingerprint(path.resolve(plan.root, file));
+          if (!recorded[file]) result.reasons.push(`${label} fingerprint missing: ${file}`);
+          else if (!current.sha256 || recorded[file] !== current.sha256) {
+            result.applicability = 'stale'; result.reasons.push(`${label} fingerprint changed: ${file}`);
+          }
+        }
+      }
+      if (event.kind === 'model' && (!event.model || !event.transport)) result.reasons.push('Usage observation lacks model or transport identity');
+    }
+    if (measurement.scope.status !== 'declared-complete' || measurement.scope.unresolved.length)
+      result.reasons.push('Consumed input scope remains unknown');
+    // This native usage format has no environment capture. Do not bind it to
+    // today's environment or infer applicability from matching source alone.
+    result.reasons.push(`Usage format lacks recorded execution environment: ${measurement.environment.join(', ') || '(undeclared)'}`);
+    result.reasons.push('Usage fingerprints are caller-attributed; model consumption is not independently established');
+  } catch (error) { result.reasons.push(error instanceof Error ? error.message : 'Invalid usage evidence'); }
+  result.reasons = [...new Set(result.reasons)];
+  return result;
 }
 function assemble(plan: Plan, planPath: string) {
   const checks = plan.checks.map(check => inspect(plan, check));
@@ -169,7 +299,8 @@ function assemble(plan: Plan, planPath: string) {
   const report = { schemaVersion: 'autobuilder-acceptance-manifest/v1', plan: fingerprint(planPath), revision: revision(plan.root),
     assembledAt: new Date().toISOString(), status: coverageCredit ? 'passed' : checks.some(c => c.status === 'failed') ? 'failed' : 'incomplete',
     coverageCredit, applicabilityScope: 'Operator-declared consumed inputs only; no automatic dependency discovery, authenticated provenance or whole-release certification.',
-    checks, historical: (plan.historical ?? []).map(record => ({ record, applicability: 'historical-unknown-inputs', coverageCredit: false })) };
+    checks, measurements: (plan.measurements ?? []).map(measurement => inspectUsage(plan, measurement)),
+    historical: (plan.historical ?? []).map(record => ({ record, applicability: 'historical-unknown-inputs', coverageCredit: false })) };
   console.log(JSON.stringify(report, null, 2));
   process.exitCode = coverageCredit ? 0 : 1;
 }

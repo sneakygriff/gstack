@@ -23,6 +23,23 @@ function run(root: string, args: string[], preload?: string) {
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
+test('direct and actual package launchers execute positional selectors with the default root', () => {
+  const root = fixture();
+  file(root, 'test/public.test.ts', `import {test,expect} from 'bun:test';test('public launcher',()=>expect(2+2).toBe(4));`);
+  // Preserve the real package command while keeping child artifacts disposable.
+  file(root, 'package.json', readFileSync(resolve(import.meta.dir, '../package.json'), 'utf8'));
+  symlinkSync(resolve(import.meta.dir, '../scripts'), join(root, 'scripts'));
+  for (const args of [[command, '--', 'test/public.test.ts'], ['run', 'test:focused', '--', 'test/public.test.ts']]) {
+    const result = Bun.spawnSync([process.execPath, ...args], {
+      cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 15_000,
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({ status: 'passed', coverageCredit: true,
+      observedFiles: ['test/public.test.ts'], missingFiles: [], unexpectedFiles: [],
+      outcome: { summary: { testsRan: 1, filesRan: 1 } } });
+  }
+}, 20000);
+
 test('rejects a missing selector before running any valid file', () => {
   const root = fixture();
   file(root, 'test/valid.test.ts', `import {writeFileSync} from 'node:fs';writeFileSync('executed','yes');`);

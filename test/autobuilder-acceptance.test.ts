@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EvalCollector } from './helpers/eval-store';
 
 // Value: protects=acceptance credits only consistent applicable retained execution;
 // fails_when=stale or tampered receipts certify coverage; why_new=focused runner lacks acceptance assembly; seam=public CLI
@@ -27,6 +28,89 @@ function run(...args: string[]) {
   return { code: child.exitCode, stderr: child.stderr.toString(), json: child.stdout.length ? JSON.parse(child.stdout.toString()) : null };
 }
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+
+test('native collector outcomes are reconciled but cannot certify missing consumed inputs or runtime', async () => {
+  const f = fixture();
+  const collector = new EvalCollector('llm-judge', f.root);
+  collector.addTest({ name: 'controlled judge', suite: 'fixture', tier: 'llm-judge', passed: true,
+    duration_ms: 1, cost_usd: 0, model: 'fixture-model', judge_scores: { clarity: 5 }, judge_reasoning: 'Controlled record, no provider call.' });
+  f.plan.checks[0].record = await collector.finalize();
+  Object.assign(f.plan.checks[0], { kind: 'native-eval', cases: ['controlled judge'] });
+  f.save();
+  const result = run('assemble', f.planPath);
+  expect(result.code).toBe(1);
+  expect(result.json.checks[0]).toMatchObject({ kind: 'native-eval', status: 'passed', applicability: 'incomplete',
+    coverageCredit: false, counts: { passed: 1, failed: 0, executed: 1, reused: 0 },
+    reasons: expect.arrayContaining(['Native evaluation lacks consumed source/instruction fingerprints',
+      'Native evaluation lacks complete runtime and environment binding']) });
+  const record = JSON.parse(fs.readFileSync(f.plan.checks[0].record, 'utf8'));
+  record.passed = 99;
+  fs.writeFileSync(f.plan.checks[0].record, JSON.stringify(record));
+  expect(run('assemble', f.planPath).json.checks[0]).toMatchObject({ status: 'incomplete',
+    reasons: expect.arrayContaining(['Native evaluation counters contradict its entries']) });
+  record.passed = 1;
+  record._partial = true;
+  record.tests[0].execution = 'reused';
+  record.executed_tests = 0;
+  record.reused_tests = 1;
+  fs.writeFileSync(f.plan.checks[0].record, JSON.stringify(record));
+  expect(run('assemble', f.planPath).json.checks[0]).toMatchObject({ applicability: 'incomplete', coverageCredit: false,
+    counts: { reused: 1, executed: 0 }, reasons: expect.arrayContaining(['Native evaluation is partial, not finalized',
+      'Native reused entry lacks original provenance']) });
+  fs.writeFileSync(f.plan.checks[0].record, JSON.stringify({ passed: true, status: 'passed' }));
+  expect(run('assemble', f.planPath).json.checks[0]).toMatchObject({ status: 'incomplete', coverageCredit: false,
+    reasons: ['Invalid native EvalResult metadata'] });
+  expect(run('capture', f.planPath, 'focused')).toMatchObject({ code: 2,
+    stderr: expect.stringContaining('capture is free-only') });
+}, 30000);
+
+test('usage assembly reconciles original artifacts and consumed bytes without supplying missing quality evidence', () => {
+  const f = fixture();
+  const inputPath = path.join(f.root, 'events.json');
+  const reportPath = path.join(f.root, 'usage.json');
+  const rawPath = path.join(f.root, 'provider.json');
+  const hash = (file: string) => Bun.CryptoHasher.hash('sha256', fs.readFileSync(file), 'hex');
+  fs.writeFileSync(rawPath, JSON.stringify({ id: 'message-1', usage: { input_tokens: 7 } }));
+  fs.writeFileSync(path.join(f.root, 'prompt.md'), 'Controlled instruction bytes');
+  const event = { runId: 'controlled-run', eventId: 'message-1', kind: 'model', phase: 'review', role: 'judge',
+    observation: 'observed', provider: 'fixture', model: 'fixture-model', transport: 'fixture', recordScope: 'message',
+    sourceFingerprints: { 'source.ts': hash(path.join(f.root, 'source.ts')) },
+    instructionFingerprints: { 'prompt.md': hash(path.join(f.root, 'prompt.md')) },
+    evidence: [{ ref: rawPath, sha256: hash(rawPath) }], usage: { inputTokens: 7 } };
+  fs.writeFileSync(inputPath, JSON.stringify({ schemaVersion: 'autobuilder-usage-events/v1', events: [event, event] }));
+  const produced = Bun.spawnSync([process.execPath, path.resolve(import.meta.dir, '../scripts/autobuilder-usage.ts'), inputPath],
+    { stdout: 'pipe', stderr: 'pipe', timeout: 5000 });
+  expect(produced.exitCode, produced.stderr.toString()).toBe(0);
+  fs.writeFileSync(reportPath, produced.stdout);
+  Object.assign(f.plan, { measurements: [{ id: 'usage', report: reportPath, inputs: ['source.ts'],
+    instructions: ['prompt.md'], environment: ['ACCEPTANCE_FIXTURE'], scope: f.plan.checks[0].scope }] });
+  Object.assign(f.plan.checks[0], { kind: 'native-eval', cases: ['unavailable judge'] });
+  f.save();
+  const result = run('assemble', f.planPath);
+  expect(result.code).toBe(1);
+  expect(result.json.checks[0]).toMatchObject({ status: 'unexecuted', coverageCredit: false });
+  expect(result.json.measurements[0]).toMatchObject({ applicability: 'incomplete', coverageCredit: false,
+    consistency: 'consistent', duplicateEvents: 1, groups: [{ inputTokens: { total: 7 }, outputTokens: { total: null } }],
+    reasons: expect.arrayContaining(['Usage format lacks recorded execution environment: ACCEPTANCE_FIXTURE']) });
+  fs.appendFileSync(path.join(f.root, 'prompt.md'), ' changed');
+  expect(run('assemble', f.planPath).json.measurements[0]).toMatchObject({ applicability: 'stale',
+    reasons: expect.arrayContaining(['Instruction fingerprint changed: prompt.md']) });
+  fs.appendFileSync(path.join(f.root, 'source.ts'), ' // changed');
+  expect(run('assemble', f.planPath).json.measurements[0]).toMatchObject({ applicability: 'stale',
+    reasons: expect.arrayContaining(['Source fingerprint changed: source.ts']) });
+  fs.appendFileSync(rawPath, ' ');
+  expect(run('assemble', f.planPath).json.measurements[0]).toMatchObject({ consistency: 'incomplete',
+    reasons: expect.arrayContaining([`Usage evidence missing or changed: ${rawPath}`]) });
+  const report = JSON.parse(produced.stdout.toString());
+  report.groups[0].inputTokens.total = 999;
+  fs.writeFileSync(reportPath, JSON.stringify(report));
+  expect(run('assemble', f.planPath).json.measurements[0]).toMatchObject({ consistency: 'incomplete',
+    reasons: expect.arrayContaining(['Usage report contradicts its normalized input']) });
+  fs.writeFileSync(reportPath, produced.stdout);
+  fs.appendFileSync(inputPath, ' ');
+  expect(run('assemble', f.planPath).json.measurements[0]).toMatchObject({ consistency: 'incomplete',
+    reasons: expect.arrayContaining(['Usage normalized input missing or changed']) });
+});
 
 test('captures a real focused run and reuses its applicable result with original provenance', () => {
   const f = fixture();
