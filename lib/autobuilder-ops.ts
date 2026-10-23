@@ -29,7 +29,22 @@ function git(cwd: string, args: string[]): string {
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
   Object.assign(env, { LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
-  const r = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', cwd, ...args], { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
+  const prefix = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', cwd];
+  const run = (argv: string[]) => spawnSync('git', [...prefix, ...argv], { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
+  if (args[0] === 'diff') {
+    // Like gstack-lane's inert Git path, count raw files without running clean/process
+    // filters. Environment config preserves empty names and names containing '='.
+    const configured = run(['config', '--null', '--name-only', '--get-regexp', '^filter\\.']);
+    if (configured.error || (configured.status !== 0 && configured.status !== 1)) throw new AutobuilderOpsError('git_failed');
+    const filters = new Set(configured.stdout.split('\0').filter(k => k.startsWith('filter.') && k.lastIndexOf('.') >= 7).map(k => k.slice(0, k.lastIndexOf('.'))));
+    let count = 0;
+    for (const filter of filters) for (const [key, value] of [['clean', 'cat'], ['smudge', 'cat'], ['process', ''], ['required', 'false']]) {
+      env[`GIT_CONFIG_KEY_${count}`] = `${filter}.${key}`;
+      env[`GIT_CONFIG_VALUE_${count++}`] = value;
+    }
+    env.GIT_CONFIG_COUNT = String(count);
+  }
+  const r = run(args);
   if (r.error || r.status !== 0) throw new AutobuilderOpsError('git_failed'); // never relay repo paths or stderr
   return r.stdout;
 }
@@ -80,7 +95,7 @@ export function measureSize(lane: string, base: string) {
   const sha = git(root, ['rev-parse', '--verify', '--end-of-options', `${base}^{commit}`]).trim();
   function count(paths: string[]): number {
     // shortstat preserves existing binary-file and insertion+deletion semantics.
-    const stat = git(root, ['diff', '--no-ext-diff', '--shortstat', sha, '--', ...paths, ...EXCLUSIONS]);
+    const stat = git(root, ['diff', '--no-ext-diff', '--no-textconv', '--shortstat', sha, '--', ...paths, ...EXCLUSIONS]);
     let n = [...stat.matchAll(/(\d+) (?:insertion|deletion)/g)].reduce((s, m) => s + Number(m[1]), 0);
     const untracked = git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', ...paths, ...EXCLUSIONS]).split('\0').filter(Boolean);
     for (const f of untracked) {

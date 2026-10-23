@@ -85,6 +85,19 @@ test('CLI meter never executes repository fsmonitor hooks', () => {
   expect(result.status).toBe(0); expect(result.stdout.trim()).toBe('SHIP_METER: 1 prod + 0 test');
   expect(fs.existsSync(marker)).toBe(false);
 });
+for (const { name, driver } of [{ name: 'probe', driver: 'clean' }, { name: 'a=b', driver: 'clean' }, { name: '', driver: 'clean' }, { name: 'probe', driver: 'process' }]) {
+  test(`CLI meter bypasses repository filter ${JSON.stringify(name)} ${driver}`, () => {
+    const lane = repo(), outside = tmp(), marker = path.join(outside, 'called'), hook = path.join(outside, 'filter');
+    fs.writeFileSync(hook, '#!/bin/sh\nprintf called >> "$(dirname "$0")/called"\n' + (driver === 'process' ? 'exit 1\n' : 'cat\n'), { mode: 0o700 });
+    fs.writeFileSync(path.join(lane, '.git', 'info', 'attributes'), `app.ts filter=${name}\n`);
+    git(lane, 'config', `filter.${name}.${driver}`, hook);
+    git(lane, 'config', `filter.${name}.required`, 'true');
+    fs.writeFileSync(path.join(lane, 'app.ts'), 'old\nextra\n');
+    const result = cli('meter', lane, 'HEAD');
+    expect(result.status).toBe(0); expect(result.stdout.trim()).toBe('SHIP_METER: 1 prod + 0 test');
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+}
 function expectFailure(r: ReturnType<typeof cli>, op: 'state' | 'meter', reason: string) {
   expect(r.status).toBe(1);
   expect(r.stdout.trim()).toBe(op === 'meter' ? 'SHIP_METER FAIL: operation failed' : 'FAILED: state operation failed');
