@@ -29,7 +29,7 @@ async function main() {
   let base: string | undefined;
   let explicitFiles = false;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--') { explicitFiles = true; inputs = args.slice(i + 1); break; }
+    if (args[i] === '--') { explicitFiles = true; inputs.push(...args.slice(i + 1)); break; }
     if (args[i] === '--root' && args[i + 1]) root = args[++i];
     else if (args[i] === '--base' && args[i + 1]) base = args[++i];
     else if (args[i] === '--run-free') runFree = true;

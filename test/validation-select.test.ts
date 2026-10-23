@@ -140,3 +140,11 @@ test('state helper changes select the state and queue checks rather than only mo
   expect(report.free).toContainEqual(expect.objectContaining({ file: 'test/autobuilder-ops.test.ts' }));
   expect(report.free).toContainEqual(expect.objectContaining({ file: 'test/autobuilder-queue.test.ts' }));
 });
+
+test('mixed positional and delimited sources never discard an earlier changed dependency', () => {
+  const result = run(['scripts/test-focused.ts', '--', 'docs/unrelated-notes.md'], root, true);
+  expect(result.code, result.stderr).toBe(0);
+  expect(JSON.parse(result.text)).toMatchObject({ status: 'planned',
+    changedFiles: ['docs/unrelated-notes.md', 'scripts/test-focused.ts'],
+    free: [expect.objectContaining({ file: 'test/test-focused.test.ts' })] });
+});
