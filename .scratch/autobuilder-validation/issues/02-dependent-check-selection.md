@@ -4,7 +4,9 @@
 
 **Blocked by:** 01: Strict focused test execution
 
-**Status:** done
+**Status:** in-progress
+
+Implementation integrated; pinned Bun 1.4.0 revalidation is pending after the merger verified that retained worker runs used Bun 1.3.14. Functional acceptance evidence below remains historical and is not relabeled.
 
 - [x] Cover template/reference freshness, always-loaded contracts, section registration, context/parity and affected supervision.
 - [x] Show selection reasons; preview launches no test, monitor or model.
