@@ -159,15 +159,19 @@ function report(incoming: Event[], input: { path: string; sha256: string }) {
         retryAttempts: summarize(attemptEvidence.map(e => e.isRetry === null ? null : Number(e.isRetry))) };
     }) };
 }
-function main() {
-  if (process.argv.length !== 3) throw new UsageError('usage: bun scripts/autobuilder-usage.ts <normalized-events.json>');
-  const inputPath = path.resolve(process.argv[2]);
+/** Shared offline reader: acceptance must recompute using the same validation and deduplication. */
+export function readUsageReport(file: string) {
+  const inputPath = path.resolve(file);
   let raw: Buffer;
   try { raw = fs.readFileSync(inputPath); } catch { throw new UsageError('cannot_read_input'); }
   let input: unknown;
   try { input = JSON.parse(raw.toString('utf8')); } catch { throw new UsageError('invalid_json'); }
   const events = parseEvents(input);
-  console.log(JSON.stringify(report(events, { path: inputPath, sha256: createHash('sha256').update(raw).digest('hex') }), null, 2));
+  return report(events, { path: inputPath, sha256: createHash('sha256').update(raw).digest('hex') });
+}
+function main() {
+  if (process.argv.length !== 3) throw new UsageError('usage: bun scripts/autobuilder-usage.ts <normalized-events.json>');
+  console.log(JSON.stringify(readUsageReport(process.argv[2]), null, 2));
 }
 if (import.meta.main) {
   try { main(); } catch (error) {

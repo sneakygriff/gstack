@@ -108,7 +108,73 @@ scope. The linked report is the source attribution, not an authenticated witness
 
 Keep required but unavailable model evaluations in `checks`, with no record and
 an unknown scope explaining the missing prerequisites. They appear unexecuted
-and missing, with their scope and unresolved prerequisites visible. The free
-capture command cannot run these evaluations; a future adapter for their native
-receipts must establish the same consumed-input evidence before granting credit.
-No numerical token savings or adoption decision follows from this command.
+and missing, with their scope and unresolved prerequisites visible.
+
+## Native model outcomes
+
+For an existing `EvalCollector` result, set a check's `kind` to `native-eval`,
+`record` to its native JSON path, and `cases` to the exact selected case names.
+Keep `files`, `inputs`, `environment` and `scope` as above. Omitted `kind` retains
+the focused-run behavior. The free `capture` command rejects native checks;
+run model evaluations only through their existing harness and billing guards.
+
+Assembly reads `EvalResult` schemas 1 and 2 from `test/helpers/eval-store.ts`,
+reconciles selected case names and outcome, execution/reuse, cost and duration
+counters against the entries, and preserves revision, timestamp, CLI version,
+attempt and original reuse provenance. Partial records and absent model or reuse
+metadata are reported explicitly. Manual-review entries do not become scored
+passes; failed attempts remain visible even when a later attempt passes.
+
+These native records **cannot currently earn applicability credit**: they lack
+complete consumed source/instruction fingerprints and runtime/environment
+binding. Today's declared input hashes are displayed as current context only.
+An original cache `input_key` is preserved but does not stand in for its complete
+consumed-input identity and passing proof. The workflow cache's own eligibility
+and reuse policy remain unchanged. Native results therefore retain their
+historical outcome while applicability is incomplete. Arbitrary passed JSON or
+contradictory counters are reported as incomplete evidence.
+
+## Usage measurements
+
+Add a separate `measurements` array to the same plan:
+
+```json
+{
+  "measurements": [{
+    "id": "review-usage",
+    "report": "/absolute/evidence/usage-report.json",
+    "inputs": ["src/example.ts"],
+    "instructions": ["evidence/expanded-prompt.txt", "evidence/rubric.txt"],
+    "environment": ["MODEL_ENDPOINT"],
+    "scope": {
+      "status": "declared-complete",
+      "note": "Declared source and instruction identifiers match this capture.",
+      "unresolved": []
+    }
+  }]
+}
+```
+
+This is an additional plan field, not a standalone plan. `report` resolves against
+the plan directory; input and instruction identifiers resolve against `root`.
+Each event must describe this same declared scope. Split measurements for
+events with different consumed scopes. Generate the report with the existing
+`autobuilder-usage.ts` command and retain its normalized input and original
+evidence files.
+
+Assembly verifies the report's normalized-input digest and recomputes the entire
+report through the existing validator and deduplicator. It checks every original
+evidence digest, then reconciles declared source/instruction identifiers and
+hashes against the retained events and current files. Local evidence references
+resolve against the normalized input directory; remote or opaque locators remain
+unverifiable offline. The manifest retains report/input/evidence fingerprints,
+deduplicated events, unknown usage fields and groups. Changed consumed bytes are
+`stale`; missing or contradictory artifacts have `consistency: incomplete`.
+
+Even consistent measurements remain `applicability: incomplete` because usage
+v1 has no execution-environment snapshot and its consumed fingerprints are
+caller-attributed. Declared environment names are reported as missing capture
+evidence, never filled from today's environment. Measurements always receive
+zero coverage credit and do not affect the quality-check aggregate: only the
+listed `checks` determine its scoped status. A usage report cannot replace a
+missing API evaluation, prove quality, establish savings or certify adoption.
