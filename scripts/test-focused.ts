@@ -39,6 +39,7 @@ async function main() {
       wallTimeoutMs = Number(args[++i]) * 1000;
       if (!Number.isFinite(wallTimeoutMs) || wallTimeoutMs <= 0) throw new Error('Invalid wall timeout');
     }
+    else if (!args[i].startsWith('-')) inputs.push(args[i]);
     else throw new Error(`Unknown option: ${args[i]}; use -- before exact test paths`);
   }
   root = fs.realpathSync(root);
