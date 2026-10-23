@@ -31,9 +31,12 @@ for (const file of files) {
 // Aggregate stats
 const e2eRuns = results.filter(r => r.tier === 'e2e');
 const judgeRuns = results.filter(r => r.tier === 'llm-judge');
-const totalCost = results.reduce((s, r) => s + (r.total_cost_usd || 0), 0);
-const avgE2ECost = e2eRuns.length > 0 ? e2eRuns.reduce((s, r) => s + r.total_cost_usd, 0) / e2eRuns.length : 0;
-const avgJudgeCost = judgeRuns.length > 0 ? judgeRuns.reduce((s, r) => s + r.total_cost_usd, 0) / judgeRuns.length : 0;
+const totalCost = results.some(r => r.total_cost_usd == null) ? null : results.reduce((s, r) => s + r.total_cost_usd!, 0);
+const averageCost = (runs: EvalResult[]) => !runs.length ? 0 : runs.some(r => r.total_cost_usd == null)
+  ? null : runs.reduce((sum, run) => sum + run.total_cost_usd!, 0) / runs.length;
+const avgE2ECost = averageCost(e2eRuns);
+const avgJudgeCost = averageCost(judgeRuns);
+const costText = (cost: number | null) => cost == null ? 'unknown' : `$${cost.toFixed(2)}`;
 
 // Duration + turns from E2E runs
 const avgE2EDuration = e2eRuns.length > 0
@@ -58,7 +61,7 @@ for (const r of e2eRuns) {
     const stats = testEfficiency.get(t.name)!;
     if (t.turns_used !== undefined) stats.turns.push(t.turns_used);
     if (t.duration_ms > 0) stats.durations.push(t.duration_ms);
-    if (t.cost_usd > 0) stats.costs.push(t.cost_usd);
+    if (t.cost_usd != null) stats.costs.push(t.cost_usd);
   }
 }
 
@@ -128,13 +131,13 @@ console.log('');
 console.log('Eval Summary');
 console.log('═'.repeat(70));
 console.log(`  Total runs:        ${results.length} (${e2eRuns.length} e2e, ${judgeRuns.length} llm-judge)`);
-console.log(`  Total spend:       $${totalCost.toFixed(2)}`);
+console.log(`  Total spend:       ${costText(totalCost)}`);
 if (manualAccepted.length) {
   console.log(`  Manual accepted:   ${manualAccepted.length} unscored provider refusal(s)`);
   for (const entry of manualAccepted) console.log(`    ${entry.name}: approved by ${entry.approvedBy} (${entry.approvalUrl})`);
 }
-console.log(`  Avg cost/e2e:      $${avgE2ECost.toFixed(2)}`);
-console.log(`  Avg cost/judge:    $${avgJudgeCost.toFixed(2)}`);
+console.log(`  Avg cost/e2e:      ${costText(avgE2ECost)}`);
+console.log(`  Avg cost/judge:    ${costText(avgJudgeCost)}`);
 if (avgE2EDuration > 0) {
   console.log(`  Avg duration/e2e:  ${Math.round(avgE2EDuration / 1000)}s`);
 }
@@ -159,9 +162,9 @@ if (testEfficiency.size > 0 && e2eRuns.length >= 2) {
   for (const [name, stats] of sorted) {
     const avgT = Math.round(stats.turns.reduce((a, b) => a + b, 0) / stats.turns.length);
     const avgD = Math.round(stats.durations.reduce((a, b) => a + b, 0) / stats.durations.length / 1000);
-    const avgC = (stats.costs.reduce((a, b) => a + b, 0) / stats.costs.length).toFixed(2);
+    const avgC = stats.costs.length !== stats.turns.length ? 'unknown' : costText(stats.costs.reduce((a, b) => a + b, 0) / stats.costs.length);
     const label = name.length > 30 ? name.slice(0, 27) + '...' : name.padEnd(30);
-    console.log(`    ${label}  $${avgC}  ${avgT}t  ${avgD}s  (${stats.turns.length} runs)`);
+    console.log(`    ${label}  ${avgC}  ${avgT}t  ${avgD}s  (${stats.turns.length} runs)`);
   }
   console.log('─'.repeat(70));
 }

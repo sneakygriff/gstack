@@ -442,6 +442,7 @@ async function runWorkflowJudge(opts: {
   let scores: JudgeScore | undefined;
   let manualReview: ManualJudgeReview | undefined;
   let customInputMetadata: { prompt: string; model: string } | undefined;
+  let requestMetadata: { prompt: string; model: string; model_source: 'resolved-request'; provider_model: null } | undefined;
   let reused: ReturnType<ReturnType<typeof prepareWorkflowJudgeCache>['lookup']> = null;
   let timer: ReturnType<typeof setTimeout>;
   let rejectStopped: (error: Error) => void;
@@ -460,6 +461,7 @@ async function runWorkflowJudge(opts: {
       duration_ms: Math.max(0, performance.now() - started),
       cost_usd: reused || !scores ? 0 : 0.02,
       execution: reused ? 'reused' : 'executed',
+      ...requestMetadata,
       ...customInputMetadata,
       ...(manualReview ? { manual_review: manualReview } : {}),
       ...(reused ? { reused_from: { input_key: reused.reuse.key, run_id: reused.reuse.source.runId,
@@ -501,6 +503,7 @@ async function runWorkflowJudge(opts: {
       startMarker: opts.startMarker, endMarker: opts.endMarker, references: opts.references });
     checkActive();
     const prompt = buildWorkflowJudgePrompt(opts, input);
+    requestMetadata = { prompt, model: resolveEvalModel('judge', opts.model), model_source: 'resolved-request', provider_model: null };
     if (opts.readInput) customInputMetadata = { prompt, model: resolveEvalModel('judge', opts.model) };
     const cache = prepareWorkflowJudgeCache({ ...opts, root: ROOT, thresholds, prompt, attempt });
     checkActive();

@@ -40,7 +40,7 @@ export interface HeartbeatData {
 
 export interface PartialData {
   tests: Array<Partial<EvalTestEntry> & Pick<EvalTestEntry, 'name' | 'passed' | 'cost_usd' | 'duration_ms'>>;
-  total_cost_usd: number;
+  total_cost_usd: number | null;
   _partial?: boolean;
 }
 
@@ -69,7 +69,7 @@ export function readPartialResults(evalDir = EVAL_DIR): PartialData | null {
   // entire current suite snapshot, including its own retries. Old retries and
   // retired tests must not leak back in from the legacy snapshot.
   const tests = [...legacy.filter(test => !namedSuites.has(test.suite ?? null)), ...named];
-  return { tests, total_cost_usd: tests.reduce((sum, test) => sum + test.cost_usd, 0), _partial: true };
+  return { tests, total_cost_usd: tests.some(test => test.cost_usd == null) ? null : tests.reduce((sum, test) => sum + test.cost_usd!, 0), _partial: true };
 }
 
 /** Check if a process is alive (signal 0 = existence check, doesn't kill). */
@@ -114,7 +114,7 @@ export function renderDashboard(heartbeat: HeartbeatData | null, partial: Partia
     for (const t of partial.tests) {
       const manual = evalEntryOutcome(t) === 'manual-review';
       const icon = manual ? 'M' : evalEntryOutcome(t) === 'passed' ? '\u2713' : '\u2717';
-      const cost = `$${t.cost_usd.toFixed(2)}`;
+      const cost = t.cost_usd == null ? 'unknown' : `$${t.cost_usd.toFixed(2)}`;
       const dur = `${Math.round(t.duration_ms / 1000)}s`;
       const turns = t.turns_used !== undefined ? `${t.turns_used} turns` : '';
       const name = t.name.length > 30 ? t.name.slice(0, 27) + '...' : t.name.padEnd(30);
@@ -142,9 +142,9 @@ export function renderDashboard(heartbeat: HeartbeatData | null, partial: Partia
 
   // Summary
   const completedCount = partial?.tests?.length || 0;
-  const totalCost = partial?.total_cost_usd || 0;
+  const totalCost = partial ? partial.total_cost_usd : 0;
   const running = heartbeat?.status === 'running' ? 1 : 0;
-  lines.push(` Completed: ${completedCount}  Running: ${running}  Cost: $${totalCost.toFixed(2)}  Elapsed: ${formatDuration(elapsed)}`);
+  lines.push(` Completed: ${completedCount}  Running: ${running}  Cost: ${totalCost == null ? 'unknown' : `$${totalCost.toFixed(2)}`}  Elapsed: ${formatDuration(elapsed)}`);
   const manualAccepted = partial?.tests?.filter(t => evalEntryOutcome(t) === 'manual-review').length ?? 0;
   if (manualAccepted) lines.push(` Manual accepted: ${manualAccepted} unscored provider refusal(s)`);
 

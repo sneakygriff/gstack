@@ -118,21 +118,52 @@ Keep `files`, `inputs`, `environment` and `scope` as above. Omitted `kind` retai
 the focused-run behavior. The free `capture` command rejects native checks;
 run model evaluations only through their existing harness and billing guards.
 
-Assembly reads `EvalResult` schemas 1 and 2 from `test/helpers/eval-store.ts`,
+Assembly reads `EvalResult` schemas 1, 2 and 3 from `test/helpers/eval-store.ts`,
 reconciles selected case names and outcome, execution/reuse, cost and duration
 counters against the entries, and preserves revision, timestamp, CLI version,
 attempt and original reuse provenance. Partial records and absent model or reuse
 metadata are reported explicitly. Manual-review entries do not become scored
 passes; failed attempts remain visible even when a later attempt passes.
 
-These native records **cannot currently earn applicability credit**: they lack
-complete consumed source/instruction fingerprints and runtime/environment
-binding. Today's declared input hashes are displayed as current context only.
-An original cache `input_key` is preserved but does not stand in for its complete
-consumed-input identity and passing proof. The workflow cache's own eligibility
-and reuse policy remain unchanged. Native results therefore retain their
-historical outcome while applicability is incomplete. Arbitrary passed JSON or
-contradictory counters are reported as incomplete evidence.
+For a **new** run, set `GSTACK_ACCEPTANCE_PLAN` to this plan and
+`GSTACK_ACCEPTANCE_CHECK` to the native check ID before starting its existing
+harness. `EvalCollector` validates the configuration and snapshots declared
+inputs/environment at construction, before its caller starts model work. It
+snapshots again at finalization and emits schema 3 with a `native-eval-binding/v1`
+binding: original run UUID, timestamps, declaration identity, both snapshots and
+a digest of the finalized native result. Environment values are hashed. Bun
+bytes/version/platform/architecture and the binding/collector implementation are
+included automatically. Declare provider executable/package bytes, model and
+endpoint configuration, source, instructions and fixtures in `inputs` and
+`environment`; the operator's completeness declaration remains necessary.
+
+The workflow-judge collector is constructed at module load, before input building
+and provider calls. Workflow records retain the actual constructed prompt and
+resolved request model. Generic section-read cases create an opt-in collector at
+registration, before fixture/capture execution, record the unchanged assertions
+and public tool calls, and finalize in `afterAll`. Request model identity is
+labeled `model_source: resolved-request`; `provider_model: null` does not assert
+an observed provider response identity. Missing usage remains unknown. Schema 3
+allows `cost_usd` and total cost to be null when no estimate exists; native
+history/summary/watch/comparison readers retain that distinction.
+
+Assembly can credit a finalized, consistent passing bound run when its declared
+scope is complete and current inputs/environment/runtime match its unchanged
+start/end snapshots. Native retry policy follows the final attempt per case;
+all prior attempts and failures remain in counters and provenance. Skipped or
+unstarted expected cases are absent from native entries and block exact case
+coverage; the adapter does not invent a skip count. Partial runs, corrupt result
+digests, missing metadata, changed inputs, unknown scope and unsupported reuse
+remain zero-credit. Bound filenames include the run UUID to preserve originals.
+
+An original bound artifact can be reused with its original identity. Entry-level
+cache reuse is still incomplete here: its `input_key` and origin labels do not
+provide the complete origin binding. Existing cache eligibility/policy is
+unchanged. Old unbound records retain their outcomes but cannot gain credit by
+hashing today's checkout; late opt-in after collector construction does not bind
+them. Default unbound numeric-cost runs keep schema 2 and existing behavior.
+This is local, operator-declared provenance, not authenticated evidence or proof
+against a harness that deliberately fabricates records.
 
 ## Usage measurements
 

@@ -364,6 +364,23 @@ describe('eval:compare CLI (scripts/eval-compare.ts)', () => {
 // ── eval-summary ─────────────────────────────────────────────────────────────
 
 describe('eval:summary CLI (scripts/eval-summary.ts)', () => {
+  test('unknown native cost remains unknown in history, summary and flake JSON', () => {
+    const file = writeRun(evalDir, { timestamp: new Date().toISOString(), tests: [{ name: 'unknown-cost', passed: true }] });
+    const body = JSON.parse(fs.readFileSync(file, 'utf8'));
+    body.total_cost_usd = null; body.tests[0].cost_usd = null;
+    fs.writeFileSync(file, JSON.stringify(body));
+    for (const script of ['eval-list.ts', 'eval-summary.ts']) {
+      const result = runEvalCli(script);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('unknown');
+      if (script === 'eval-summary.ts') expect(result.stdout).toContain('Total spend:       unknown');
+      else expect(result.stdout).not.toContain('$0.00');
+    }
+    const ranked = runEvalCli('eval-flake-rank.ts', '--dir', evalDir, '--json');
+    expect(ranked.status, ranked.stderr).toBe(0);
+    expect(JSON.parse(ranked.stdout).tests[0].totalCostUsd).toBeNull();
+  });
+
   test('reports manual provenance without inventing a scored flake', () => {
     const manual = manualReviewFixture();
     writeRun(evalDir, { tier: 'llm-judge', timestamp: '2026-01-01T01:00:00Z',
