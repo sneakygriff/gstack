@@ -60,7 +60,9 @@
     "eval:bg:pr": "bin/gstack-detach --label evals-pr --lock gstack-evals --timeout 92820 -- bun run test:pr",
     "eval:bg:release": "bin/gstack-detach --label evals-release --lock gstack-evals --timeout 116700 -- bun run test:release",
     "test:focused": "bun run scripts/test-focused.ts",
-    "validation:usage": "bun run scripts/autobuilder-usage.ts"
+    "validation:usage": "bun run scripts/autobuilder-usage.ts",
+    "validation:select": "bun run scripts/validation-select.ts",
+    "validation:acceptance": "bun run scripts/autobuilder-acceptance.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",

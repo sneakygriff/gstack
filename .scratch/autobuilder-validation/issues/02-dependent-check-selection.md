@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Strict focused test execution
 
-**Status:** in-progress
+**Status:** done
 
 Implementation integrated; pinned Bun 1.4.0 revalidation is pending after the merger verified that retained worker runs used Bun 1.3.14. Functional acceptance evidence below remains historical and is not relabeled.
 
@@ -21,3 +21,5 @@ Implementation integrated; pinned Bun 1.4.0 revalidation is pending after the me
 - Runtime for all ticket 02 evidence was Bun 1.3.14 (`d1632b29`), `TMPDIR=/private/tmp`, not the Bun 1.4.0 used by some earlier tickets. This closure does not claim verification on another runtime or final release acceptance.
 - Retained evidence: `/Users/stefanandrei/Skill Master/research/validation-orchestration/02-evidence/index.json` and its `final-public`, `focused`, and `freshness` receipts/logs. Merger read those receipts and matched all seven changed-file SHA-256 values against the final branch.
 - Clean tracked state/current ancestry and scoped seven-file diff verified; merge was conflict-free and whitespace check passed. No tests, full suite, providers, package edits, installed-skill changes or review-gate changes were performed during integration. Parent owns the package alias.
+
+Pinned-runtime verification: Bun 1.4.0 confirmed by executable path/version and child logs; public CLI 12 pass, adjacent six files 123 pass, freshness 1 pass, all zero failures/skips. Separate runs overlap and are not summed. Evidence: research/validation-orchestration/02-evidence/bun-1.4.0 in the surrounding workspace. Earlier Bun 1.3.14 records remain historical.
