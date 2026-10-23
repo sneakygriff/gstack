@@ -130,5 +130,17 @@
     "historicalTimeout": "unreproduced-unresolved",
     "limitsChanged": false,
     "fullSuiteRerun": false
+  },
+  "snapshotScope": "Historical validation snapshot before user-authorized fork publication and local installation; transition outcomes are reported separately in the PR.",
+  "forkIntegrationAuthorization": {
+    "authorized": true,
+    "scope": "PR into sneakygriff/gstack skills/port-1.91.9, merge and update local installed skill",
+    "knownGaps": [
+      "full free suite incomplete/timeouts",
+      "model evaluations unexecuted",
+      "live comparisons unexecuted",
+      "token and speed savings unmeasured"
+    ],
+    "validationVerdictsUnchanged": true
   }
 }

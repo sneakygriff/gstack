@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.91.10.0] - 2026-10-23
+
+### Added
+- Autobuilder instruction-size and observed-usage reports, with unknown provider costs preserved explicitly.
+- Deterministic state helpers and an opt-in continuous task queue with dependency-aware parallel admission.
+- Strict focused validation, dependent-check previews and digest-bound acceptance evidence.
+- Opt-in lifecycle diagnostics retained before temporary fixture cleanup.
+
+### Changed
+- Load detailed autobuilder workflow and review instructions only when needed, preserving existing review gates and model floors.
+- Harden helper startup isolation and error diagnostics; keep incomplete reviews blocked.
+- Make path-boundary and relink tests portable across temporary checkouts and paths containing spaces.
+
+### Validation status
+- Fork integration is user-authorized with known incomplete full-suite validation and unstarted empirical evaluations. Token savings and representative speed improvements remain unmeasured; historical timeouts remain unresolved.
+
 ## [Unreleased — fork: port onto upstream v1.91.9.0] - 2026-09-30
 
 Re-port of the fork (`skills/port-1.68.2`, 12 commits) onto upstream v1.91.9.0 via

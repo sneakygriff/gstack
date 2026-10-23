@@ -1,8 +1,8 @@
 # Autobuilder validation: local implementation handoff
 
-Status: **implementation retained; adoption blocked**. Six scoped tickets (01-06) are done; empirical tickets 07/08 and dependent adoption ticket 09 remain blocked. This is a partial delivery of the specification, not full-spec completion or release acceptance.
+Evidence status: **implementation retained; empirical acceptance blocked**. Six scoped tickets (01-06) are done; empirical tickets 07/08 and dependent adoption ticket 09 remain blocked. This is a partial delivery of the specification, not full-spec completion or release acceptance.
 
-Integration branch: `codex/autobuilder-validation`. Last full-suite code revision: `9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a`; tree `f04ef5a0a637f4a003b8ced0eedaec105e6fcf3e`. Specification/review base: `ce0fe916d2550b21d6eb116aee483786060f730f`. Subsequent path-test repairs are recorded in the [path and timeout follow-up](path-timeout-followup.md); the historical full-suite outcome remains bound to its original revision. All changes remain local; the installed skill has not been replaced.
+Integration branch: `codex/autobuilder-validation`. Last full-suite code revision: `9a7c8a2c764f3b34034242a2dfc9862dc9cb2f6a`; tree `f04ef5a0a637f4a003b8ced0eedaec105e6fcf3e`. Specification/review base: `ce0fe916d2550b21d6eb116aee483786060f730f`. Subsequent path-test repairs are recorded in the [path and timeout follow-up](path-timeout-followup.md); the historical full-suite outcome remains bound to its original revision. The original validation snapshot preceded publication and local installation. On 23 October 2026 the user authorized a fork PR, merge and local installation despite the disclosed validation gaps. This authorization does not change any test or review verdict; publication and installed-revision confirmation are reported separately in the PR.
 
 ## Path and timeout follow-up
 
