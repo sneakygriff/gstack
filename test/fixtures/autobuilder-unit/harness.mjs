@@ -123,6 +123,68 @@ const idx = (calls, re) => calls.findIndex(c => re.test(c.label))
 const scenarios = {
   // ---- carried over from the v1 harness (expectations updated to the round-1 rules) ----
   cleanFull: { expect: (r, c) => r.status === 'READY' && r.pushed_head === SHA('f') },
+  verdictParserOff: { // flag absent: no shadow step, no env prefix on the adjudicator
+    expect: (r, c) => r.status === 'READY' && !has(c, /verdict shadow/) && !c.some(x => x.prompt.includes('GSTACK_VERDICT_PARSER')),
+  },
+  verdictParserOtherValue: {
+    args: { verdictParser: 'on' },
+    expect: (r, c) => r.status === 'READY' && !has(c, /verdict shadow/) && !c.some(x => x.prompt.includes('GSTACK_VERDICT_PARSER')),
+  },
+  verdictParserShadow: { // regex decides: Jev disagreeing changes no verdict, the seats and CI only gain a tag
+    args: { verdictParser: 'jev' },
+    override(L) { if (/verdict shadow/.test(L)) return { line: '{"verdict":"PRESENT_CLEAN","parser":"shadow","jev":"PRESENT_P1"}' } },
+    expect: (r, c) => {
+      const shadowC = c.find(x => /verdict shadow r1 seat C/.test(x.label)), shadowCI = c.find(x => /verdict shadow CI/.test(x.label)), seatX = c.find(x => /r1 seat X/.test(x.label))
+      return r.status === 'READY'
+        && /--mode adjudicate --regex PRESENT_CLEAN /.test(shadowC.prompt) && /--file '.*seat-c\.md'/.test(shadowC.prompt) && /GSTACK_VERDICT_PARSER=jev bun /.test(shadowC.prompt)
+        && /CI status=READY/.test(shadowCI.prompt) && /--mode ci-status --regex pass /.test(shadowCI.prompt)
+        && /\$\(GSTACK_VERDICT_PARSER=jev ~\/\.claude\/skills\/gstack\/bin\/gstack-lane adjudicate/.test(seatX.prompt)
+        && c.some(x => /consolidate/.test(x.label) && /"parser":"shadow"/.test(x.prompt))
+    },
+  },
+  verdictParserShadowP1: { // a P1 seat is labelled PRESENT_P1, and Jev reading it clean leaves the gate failing on it
+    args: { verdictParser: 'jev' },
+    override(L) {
+      if (/r1 seat C/.test(L) && !/shadow/.test(L)) return Object.assign({}, SEATC_OK, { verdict: 'FAIL', p1: ['bug'], final_line: 'REVIEW_COMPLETE: findings=1' })
+      if (/verdict shadow/.test(L)) return { line: '{"verdict":"PRESENT_P1","parser":"shadow","jev":"PRESENT_CLEAN"}' }
+    },
+    expect: (r, c) => /--regex PRESENT_P1 /.test(c.find(x => /verdict shadow r1 seat C/.test(x.label)).prompt) && c.some(x => /consolidate/.test(x.label) && /"verdict":"FAIL"/.test(x.prompt)),
+  },
+  verdictParserNoMarker: { // a drifted marker stays INVALID, and is the case the shadow exists to measure
+    args: { verdictParser: 'jev' },
+    override(L) {
+      if (/r1 seat C/.test(L) && !/shadow/.test(L)) return Object.assign({}, SEATC_OK, { final_line: 'done' })
+      if (/verdict shadow/.test(L)) return { line: '{"verdict":"INVALID","parser":"shadow","jev":"PRESENT_CLEAN"}' }
+    },
+    expect: (r, c) => /--regex INVALID /.test(c.find(x => /verdict shadow r1 seat C/.test(x.label)).prompt) && c.some(x => /consolidate/.test(x.label) && /"status":"INVALID"/.test(x.prompt)),
+  },
+  verdictParserWrongModelNotShadowed: { // a coerced runtime model is deterministic: the content verdict is never asked for
+    args: { verdictParser: 'jev' },
+    override(L) { if (/r1 seat C/.test(L) && !/shadow/.test(L)) return Object.assign({}, SEATC_OK, { actual_model: 'claude-haiku-5-5' }) },
+    expect: (r, c) => !has(c, /verdict shadow r1 seat C/),
+  },
+  verdictParserSeatCL2: { // the L2 relay's SEATC line goes through seatc mode; p1 > 0 is BLOCKED and the line is piped with its newline
+    args: { verdictParser: 'jev' },
+    override(L, o) {
+      if (/verdict shadow/.test(L)) return { line: '{"verdict":"BLOCKED","parser":"shadow","jev":"READY"}' }
+      if (/^r1 seat C \(L2/.test(L)) return { member: 'seat_c', status: 'PRESENT', verdict: 'FAIL', class: 'ok', p1_count: 2, verdict_line: 'SEATC status=PRESENT class=ok reason=complete p1=2 runtime_model=claude-opus-5-5' }
+      if (/^r1 seat C/.test(L) && o.model !== 'haiku') return null
+    },
+    expect: (r, c) => {
+      const p = c.find(x => /verdict shadow r1 seat C L2/.test(x.label)).prompt
+      return /--mode seatc --regex BLOCKED /.test(p) && p.includes("printf '%s\\n' 'SEATC status=PRESENT") && c.some(x => /consolidate/.test(x.label) && /"parser":"shadow"/.test(x.prompt))
+    },
+  },
+  verdictParserRelayDead: { // the shadow relay dying is a fallback tag; the unit still reaches READY
+    args: { verdictParser: 'jev' },
+    override(L) { if (/verdict shadow/.test(L)) return { line: 'garbage' } },
+    expect: (r, c) => r.status === 'READY' && c.some(x => /consolidate/.test(x.label) && /"parser":"fallback"/.test(x.prompt)),
+  },
+  verdictParserRelayThrows: {
+    args: { verdictParser: 'jev' },
+    override(L) { if (/verdict shadow/.test(L)) throw new Error('limit') },
+    expect: (r, c) => r.status === 'READY' && c.some(x => /consolidate/.test(x.label) && /"parser":"fallback"/.test(x.prompt)),
+  },
   p1ThenP2: {
     override(L) {
       if (/r1 seat X/.test(L)) return Object.assign({}, SEATX_OK, { verdict: 'FAIL', verdict_line: 'VERDICT=PRESENT_P1 reason=p1_found p1_count=1 runtime_model=gpt-6-astra' })
