@@ -53,6 +53,8 @@ export const meta = {
 //                      T3 L2 Opus 5.5 -> L3 Astra -> L1 Opus 5.5). The tier guard runs BEFORE a `model` override:
 //                      a Sonnet / Haiku / Luna override on a T2/T3 task, Sol on a T3 Codex task, or Luna on any Codex
 //                      task is refused (recorded) and the tier default runs.
+//   verdictParser      'jev' turns on the lib/verdict-parser.ts shadow (GSTACK_VERDICT_PARSER=jev; this VM has no process.env, so
+//                      the orchestrator passes the flag here). Any other value, or absent: off, prompts unchanged
 //   context            unit context for the brief refresh (and the PATCH request)
 //   gateFocus          extra focus text for both gate seats
 //   dockerFocus        replaces the default Docker smoke instructions
@@ -158,6 +160,7 @@ const AUTO4 = A.autoFourth !== false // retro-2026-10-19 item 4
 const SEATC = A.seatCModel || 'fable' // v1.8 decision D-B
 const SEATX = 'gpt-6-astra' // v1.8 decision D-B + R1: Seat X's first attempt is always Astra (seatXModel is validated in main)
 const LITE_CAP = Number(A.liteLocCap) > 0 ? Number(A.liteLocCap) : 400 // v1.8 decision D-E
+const VERDICT_JEV = A.verdictParser === 'jev'
 // retro-2026-10-19 item 6: production-LOC meter thresholds (operator to confirm)
 const PROD_WARN = 2000, PROD_CAP = 2500, PROD_LINEAR_CAP = 3000, TEST_WARN = 5000
 const GL = '~/.claude/skills/gstack/bin/gstack-lane'
@@ -775,12 +778,31 @@ function seatCL1Check(env, chainModel, first) {
   return Object.assign(e, { status: 'PRESENT', verdict: p1 ? 'FAIL' : 'PASS' })
 }
 
+// lib/verdict-parser.ts, shadow only. This VM cannot import it, so a rote agent runs its CLI, which logs Jev's reading to
+// $RUN_DIR. The result is only ever a tag: a dead relay, a throw or an unrecognized line is 'fallback', and no verdict changes.
+async function shadowVerdict(mode, regex, input, label, ph) {
+  const feed = input.line === undefined ? '' : `printf '%s\\n' ${shq(input.line)} | `
+  const src = input.file ? `--file ${shq(input.file)}` : `--source ${shq(input.source)}`
+  const cmd = `${feed}GSTACK_VERDICT_PARSER=jev bun ${SK}/lib/verdict-parser.ts --mode ${mode} --regex ${regex} --run-dir ${shq(RUN)} ${src}`
+  let r = null
+  try { r = await ask(`Rote: run exactly this one command with Bash, timeout 60000, and copy its one output line verbatim into line. Run nothing else; never read or judge any content.\n${cmd}`, { label, phase: ph, model: 'haiku', effort: 'low', schema: LINE }) } catch { return 'fallback' }
+  return (String((r && r.line) || '').match(/"parser":"(shadow|fallback)"/) || [])[1] || 'fallback'
+}
+
 // v1.8 decision D-B: Seat C = Fable high (L1) -> claude-opus-5-5 high (L1) -> claude-opus-5-5 high (L2)
 async function seatC(round, seatScope, gs, prev) {
   const core = seatCCore(round, seatScope, gs, prev)
   const first = (A.synModel && round >= (A.synGateFrom || 99)) ? A.synModel : SEATC
   const c = await callChain(`r${round} seat C`, uniq([first, 'claude-opus-5-5']), `${core}\n${MARKER_RULE}\nReturn the envelope (member=seat_c; status PRESENT only when you completed the review and the report ends with the REVIEW_COMPLETE line, else INVALID; final_line = the report's last non-empty line, verbatim; actual_model = the literal model id you are running as, from your own system context (never the name you were asked for); verdict PASS or FAIL, FAIL iff any [P1]; p1 = one line per [P1]; p2_count; report).`, { label: `r${round} seat C`, phase: 'Gate', effort: 'high', schema: GATE })
-  if (c.r) return seatCL1Check(c.r, c.model, first)
+  if (c.r) {
+    const e = seatCL1Check(c.r, c.model, first)
+    // only the content verdict is shadowed: a wrong runtime model is INVALID whatever the review says
+    if (VERDICT_JEV && (e.status === 'PRESENT' || /no completion marker/.test(e.notes || ''))) {
+      const regex = e.status !== 'PRESENT' ? 'INVALID' : e.verdict === 'FAIL' ? 'PRESENT_P1' : 'PRESENT_CLEAN'
+      e.parser = await shadowVerdict('adjudicate', regex, { file: `${R}/gate-${U}-r${round}-seat-c.md` }, `verdict shadow r${round} seat C`, 'Gate')
+    }
+    return e
+  }
   const T = safe(`gate-${U}-r${round}-c-l2`)
   const label = `r${round} seat C (L2 claude-opus-5-5)`
   const rng = seatScope === 'delta' ? `${prev}..${gs.reviewed_sha}` : `${BASE}...${gs.reviewed_sha}`
@@ -809,6 +831,7 @@ Envelope: member=seat_c; requested_model=claude-opus-5-5; runtime_model = the ru
   else if (st !== 'ABSENT') Object.assign(e, { status: 'INVALID', verdict: 'INVALID', notes: `relay reported ${st || 'no status'} without a SEATC line (${vl.slice(0, 120)})` })
   if (String(e.status).toUpperCase() === 'PRESENT' && !seatCModelOk(e.runtime_model)) Object.assign(e, { status: 'INVALID', verdict: 'INVALID', notes: `runtime model ${e.runtime_model || 'null'} is not on the Seat C allowlist` })
   if (String(e.status).toUpperCase() !== 'PRESENT') incidents.push({ step: `r${round} seat C`, model: 'claude-opus-5-5 (L2)', status: e.status, class: e.class || 'error' })
+  if (VERDICT_JEV && tok) e.parser = await shadowVerdict('seatc', tok === 'PRESENT' && p1n === 0 ? 'READY' : 'BLOCKED', { line: vl, source: `${UNIT}-r${round}-seat-c-l2` }, `verdict shadow r${round} seat C L2`, 'Gate')
   return e
 }
 
@@ -830,7 +853,7 @@ ${review}
 ABU_SEATX_EOF
 } > "$ADIR/prompt.txt"
 4. The helper command is: ${GL} run --run-dir ${RUN} --lane l3 --mode review --model ${model} --effort high --timeout ${to} --cwd ${RUN}/wt/${T} --prompt-file "$ADIR/prompt.txt" --out "$OUT". ${POLL('<that command>', '$OUT', /astra/.test(model) ? 1620 : 1200)} The helper owns the one medium retry on timeout.
-5. SUMMARY=$(${GL} summary --out "$OUT" 2>&1); VERDICT=$(${GL} adjudicate --out "$OUT" --seat codex --gate-class ${GATE_CLASS} --reviewed-sha ${sha} --requested-model ${model} 2>/dev/null); RC=$?; CLASS = the class field of "$OUT.status.json" ("error" when missing); RESET = next_probe_at of l3 in ${RUN}/lanes.json (empty when none).
+5. SUMMARY=$(${GL} summary --out "$OUT" 2>&1); VERDICT=$(${VERDICT_JEV ? 'GSTACK_VERDICT_PARSER=jev ' : ''}${GL} adjudicate --out "$OUT" --seat codex --gate-class ${GATE_CLASS} --reviewed-sha ${sha} --requested-model ${model} 2>/dev/null); RC=$?; CLASS = the class field of "$OUT.status.json" ("error" when missing); RESET = next_probe_at of l3 in ${RUN}/lanes.json (empty when none).
 6. ${GL} worktree rm --run-dir ${RUN} --task ${T} --force.
 Envelope: member=seat_x; requested_model=${model}; verdict_line=$VERDICT verbatim (or "VERDICT=ABSENT reason=no_verdict_line adjudicate_exit=$RC" when empty); summary_line=$SUMMARY verbatim; runtime_model and p1_count = the runtime_model= and p1_count= tokens of the VERDICT line; class=CLASS; reset_at=RESET; report=$OUT; p1=[] (the consolidator reads $OUT). Map RC: 0 -> status PRESENT, verdict PASS; 10 -> status PRESENT, verdict FAIL; 11 -> status INVALID, verdict INVALID; anything else -> status ABSENT, verdict ABSENT.`
 }
@@ -1350,6 +1373,7 @@ ${CI_SH}`
   const m = String(c.r.line || '').match(/^CI status=(READY|BLOCKED) head=([0-9a-f]{40}|none|invalid) reason=(ci:(?:pass|fail|pending|timeout|none)|head_moved|not_mergeable|api_error:[a-z0-9_]+) pass=(\d{1,4}) fail=(\d{1,4}) pending=(\d{1,4})$/)
   if (!m) return { status: 'BLOCKED', notes: 'the CI watcher did not report a CI line' }
   const r = { status: m[1], head: m[2], notes: m[3], checks: { pass: Number(m[4]), fail: Number(m[5]), pending: Number(m[6]) } }
+  if (VERDICT_JEV) r.parser = await shadowVerdict('ci-status', /^api_error:/.test(m[3]) ? 'api_error' : m[3].replace(/^ci:/, ''), { line: m[0], source: `${UNIT}-ci-${prNumber}` }, `verdict shadow CI #${prNumber}`, 'Ship')
   if (r.status === 'READY' && (r.head !== head || !['ci:pass', 'ci:none'].includes(r.notes))) return Object.assign(r, { status: 'BLOCKED', notes: `CI READY reported for head ${r.head} (${r.notes}), not a pass on the pushed ${head}` })
   if (/^api_error:/.test(r.notes)) r.failure_class = r.notes.slice(10)
   return r

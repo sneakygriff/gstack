@@ -37,7 +37,7 @@ async function run(body, extra) {
   const r = await new AF('args', 'agent', 'parallel', 'phase', 'log', body)(args, agent, async t => Promise.all(t.map(f => f())), () => {}, () => {})
   return { prompts, status: r.status }
 }
-export const OPTIONAL_ARGS = ['gateAttempt', 'context', 'gateFocus', 'dockerFocus', 'shipNotes', 'mergeNotes', 'shipExtra', 'shipAttempt', 'deltaKnown', 'privtest', 'synModel', 'deltaModel', 'shipModel']
+export const OPTIONAL_ARGS = ['gateAttempt', 'context', 'gateFocus', 'dockerFocus', 'shipNotes', 'mergeNotes', 'shipExtra', 'shipAttempt', 'deltaKnown', 'privtest', 'synModel', 'deltaModel', 'shipModel', 'verdictParser']
 export async function runStable(scriptPath = DEFAULT_SCRIPT) {
   const { body } = loadScript(scriptPath)
   const a = await run(body, {})

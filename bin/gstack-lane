@@ -1558,8 +1558,9 @@ function reviewText(lane, body) { // the review prose inside a published body (n
 function adjudicate() {
   const tok = (v) => (v === null || v === undefined || v === "" ? "null" : String(v).replace(/[^A-Za-z0-9._:\/@+-]/g, "_").slice(0, 128));
   const CODE = { PRESENT_CLEAN: 0, PRESENT_P1: 10, INVALID: 11, ABSENT: 12 };
+  let parserTag = ""; // " parser=shadow|fallback" with GSTACK_VERDICT_PARSER=jev, else nothing
   const say = (verdict, reason, p1, rm) => {
-    console.log(`VERDICT=${verdict} reason=${reason} p1_count=${p1} runtime_model=${tok(rm)}`);
+    console.log(`VERDICT=${verdict} reason=${reason} p1_count=${p1} runtime_model=${tok(rm)}${parserTag}`);
     process.exitCode = CODE[verdict];
   };
   let raw;
@@ -1594,12 +1595,22 @@ function adjudicate() {
   try { body = s.published === true ? fs.readFileSync(E.GL_OUT_REAL, "utf8") : null; } catch { body = null; }
   const text = body === null ? null : reviewText(lane, body);
   if (text === null || !text.trim()) return say("INVALID", "empty_body", 0, rm);
+  // lib/verdict-parser.ts, shadow only: Jev reads the content verdict below, and `regex` still decides. Off unless the flag is set.
+  const shadowVerdict = (regex) => {
+    if (E.GSTACK_VERDICT_PARSER !== "jev") return;
+    let parser = "fallback";
+    try {
+      const run = E.GL_OUT_REAL.match(/^(.*)\/attempts\/[^/]+\/[^/]+\/[^/]+$/);
+      parser = require(E.GL_VERDICT_PARSER).parseVerdict(text, "adjudicate", { regex, runDir: run ? run[1] : require("path").dirname(E.GL_OUT_REAL), source: E.GL_OUT_REAL }).parser;
+    } catch {}
+    parserTag = ` parser=${parser}`;
+  };
   // V4: a review only counts once it ATTESTS completion — its last non-empty line must be
   // `REVIEW_COMPLETE: findings=<n>`. "I could not review / no diff" prose has no marker.
   const lines = text.split(/\r?\n/);
   const lastLine = lines.filter((l) => l.trim()).pop() || "";
   const marker = lastLine.match(REVIEW_MARKER);
-  if (!marker) return say("INVALID", "no-completion-marker", 0, rm);
+  if (!marker) { shadowVerdict("INVALID"); return say("INVALID", "no-completion-marker", 0, rm); }
   const notes = [];
   if (seat === "codex") {
     if (!rm) return say("INVALID", "runtime_model_unverified", 0, rm);
@@ -1615,6 +1626,7 @@ function adjudicate() {
   const p1 = lines.filter((l) => P1_LINE.test(l)).length;
   if (Number(marker[1]) !== lines.filter((l) => FINDING_LINE.test(l)).length) notes.push("findings_count_mismatch");
   const reason = [p1 > 0 ? "p1_found" : "no_p1", ...notes].join(",");
+  shadowVerdict(p1 > 0 ? "PRESENT_P1" : "PRESENT_CLEAN");
   return say(p1 > 0 ? "PRESENT_P1" : "PRESENT_CLEAN", reason, p1, rm);
 }
 function summary() {
@@ -3394,7 +3406,8 @@ cmd_adjudicate() {
   uok=0
   if [ "$seat" = grok ] && _gl_grok_unsandboxed_ok; then uok=1; fi
   line="$(GL_STATUS_FILE="$real.status.json" GL_OUT_REAL="$real" GL_OUT_ATTEMPT="$seg" GL_SEAT="$seat" \
-          GL_GATE_CLASS="$gate" GL_REQ_MODEL="$req" GL_REVIEWED_SHA="$sha" GL_UNSANDBOXED_OK="$uok" _gl_js adjudicate 2>/dev/null)"
+          GL_GATE_CLASS="$gate" GL_REQ_MODEL="$req" GL_REVIEWED_SHA="$sha" GL_UNSANDBOXED_OK="$uok" \
+          GL_VERDICT_PARSER="$GL_BIN_DIR/../lib/verdict-parser.ts" _gl_js adjudicate 2>/dev/null)"
   rc=$?
   case "$rc:$line" in
     0:VERDICT=PRESENT_CLEAN\ *|10:VERDICT=PRESENT_P1\ *|11:VERDICT=INVALID\ *|12:VERDICT=ABSENT\ *) printf '%s\n' "$line"; exit "$rc" ;;

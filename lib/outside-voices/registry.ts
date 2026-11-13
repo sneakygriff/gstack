@@ -37,6 +37,8 @@
  * No external voice is default-on until the write-denial sandbox test passes.
  */
 
+import { parseVerdict } from '../verdict-parser';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Voice + vendor taxonomy
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +219,8 @@ export interface VoiceResult {
   isolation?: DegradedIsolation;
   /** Human-readable note explaining {@link isolation} (panel-stamped, from the registry). */
   isolation_note?: string;
+  /** Set only under GSTACK_VERDICT_PARSER=jev: Jev's shadow outcome. Never changes `verdict`. */
+  parser?: 'shadow' | 'fallback';
 }
 
 /** The one degraded isolation level a panel record can carry (see VoiceResult.isolation). */
@@ -1080,7 +1084,7 @@ export function parseVoiceResult(raw: string, opts?: ParseOptions): VoiceResult 
   // emitted (e.g. `isolation` / `isolation_note`, which only the PANEL may
   // stamp) is dropped here, so a voice can neither self-report nor suppress
   // its own isolation level.
-  return {
+  const result: VoiceResult = {
     schema: VOICE_SCHEMA_ID,
     voice,
     vendor,
@@ -1091,4 +1095,12 @@ export function parseVoiceResult(raw: string, opts?: ParseOptions): VoiceResult 
     cost_usd: toNullableNumber(obj.cost_usd),
     ...(reason !== undefined ? { reason } : {}),
   };
+  // Shadow only (lib/verdict-parser.ts), and only for a verdict that already passed the nonce
+  // check above. gstack-vote's re-parse (it passes a locationResolver) reads the panel's
+  // normalized record, not model output, so it is not asked about again.
+  if (verdict !== null && authRequired && !opts?.locationResolver) {
+    const { parser } = parseVerdict(raw, 'panel', { regex: verdict, source: voice });
+    if (parser !== 'regex') result.parser = parser;
+  }
+  return result;
 }
